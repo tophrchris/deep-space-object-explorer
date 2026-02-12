@@ -1,0 +1,10 @@
+streamlit>=1.40
+streamlit-autorefresh>=1.0
+pandas>=2.0
+numpy>=1.25
+plotly>=5.20
+astropy>=6.0
+astral>=3.2
+geopy>=2.4
+timezonefinder>=6.5
+requests>=2.31
