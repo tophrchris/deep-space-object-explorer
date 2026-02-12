@@ -14,13 +14,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 from astral import LocationInfo
 from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
+from streamlit_js_eval import get_geolocation
 from streamlit_autorefresh import st_autorefresh
 from timezonefinder import TimezoneFinder
 
@@ -57,7 +57,6 @@ STATE_PATH = Path(".state/preferences.json")
 CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
-GEO_QUERY_KEYS = ["geo_status", "geo_lat", "geo_lon", "geo_error", "geo_ts"]
 
 
 def default_preferences() -> dict[str, Any]:
@@ -532,106 +531,58 @@ def reverse_geocode_label(lat: float, lon: float) -> str:
         return f"{lat:.4f}, {lon:.4f}"
 
 
-def query_param_value(key: str) -> str:
-    raw = st.query_params.get(key)
-    if raw is None:
-        return ""
-    if isinstance(raw, list):
-        return str(raw[0]) if raw else ""
-    return str(raw)
-
-
-def clear_geo_query_params() -> None:
-    for key in GEO_QUERY_KEYS:
-        if key in st.query_params:
-            del st.query_params[key]
-
-
-def apply_browser_location_from_query(prefs: dict[str, Any]) -> bool:
-    status = query_param_value("geo_status").strip().lower()
-    if not status:
-        return False
-
+def apply_browser_geolocation_payload(prefs: dict[str, Any], payload: Any) -> None:
     try:
-        if status == "ok":
-            lat = float(query_param_value("geo_lat"))
-            lon = float(query_param_value("geo_lon"))
-            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-                raise ValueError("Coordinates out of range")
+        if isinstance(payload, dict):
+            coords = payload.get("coords")
+            if isinstance(coords, dict):
+                lat = float(coords.get("latitude"))
+                lon = float(coords.get("longitude"))
+                if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                    raise ValueError("Coordinates out of range")
 
-            prefs["location"] = {
-                "lat": lat,
-                "lon": lon,
-                "label": reverse_geocode_label(lat, lon),
-                "source": "browser",
-                "resolved_at": datetime.now(timezone.utc).isoformat(),
-            }
-            st.session_state["prefs"] = prefs
-            save_preferences(prefs)
-            st.session_state["location_notice"] = "Browser geolocation applied."
-        elif status in {"denied", "unavailable"}:
-            st.session_state["location_notice"] = (
-                "Location permission denied/unavailable - keeping previous location."
-            )
-        else:
-            st.session_state["location_notice"] = (
-                "Could not read browser geolocation response - keeping previous location."
-            )
+                prefs["location"] = {
+                    "lat": lat,
+                    "lon": lon,
+                    "label": reverse_geocode_label(lat, lon),
+                    "source": "browser",
+                    "resolved_at": datetime.now(timezone.utc).isoformat(),
+                }
+                st.session_state["prefs"] = prefs
+                save_preferences(prefs)
+                st.session_state["location_notice"] = "Browser geolocation applied."
+                return
+
+            error = payload.get("error")
+            if isinstance(error, dict):
+                code = str(error.get("code", "")).strip()
+                if code == "1":
+                    st.session_state["location_notice"] = (
+                        "Location permission denied - keeping previous location."
+                    )
+                elif code == "2":
+                    st.session_state["location_notice"] = (
+                        "Location unavailable - keeping previous location."
+                    )
+                elif code == "3":
+                    st.session_state["location_notice"] = (
+                        "Location request timed out - keeping previous location."
+                    )
+                else:
+                    message = str(error.get("message", "")).strip()
+                    detail = f": {message}" if message else "."
+                    st.session_state["location_notice"] = (
+                        f"Could not resolve browser geolocation{detail} Keeping previous location."
+                    )
+                return
     except Exception:
         st.session_state["location_notice"] = (
             "Could not parse browser geolocation - keeping previous location."
         )
-    finally:
-        clear_geo_query_params()
+        return
 
-    return True
-
-
-def render_browser_geolocation_request() -> None:
-    components.html(
-        """
-        <script>
-        (function () {
-          const parentUrl = new URL(window.parent.location.href);
-          const params = parentUrl.searchParams;
-
-          function commit(status, lat, lon, errorCode) {
-            params.set("geo_status", status);
-            params.set("geo_ts", String(Date.now()));
-            if (lat !== null && lon !== null) {
-              params.set("geo_lat", String(lat));
-              params.set("geo_lon", String(lon));
-            } else {
-              params.delete("geo_lat");
-              params.delete("geo_lon");
-            }
-            if (errorCode) {
-              params.set("geo_error", String(errorCode));
-            } else {
-              params.delete("geo_error");
-            }
-            window.parent.location.search = params.toString();
-          }
-
-          if (!navigator.geolocation) {
-            commit("unavailable", null, null, "unsupported");
-            return;
-          }
-
-          navigator.geolocation.getCurrentPosition(
-            function (position) {
-              commit("ok", position.coords.latitude, position.coords.longitude, "");
-            },
-            function (error) {
-              commit("denied", null, null, error ? error.code : "unknown");
-            },
-            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-          );
-        })();
-        </script>
-        <div style="font-family: sans-serif; font-size: 0.9rem;">Requesting browser geolocation permission...</div>
-        """,
-        height=72,
+    st.session_state["location_notice"] = (
+        "Could not read browser geolocation response - keeping previous location."
     )
 
 
@@ -768,10 +719,17 @@ def render_sidebar(catalog: pd.DataFrame, catalog_meta: dict[str, Any], prefs: d
 
         if st.button("Use browser location (permission)", use_container_width=True):
             st.session_state["request_browser_geo"] = True
+            st.session_state["browser_geo_request_id"] = int(st.session_state.get("browser_geo_request_id", 0)) + 1
 
         if st.session_state.get("request_browser_geo"):
-            render_browser_geolocation_request()
-            st.session_state["request_browser_geo"] = False
+            request_id = int(st.session_state.get("browser_geo_request_id", 1))
+            geolocation_payload = get_geolocation(component_key=f"browser_geo_request_{request_id}")
+            if geolocation_payload is None:
+                st.caption("Requesting browser geolocation permission...")
+            else:
+                apply_browser_geolocation_payload(prefs, geolocation_payload)
+                st.session_state["request_browser_geo"] = False
+                st.rerun()
 
         if st.button("Use my location (IP fallback)", use_container_width=True):
             resolved = approximate_location_from_ip()
@@ -1018,9 +976,6 @@ def main() -> None:
 
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
-
-    if apply_browser_location_from_query(prefs):
-        st.rerun()
 
     force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
     catalog, catalog_meta = load_catalog(force_refresh=force_catalog_refresh)
