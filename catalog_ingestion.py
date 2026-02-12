@@ -30,9 +30,14 @@ OPTIONAL_COLUMNS = [
 ]
 
 CATALOG_CACHE_MAX_AGE_HOURS = 24
-INGESTION_VERSION = 2
+INGESTION_VERSION = 3
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
+SIMBAD_TAP_SYNC_ENDPOINTS = [
+    "https://simbad.cds.unistra.fr/simbad/sim-tap/sync",
+    "https://simbad.u-strasbg.fr/simbad/sim-tap/sync",
+]
+SIMBAD_TIMEOUT_SECONDS = 90
 
 OPENNGC_TYPE_MAP = {
     "*": "Star",
@@ -56,6 +61,25 @@ OPENNGC_TYPE_MAP = {
     "RfN": "Reflection Nebula",
     "SNR": "Supernova Remnant",
 }
+
+
+def _merge_alias_values(existing: str, additions: list[str]) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    for value in str(existing).split(";"):
+        cleaned = value.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            merged.append(cleaned)
+
+    for value in additions:
+        cleaned = str(value).strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            merged.append(cleaned)
+
+    return ";".join(merged)
 
 
 def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -225,6 +249,226 @@ def _parse_radec(ra_raw: str, dec_raw: str) -> tuple[float, float] | None:
         return None
 
 
+def _query_simbad_tap(query: str) -> pd.DataFrame:
+    payload = {
+        "request": "doQuery",
+        "lang": "adql",
+        "format": "csv",
+        "query": query,
+    }
+
+    last_error: Exception | None = None
+    for endpoint in SIMBAD_TAP_SYNC_ENDPOINTS:
+        try:
+            response = requests.post(endpoint, data=payload, timeout=SIMBAD_TIMEOUT_SECONDS)
+            response.raise_for_status()
+
+            content_type = str(response.headers.get("content-type", "")).lower()
+            body = response.text
+            if "text/xml" in content_type or body.lstrip().startswith("<?xml"):
+                raise ValueError("SIMBAD TAP returned XML instead of CSV")
+
+            frame = pd.read_csv(io.StringIO(body))
+            frame.columns = [str(column).strip().lower() for column in frame.columns]
+            return frame.fillna("")
+        except Exception as error:
+            last_error = error
+            continue
+
+    if last_error is None:
+        raise RuntimeError("SIMBAD TAP query failed without explicit error")
+    raise RuntimeError(f"SIMBAD TAP query failed: {last_error.__class__.__name__}") from last_error
+
+
+def _canonical_primary_id_from_simbad_identifier(raw_identifier: str) -> str | None:
+    compact = " ".join(str(raw_identifier).strip().split()).upper()
+    if not compact:
+        return None
+
+    messier_match = re.match(r"^M\s*0*([0-9]+)$", compact)
+    if messier_match:
+        return f"M{int(messier_match.group(1))}"
+
+    ngc_match = re.match(r"^NGC\s*0*([0-9]+)\s*([A-Z]*)$", compact)
+    if ngc_match:
+        ngc_number = str(int(ngc_match.group(1)))
+        suffix = str(ngc_match.group(2)).strip()
+        if suffix:
+            return f"NGC {ngc_number} {suffix}"
+        return f"NGC {ngc_number}"
+
+    sh2_match = re.match(r"^SH\s*2[-\s]*0*([0-9]+)\s*([A-Z]*)$", compact)
+    if sh2_match:
+        sh2_number = str(int(sh2_match.group(1)))
+        suffix = str(sh2_match.group(2)).strip()
+        if suffix:
+            return f"Sh2-{sh2_number}{suffix}"
+        return f"Sh2-{sh2_number}"
+
+    return None
+
+
+def ingest_sh2_from_simbad() -> pd.DataFrame:
+    query = """
+        SELECT
+            id AS identifier,
+            basic.main_id AS main_id,
+            basic.ra AS ra_deg,
+            basic.dec AS dec_deg,
+            basic.otype AS object_type
+        FROM ident
+        JOIN basic ON ident.oidref = basic.oid
+        WHERE
+            UPPER(id) LIKE 'SH2-%'
+            OR UPPER(id) LIKE 'SH 2-%'
+            OR UPPER(id) LIKE 'SH2 %'
+            OR UPPER(id) LIKE 'SH 2 %'
+    """
+    source = _query_simbad_tap(query)
+    if source.empty:
+        raise ValueError("SIMBAD SH2 query returned zero rows")
+
+    required = {"identifier", "main_id", "ra_deg", "dec_deg", "object_type"}
+    missing_columns = required - set(source.columns)
+    if missing_columns:
+        missing_list = ", ".join(sorted(missing_columns))
+        raise ValueError(f"SIMBAD SH2 query missing columns: {missing_list}")
+
+    records: dict[str, dict[str, Any]] = {}
+    for _, row in source.iterrows():
+        primary_id = _canonical_primary_id_from_simbad_identifier(str(row["identifier"]))
+        if primary_id is None or not primary_id.startswith("Sh2-"):
+            continue
+
+        if primary_id not in records:
+            records[primary_id] = {
+                "primary_id": primary_id,
+                "catalog": "SH2",
+                "common_name": "",
+                "object_type": str(row.get("object_type", "")).strip(),
+                "ra_deg": row.get("ra_deg", ""),
+                "dec_deg": row.get("dec_deg", ""),
+                "constellation": "",
+                "aliases": "",
+                "image_url": "",
+                "image_attribution_url": "",
+                "license_label": "",
+            }
+
+        identifier = str(row.get("identifier", "")).strip()
+        main_id = str(row.get("main_id", "")).strip()
+        alias_candidates = [identifier]
+        if main_id and main_id != primary_id:
+            alias_candidates.append(main_id)
+
+        entry = records[primary_id]
+        entry["aliases"] = _merge_alias_values(str(entry.get("aliases", "")), alias_candidates)
+        if not entry["common_name"] and main_id and main_id != primary_id:
+            entry["common_name"] = main_id
+
+    if not records:
+        raise ValueError("SIMBAD SH2 query could not map any rows to Sh2 identifiers")
+
+    frame = pd.DataFrame.from_records(records.values())
+    return _normalize_frame(frame)
+
+
+def build_simbad_m_ngc_reference() -> pd.DataFrame:
+    query = """
+        SELECT
+            id AS identifier,
+            basic.main_id AS main_id,
+            basic.otype AS object_type
+        FROM ident
+        JOIN basic ON ident.oidref = basic.oid
+        WHERE
+            UPPER(id) LIKE 'M %'
+            OR UPPER(id) LIKE 'NGC %'
+    """
+    source = _query_simbad_tap(query)
+    if source.empty:
+        raise ValueError("SIMBAD M/NGC enrichment query returned zero rows")
+
+    required = {"identifier", "main_id", "object_type"}
+    missing_columns = required - set(source.columns)
+    if missing_columns:
+        missing_list = ", ".join(sorted(missing_columns))
+        raise ValueError(f"SIMBAD M/NGC query missing columns: {missing_list}")
+
+    records: dict[str, dict[str, Any]] = {}
+    for _, row in source.iterrows():
+        identifier = str(row.get("identifier", "")).strip()
+        primary_id = _canonical_primary_id_from_simbad_identifier(identifier)
+        if primary_id is None or not (primary_id.startswith("M") or primary_id.startswith("NGC ")):
+            continue
+
+        if primary_id not in records:
+            records[primary_id] = {
+                "primary_id": primary_id,
+                "main_id": str(row.get("main_id", "")).strip(),
+                "object_type": str(row.get("object_type", "")).strip(),
+                "aliases": "",
+            }
+
+        entry = records[primary_id]
+        main_id = str(row.get("main_id", "")).strip()
+        entry["aliases"] = _merge_alias_values(
+            str(entry.get("aliases", "")),
+            [identifier, main_id],
+        )
+        if not entry["main_id"] and main_id:
+            entry["main_id"] = main_id
+        if not entry["object_type"] and str(row.get("object_type", "")).strip():
+            entry["object_type"] = str(row.get("object_type", "")).strip()
+
+    if not records:
+        raise ValueError("SIMBAD M/NGC enrichment query did not yield mappable identifiers")
+
+    return pd.DataFrame.from_records(records.values())
+
+
+def enrich_with_simbad_m_ngc(frame: pd.DataFrame, simbad_reference: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    if frame.empty or simbad_reference.empty:
+        return frame, 0
+
+    indexed = simbad_reference.set_index("primary_id")
+    enriched = frame.copy()
+    updated_rows = 0
+
+    for idx, row in enriched.iterrows():
+        primary_id = str(row.get("primary_id", ""))
+        catalog = str(row.get("catalog", "")).upper()
+        if catalog not in {"M", "NGC"} or primary_id not in indexed.index:
+            continue
+
+        simbad_row = indexed.loc[primary_id]
+        changed = False
+
+        main_id = str(simbad_row.get("main_id", "")).strip()
+        if not str(row.get("common_name", "")).strip() and main_id and main_id != primary_id:
+            enriched.at[idx, "common_name"] = main_id
+            changed = True
+
+        simbad_object_type = str(simbad_row.get("object_type", "")).strip()
+        existing_object_type = str(row.get("object_type", "")).strip()
+        if (not existing_object_type or existing_object_type.lower() in {"other", "-"}) and simbad_object_type:
+            enriched.at[idx, "object_type"] = simbad_object_type
+            changed = True
+
+        merged_aliases = _merge_alias_values(
+            str(row.get("aliases", "")),
+            [alias for alias in str(simbad_row.get("aliases", "")).split(";") if str(alias).strip()],
+        )
+        if merged_aliases != str(row.get("aliases", "")):
+            enriched.at[idx, "aliases"] = merged_aliases
+            changed = True
+
+        if changed:
+            updated_rows += 1
+
+    return _normalize_frame(enriched), int(updated_rows)
+
+
 def ingest_from_seed(seed_path: Path) -> pd.DataFrame:
     if not seed_path.exists():
         raise FileNotFoundError(f"Catalog seed file not found: {seed_path}")
@@ -353,19 +597,40 @@ def load_unified_catalog(
             pass
 
     notes: list[str] = []
+    source_parts: list[str] = []
+    simbad_metadata: dict[str, Any] = {}
 
     try:
         frame = ingest_from_openngc()
         load_mode = "openngc_ingest"
-        source = OPENNGC_SOURCE_URL
+        source_parts.append(OPENNGC_SOURCE_URL)
     except Exception as error:
         frame = ingest_from_seed(seed_path)
         load_mode = "seed_fallback"
-        source = str(seed_path)
+        source_parts.append(str(seed_path))
         notes.append(f"OpenNGC ingest failed: {error.__class__.__name__}")
 
-    sh2_frame = ingest_sh2_from_seed(seed_path)
+    try:
+        sh2_frame = ingest_sh2_from_simbad()
+        source_parts.append("SIMBAD SH2 (sim-tap)")
+        simbad_metadata["sh2_source"] = "simbad"
+        simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+    except Exception as error:
+        sh2_frame = ingest_sh2_from_seed(seed_path)
+        simbad_metadata["sh2_source"] = "seed_fallback"
+        simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+        notes.append(f"SIMBAD SH2 ingest failed: {error.__class__.__name__}")
+
     frame = merge_catalogs(frame, sh2_frame)
+
+    try:
+        simbad_reference = build_simbad_m_ngc_reference()
+        frame, enriched_count = enrich_with_simbad_m_ngc(frame, simbad_reference)
+        source_parts.append("SIMBAD M/NGC enrichment (sim-tap)")
+        simbad_metadata["m_ngc_enriched_rows"] = int(enriched_count)
+    except Exception as error:
+        simbad_metadata["m_ngc_enriched_rows"] = 0
+        notes.append(f"SIMBAD M/NGC enrichment failed: {error.__class__.__name__}")
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(cache_path, index=False)
@@ -373,12 +638,13 @@ def load_unified_catalog(
     metadata = {
         "ingestion_version": INGESTION_VERSION,
         "load_mode": load_mode,
-        "source": source,
+        "source": " | ".join(source_parts),
         "cache": str(cache_path),
         "loaded_at_utc": datetime.now(timezone.utc).isoformat(),
         "row_count": int(len(frame)),
         "catalog_counts": {str(key): int(value) for key, value in frame["catalog"].value_counts().to_dict().items()},
         "cache_max_age_hours": int(max_cache_age_hours),
+        "simbad": simbad_metadata,
     }
 
     if notes:
