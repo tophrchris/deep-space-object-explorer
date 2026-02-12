@@ -462,7 +462,14 @@ def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], ob
     fig.update_layout(
         title="Sky Position",
         height=330,
-        margin={"l": 10, "r": 10, "t": 35, "b": 10},
+        margin={"l": 10, "r": 10, "t": 70, "b": 10},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0.0,
+        },
         xaxis_title="Azimuth",
         yaxis_title="Altitude (deg)",
     )
@@ -557,7 +564,14 @@ def build_path_plot_radial(
     fig.update_layout(
         title="Sky Position",
         height=330,
-        margin={"l": 10, "r": 10, "t": 35, "b": 10},
+        margin={"l": 10, "r": 10, "t": 70, "b": 10},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0.0,
+        },
         polar={
             "angularaxis": {
                 "rotation": 90,
@@ -702,8 +716,15 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float],
     fig.update_layout(
         title="Hourly forecast",
         height=300,
-        margin={"l": 10, "r": 10, "t": 35, "b": 10},
+        margin={"l": 10, "r": 10, "t": 70, "b": 10},
         barmode="stack",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0.0,
+        },
         xaxis_title="Hour",
         yaxis_title="Altitude (deg)",
     )
@@ -1019,9 +1040,28 @@ def render_target_table(
     return None
 
 
-def render_main_tabs(results: pd.DataFrame, favorites: pd.DataFrame, set_list: pd.DataFrame, prefs: dict[str, Any]) -> None:
+def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
     with st.container(border=True):
         st.subheader("Targets")
+        query = st.text_input(
+            "Search (M / NGC / IC / Sh2 + common names)",
+            placeholder="M31, NGC 7000, IC1805, Sh2-132, Orion Nebula",
+            key="targets_search_query",
+        )
+        location = prefs["location"]
+        filtered = search_catalog(catalog, query)
+        results = compute_altaz_now(filtered, lat=float(location["lat"]), lon=float(location["lon"]))
+        favorites = compute_altaz_now(
+            subset_by_id_list(catalog, prefs["favorites"]),
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+        )
+        set_list = compute_altaz_now(
+            subset_by_id_list(catalog, prefs["set_list"]),
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+        )
+
         tab_results, tab_favorites, tab_set_list = st.tabs(
             [
                 f"Results ({len(results)})",
@@ -1262,16 +1302,21 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], tempe
                 st.info("No free-use image found for this target.")
 
         with image_cols[1]:
-            st.markdown(
-                "\n".join(
-                    [
-                        f"**RA / Dec:** {float(selected['ra_deg']):.4f} deg / {float(selected['dec_deg']):.4f} deg",
-                        f"**Constellation:** {selected.get('constellation') or '-'}",
-                        f"**Alt / Az (now):** {float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
-                        f"**16-wind:** {selected['wind16']}",
-                    ]
-                )
+            property_rows = pd.DataFrame(
+                [
+                    {
+                        "Property": "RA / Dec",
+                        "Value": f"{float(selected['ra_deg']):.4f} deg / {float(selected['dec_deg']):.4f} deg",
+                    },
+                    {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
+                    {
+                        "Property": "Alt / Az (now)",
+                        "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
+                    },
+                    {"Property": "16-wind", "Value": str(selected["wind16"])},
+                ]
             )
+            st.dataframe(property_rows, hide_index=True, use_container_width=True, height=180)
 
         location = prefs["location"]
         window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
@@ -1296,10 +1341,10 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], tempe
             "Sky Position Style",
             options=["Line", "Radial"],
             default="Line",
-            key=f"path_style_{target_id}",
+            key="path_style_preference",
         )
         if path_style == "Radial":
-            dome_view = st.toggle("Dome View", value=True, key="dome_view_enabled")
+            dome_view = st.toggle("Dome View", value=True, key="dome_view_preference")
             path_figure = build_path_plot_radial(
                 track=track,
                 events=events,
@@ -1368,29 +1413,10 @@ def main() -> None:
     )
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
 
-    query = st.text_input(
-        "Search (M / NGC / IC / Sh2 + common names)",
-        placeholder="M31, NGC 7000, IC1805, Sh2-132, Orion Nebula",
-    )
-
-    filtered = search_catalog(catalog, query)
-    location = prefs["location"]
-    results_enriched = compute_altaz_now(filtered, lat=float(location["lat"]), lon=float(location["lon"]))
-    favorites_enriched = compute_altaz_now(
-        subset_by_id_list(catalog, prefs["favorites"]),
-        lat=float(location["lat"]),
-        lon=float(location["lon"]),
-    )
-    set_list_enriched = compute_altaz_now(
-        subset_by_id_list(catalog, prefs["set_list"]),
-        lat=float(location["lat"]),
-        lon=float(location["lon"]),
-    )
-
     use_phone_layout = st.toggle("Phone layout preview", value=False)
 
     if use_phone_layout:
-        render_main_tabs(results_enriched, favorites_enriched, set_list_enriched, prefs)
+        render_main_tabs(catalog, prefs)
         selected_row = resolve_selected_row(catalog, prefs)
         with st.container(border=True):
             st.markdown("### Detail bottom sheet")
@@ -1400,9 +1426,9 @@ def main() -> None:
                 temperature_unit=effective_temperature_unit,
             )
     else:
-        result_col, detail_col = st.columns([1.1, 1])
+        result_col, detail_col = st.columns([35, 65])
         with result_col:
-            render_main_tabs(results_enriched, favorites_enriched, set_list_enriched, prefs)
+            render_main_tabs(catalog, prefs)
 
         selected_row = resolve_selected_row(catalog, prefs)
         with detail_col:
