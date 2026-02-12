@@ -206,7 +206,11 @@ def search_catalog(df: pd.DataFrame, query: str) -> pd.DataFrame:
 
 def compute_altaz_now(targets: pd.DataFrame, lat: float, lon: float) -> pd.DataFrame:
     if targets.empty:
-        return targets
+        enriched = targets.copy()
+        enriched["alt_now"] = pd.Series(dtype=float)
+        enriched["az_now"] = pd.Series(dtype=float)
+        enriched["wind16"] = pd.Series(dtype=str)
+        return enriched
 
     location = EarthLocation(lat=lat * u.deg, lon=lon * u.deg)
     obstime = Time(datetime.now(timezone.utc))
