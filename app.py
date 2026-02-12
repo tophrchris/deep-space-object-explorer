@@ -20,7 +20,7 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
-from streamlit_js_eval import get_geolocation
+from streamlit_js_eval import get_browser_language, get_geolocation
 from streamlit_autorefresh import st_autorefresh
 from timezonefinder import TimezoneFinder
 
@@ -58,6 +58,13 @@ CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
 
+TEMPERATURE_UNIT_OPTIONS = {
+    "Auto (browser)": "auto",
+    "Fahrenheit": "f",
+    "Celsius": "c",
+}
+FAHRENHEIT_COUNTRY_CODES = {"US", "BS", "BZ", "KY", "PW", "FM", "MH", "LR"}
+
 
 def default_preferences() -> dict[str, Any]:
     return {
@@ -65,6 +72,7 @@ def default_preferences() -> dict[str, Any]:
         "set_list": [],
         "obstructions": {direction: 20.0 for direction in WIND16},
         "location": copy.deepcopy(DEFAULT_LOCATION),
+        "temperature_unit": "auto",
     }
 
 
@@ -73,6 +81,8 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw, dict):
         prefs["favorites"] = [str(x) for x in raw.get("favorites", []) if str(x).strip()]
         prefs["set_list"] = [str(x) for x in raw.get("set_list", []) if str(x).strip()]
+        temp_unit = str(raw.get("temperature_unit", "auto")).strip().lower()
+        prefs["temperature_unit"] = temp_unit if temp_unit in {"auto", "f", "c"} else "auto"
 
         obs = raw.get("obstructions", {})
         if isinstance(obs, dict):
@@ -118,6 +128,42 @@ def normalize_text(value: str | None) -> str:
     if value is None:
         return ""
     return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def infer_temperature_unit_from_locale(locale_value: str | None) -> str:
+    if not locale_value:
+        return "f"
+
+    normalized = str(locale_value).replace("-", "_")
+    parts = [part for part in normalized.split("_") if part]
+    country = ""
+    if len(parts) >= 2:
+        candidate = parts[-1].upper()
+        if len(candidate) == 2 and candidate.isalpha():
+            country = candidate
+
+    if country in FAHRENHEIT_COUNTRY_CODES:
+        return "f"
+    return "c"
+
+
+def resolve_temperature_unit(preference: str, locale_value: str | None) -> str:
+    pref = str(preference).strip().lower()
+    if pref == "f":
+        return "f"
+    if pref == "c":
+        return "c"
+    return infer_temperature_unit_from_locale(locale_value)
+
+
+def format_temperature(temp_celsius: float | None, unit: str) -> str:
+    if temp_celsius is None or pd.isna(temp_celsius):
+        return "-"
+
+    if unit == "f":
+        converted = (float(temp_celsius) * 9.0 / 5.0) + 32.0
+        return f"{converted:.0f} F"
+    return f"{float(temp_celsius):.0f} C"
 
 
 def canonicalize_designation(query: str) -> str:
@@ -373,6 +419,7 @@ def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], ob
         )
 
     fig.update_layout(
+        title="Sky Position",
         height=330,
         margin={"l": 10, "r": 10, "t": 35, "b": 10},
         xaxis_title="Azimuth",
@@ -380,6 +427,95 @@ def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], ob
     )
     fig.update_xaxes(tickvals=[i * 22.5 for i in range(16)], ticktext=WIND16, range=[0, 360])
     fig.update_yaxes(range=[0, 90])
+    return fig
+
+
+def build_path_plot_radial(
+    track: pd.DataFrame, events: dict[str, pd.Series | None], obstructions: dict[str, float]
+) -> go.Figure:
+    fig = go.Figure()
+
+    obstruction_theta = [wind_bin_center(direction) for direction in WIND16] + [360.0]
+    obstruction_alt = [obstructions.get(direction, 20.0) for direction in WIND16]
+    obstruction_alt.append(obstruction_alt[0])
+    obstruction_r = [90.0 - float(value) for value in obstruction_alt]
+    horizon_r = [90.0 for _ in obstruction_theta]
+
+    fig.add_trace(
+        go.Scatterpolar(
+            theta=obstruction_theta,
+            r=obstruction_r,
+            mode="lines",
+            line={"width": 0},
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatterpolar(
+            theta=obstruction_theta,
+            r=horizon_r,
+            mode="lines",
+            name="Obstructed region",
+            line={"width": 0},
+            fill="tonext",
+            fillcolor="rgba(239, 68, 68, 0.20)",
+            hoverinfo="skip",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatterpolar(
+            theta=track["az"],
+            r=(90.0 - track["alt"]).clip(lower=0.0, upper=90.0),
+            mode="lines",
+            name="Altitude path",
+            line={"width": 3},
+            customdata=np.stack(
+                [track["time_local"].dt.strftime("%H:%M"), track["wind16"], track["min_alt_required"], track["alt"]],
+                axis=-1,
+            ),
+            hovertemplate="Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[0]}<br>Dir %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
+        )
+    )
+
+    for event_name, event in events.items():
+        if event is None:
+            continue
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[event["az"]],
+                r=[max(0.0, min(90.0, 90.0 - float(event["alt"])))],
+                mode="markers+text",
+                text=[event_name.replace("_", " ").title()],
+                textposition="top center",
+                marker={"size": 9},
+                showlegend=False,
+                hovertemplate=f"{event_name.replace('_', ' ').title()} at {pd.Timestamp(event['time_local']).strftime('%H:%M')}<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        title="Sky Position",
+        height=330,
+        margin={"l": 10, "r": 10, "t": 35, "b": 10},
+        polar={
+            "angularaxis": {
+                "rotation": 90,
+                "direction": "clockwise",
+                "tickmode": "array",
+                "tickvals": [i * 22.5 for i in range(16)],
+                "ticktext": WIND16,
+            },
+            "radialaxis": {
+                "range": [0, 90],
+                "tickmode": "array",
+                "tickvals": [0, 30, 60, 90],
+                "ticktext": ["90", "60", "30", "0"],
+                "title": "Altitude (deg)",
+            },
+        },
+    )
     return fig
 
 
@@ -421,7 +557,7 @@ def fetch_hourly_temperatures(
         return {}
 
 
-def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float]) -> go.Figure:
+def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float], temperature_unit: str) -> go.Figure:
     if track.empty:
         return go.Figure()
 
@@ -449,7 +585,7 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float])
 
     labels = []
     for _, row in frame.iterrows():
-        temp_str = "-" if pd.isna(row["temp"]) else f"{row['temp']:.0f} C"
+        temp_str = format_temperature(row["temp"], temperature_unit)
         labels.append(f"{row['wind16']}<br>{temp_str}")
 
     fig = go.Figure(
@@ -465,6 +601,7 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float])
         ]
     )
     fig.update_layout(
+        title="Hourly forecast",
         height=300,
         margin={"l": 10, "r": 10, "t": 35, "b": 10},
         xaxis_title="Hour",
@@ -861,7 +998,7 @@ def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Ser
     return enriched.iloc[0]
 
 
-def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any]) -> None:
+def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
     with st.sidebar:
         st.header("Controls")
 
@@ -905,6 +1042,27 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any]) -> None:
             else:
                 st.warning("Location unavailable - keeping previous location.")
 
+        st.subheader("Display")
+        labels = list(TEMPERATURE_UNIT_OPTIONS.keys())
+        reverse_options = {value: label for label, value in TEMPERATURE_UNIT_OPTIONS.items()}
+        current_pref = str(prefs.get("temperature_unit", "auto")).lower()
+        if current_pref not in reverse_options:
+            current_pref = "auto"
+        selected_label = st.selectbox(
+            "Temperature units",
+            options=labels,
+            index=labels.index(reverse_options[current_pref]),
+            key="temperature_unit_preference",
+        )
+        selected_pref = TEMPERATURE_UNIT_OPTIONS[selected_label]
+        if selected_pref != current_pref:
+            prefs["temperature_unit"] = selected_pref
+            persist_and_rerun(prefs)
+
+        effective_unit = resolve_temperature_unit(selected_pref, browser_locale)
+        source_note = "browser locale" if selected_pref == "auto" else "manual setting"
+        st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
+
         st.subheader("Catalog Ingestion")
         st.caption(
             f"Rows: {int(catalog_meta.get('row_count', 0))} | "
@@ -946,7 +1104,7 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any]) -> None:
             save_preferences(prefs)
 
 
-def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any]) -> None:
+def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], temperature_unit: str) -> None:
     with st.container(border=True):
         st.subheader("Detail")
 
@@ -1033,8 +1191,19 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any]) -> No
             f"Culmination {format_time(events['culmination'])} | Last-visible {format_time(events['last_visible'])}"
         )
 
+        path_style = st.radio(
+            "Sky Position Style",
+            options=["Line", "Radial"],
+            horizontal=True,
+            key=f"path_style_{target_id}",
+        )
+        if path_style == "Radial":
+            path_figure = build_path_plot_radial(track=track, events=events, obstructions=prefs["obstructions"])
+        else:
+            path_figure = build_path_plot(track=track, events=events, obstructions=prefs["obstructions"])
+
         st.plotly_chart(
-            build_path_plot(track=track, events=events, obstructions=prefs["obstructions"]),
+            path_figure,
             use_container_width=True,
         )
 
@@ -1045,7 +1214,10 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any]) -> No
             start_local_iso=window_start.isoformat(),
             end_local_iso=window_end.isoformat(),
         )
-        st.plotly_chart(build_night_plot(track=track, temperature_by_hour=temperatures), use_container_width=True)
+        st.plotly_chart(
+            build_night_plot(track=track, temperature_by_hour=temperatures, temperature_unit=temperature_unit),
+            use_container_width=True,
+        )
 
 
 def main() -> None:
@@ -1057,10 +1229,19 @@ def main() -> None:
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
 
+    browser_language_raw = get_browser_language(component_key="browser_language_pref")
+    if isinstance(browser_language_raw, str) and browser_language_raw.strip():
+        st.session_state["browser_language"] = browser_language_raw.strip()
+    browser_language = st.session_state.get("browser_language")
+    effective_temperature_unit = resolve_temperature_unit(
+        str(prefs.get("temperature_unit", "auto")),
+        browser_language,
+    )
+
     force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
     catalog, catalog_meta = load_catalog(force_refresh=force_catalog_refresh)
     sanitize_saved_lists(catalog=catalog, prefs=prefs)
-    render_sidebar(catalog_meta=catalog_meta, prefs=prefs)
+    render_sidebar(catalog_meta=catalog_meta, prefs=prefs, browser_locale=browser_language)
 
     now_utc = datetime.now(timezone.utc)
     st.markdown(
@@ -1106,7 +1287,11 @@ def main() -> None:
         selected_row = resolve_selected_row(catalog, prefs)
         with st.container(border=True):
             st.markdown("### Detail bottom sheet")
-            render_detail_panel(selected=selected_row, prefs=prefs)
+            render_detail_panel(
+                selected=selected_row,
+                prefs=prefs,
+                temperature_unit=effective_temperature_unit,
+            )
     else:
         result_col, detail_col = st.columns([1.1, 1])
         with result_col:
@@ -1114,7 +1299,11 @@ def main() -> None:
 
         selected_row = resolve_selected_row(catalog, prefs)
         with detail_col:
-            render_detail_panel(selected=selected_row, prefs=prefs)
+            render_detail_panel(
+                selected=selected_row,
+                prefs=prefs,
+                temperature_unit=effective_temperature_unit,
+            )
 
 
 if __name__ == "__main__":
