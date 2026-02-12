@@ -9,6 +9,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - Location controls (default Princeton, manual geocode, browser geolocation permission flow, IP fallback)
 - 16-bin obstruction editor (default 20 deg)
 - Favorites and Set List with browser-local persistence (per user/device)
+- Settings export/import via JSON for backup or migration to another machine
 - Catalog ingestion module with normalized schema + disk cache + metadata
 - Target detail panel with:
   - Object metadata

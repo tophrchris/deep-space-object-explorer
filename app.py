@@ -59,6 +59,7 @@ CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
 BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v1"
+SETTINGS_EXPORT_FORMAT_VERSION = 1
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -146,6 +147,33 @@ def save_preferences(prefs: dict[str, Any]) -> bool:
             "Browser-local preference storage is unavailable. Using session-only preferences."
         )
         return False
+
+
+def build_settings_export_payload(prefs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "format": "dso_explorer_settings",
+        "version": SETTINGS_EXPORT_FORMAT_VERSION,
+        "exported_at_utc": datetime.now(timezone.utc).isoformat(),
+        "preferences": ensure_preferences_shape(prefs),
+    }
+
+
+def parse_settings_import_payload(raw_text: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    candidate = payload
+    if isinstance(payload.get("preferences"), dict):
+        candidate = payload["preferences"]
+
+    if not isinstance(candidate, dict):
+        return None
+    return ensure_preferences_shape(candidate)
 
 
 def persist_and_rerun(prefs: dict[str, Any]) -> None:
@@ -1237,6 +1265,41 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_
         effective_unit = resolve_temperature_unit(selected_pref, browser_locale)
         source_note = "browser locale" if selected_pref == "auto" else "manual setting"
         st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
+
+        st.subheader("Settings Backup")
+        export_payload = build_settings_export_payload(prefs)
+        export_text = json.dumps(export_payload, indent=2)
+        export_filename = f"dso-explorer-settings-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+        st.download_button(
+            "Export settings JSON",
+            data=export_text,
+            file_name=export_filename,
+            mime="application/json",
+            use_container_width=True,
+        )
+
+        uploaded_settings = st.file_uploader(
+            "Import settings JSON",
+            type=["json"],
+            key="settings_import_file",
+            help="Imports location, obstructions, favorites, set list, and display preferences.",
+        )
+        if st.button("Import settings", use_container_width=True, key="settings_import_apply"):
+            if uploaded_settings is None:
+                st.warning("Choose a JSON file first.")
+            else:
+                raw_bytes = uploaded_settings.getvalue()
+                try:
+                    raw_text = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    st.warning("Could not read that file as UTF-8 JSON.")
+                else:
+                    imported_prefs = parse_settings_import_payload(raw_text)
+                    if imported_prefs is None:
+                        st.warning("Invalid settings file format.")
+                    else:
+                        st.session_state["location_notice"] = "Settings imported."
+                        persist_and_rerun(imported_prefs)
 
         st.subheader("Catalog Ingestion")
         st.caption(
