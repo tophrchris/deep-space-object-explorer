@@ -857,7 +857,7 @@ def render_sidebar(catalog: pd.DataFrame, catalog_meta: dict[str, Any], prefs: d
 def render_results_panel(results: pd.DataFrame) -> None:
     with st.container(border=True):
         st.subheader("Results")
-        st.caption("Designation + name | right columns: Alt(now) | Az(now) | 16-wind")
+        st.caption("Click a row to open target detail. Right columns: Alt(now) | Az(now) | 16-wind")
 
         display = results[["primary_id", "common_name", "catalog", "object_type", "alt_now", "az_now", "wind16"]].copy()
         display = display.rename(
@@ -871,20 +871,41 @@ def render_results_panel(results: pd.DataFrame) -> None:
                 "wind16": "Dir",
             }
         )
-        st.dataframe(display, use_container_width=True, height=430)
+        table_event = st.dataframe(
+            display,
+            use_container_width=True,
+            height=430,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="results_table",
+        )
 
         ids = results["primary_id"].tolist()
         if not ids:
             st.info("No targets matched that search.")
             return
 
-        default_index = 0
         selected_id = st.session_state.get("selected_id")
-        if selected_id in ids:
-            default_index = ids.index(selected_id)
+        if selected_id not in ids:
+            st.session_state["selected_id"] = ids[0]
 
-        chosen = st.selectbox("Open target detail", options=ids, index=default_index)
-        st.session_state["selected_id"] = chosen
+        selected_rows: list[int] = []
+        if table_event is not None:
+            try:
+                selected_rows = list(table_event.selection.rows)
+            except Exception:
+                if isinstance(table_event, dict):
+                    selected_rows = list(table_event.get("selection", {}).get("rows", []))
+
+        if selected_rows:
+            selected_index = int(selected_rows[0])
+            if 0 <= selected_index < len(ids):
+                st.session_state["selected_id"] = ids[selected_index]
+
+        current_id = st.session_state.get("selected_id")
+        if current_id:
+            st.caption(f"Selected: {current_id}")
 
 
 def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any]) -> None:
