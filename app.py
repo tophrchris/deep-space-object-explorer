@@ -14,10 +14,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from astral import LocationInfo
 from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
+from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
 from streamlit_autorefresh import st_autorefresh
 from timezonefinder import TimezoneFinder
@@ -52,7 +54,10 @@ DEFAULT_LOCATION = {
 }
 
 STATE_PATH = Path(".state/preferences.json")
-CATALOG_PATH = Path("data/dso_catalog_seed.csv")
+CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
+CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
+CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
+GEO_QUERY_KEYS = ["geo_status", "geo_lat", "geo_lon", "geo_error", "geo_ts"]
 
 
 def default_preferences() -> dict[str, Any]:
@@ -148,29 +153,35 @@ def wind_bin_center(direction: str) -> float:
     return idx * 22.5
 
 
-@st.cache_data(show_spinner=False)
-def load_catalog() -> pd.DataFrame:
-    if not CATALOG_PATH.exists():
-        raise FileNotFoundError(f"Catalog file is missing: {CATALOG_PATH}")
-
-    df = pd.read_csv(CATALOG_PATH)
+def build_search_index(df: pd.DataFrame) -> pd.DataFrame:
+    indexed = df.copy()
     for col in ["common_name", "object_type", "constellation", "aliases"]:
-        if col in df:
-            df[col] = df[col].fillna("")
+        if col in indexed:
+            indexed[col] = indexed[col].fillna("")
 
-    df["primary_id_norm"] = df["primary_id"].map(normalize_text)
-    df["aliases_norm"] = df["aliases"].map(normalize_text)
-    df["search_blob_norm"] = (
-        df["primary_id"].fillna("")
+    indexed["primary_id_norm"] = indexed["primary_id"].map(normalize_text)
+    indexed["aliases_norm"] = indexed["aliases"].map(normalize_text)
+    indexed["search_blob_norm"] = (
+        indexed["primary_id"].fillna("")
         + " "
-        + df["common_name"].fillna("")
+        + indexed["common_name"].fillna("")
         + " "
-        + df["aliases"].fillna("")
+        + indexed["aliases"].fillna("")
         + " "
-        + df["catalog"].fillna("")
+        + indexed["catalog"].fillna("")
     ).map(normalize_text)
 
-    return df
+    return indexed
+
+
+def load_catalog(force_refresh: bool = False) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frame, metadata = load_unified_catalog(
+        seed_path=CATALOG_SEED_PATH,
+        cache_path=CATALOG_CACHE_PATH,
+        metadata_path=CATALOG_META_PATH,
+        force_refresh=force_refresh,
+    )
+    return build_search_index(frame), metadata
 
 
 def search_catalog(df: pd.DataFrame, query: str) -> pd.DataFrame:
@@ -488,6 +499,138 @@ def resolve_manual_location(query: str) -> dict[str, Any] | None:
     return None
 
 
+@st.cache_data(show_spinner=False, ttl=24 * 60 * 60)
+def reverse_geocode_label(lat: float, lon: float) -> str:
+    geocoder = Nominatim(user_agent="dso-explorer-prototype")
+
+    try:
+        match = geocoder.reverse((lat, lon), exactly_one=True, timeout=10)
+        if not match:
+            return f"{lat:.4f}, {lon:.4f}"
+
+        address = match.raw.get("address", {})
+        locality = (
+            address.get("city")
+            or address.get("town")
+            or address.get("village")
+            or address.get("hamlet")
+            or address.get("county")
+        )
+        region = address.get("state")
+
+        parts = [part for part in [locality, region] if part]
+        if parts:
+            return ", ".join(parts)
+
+        title = str(match.address).split(",")[0].strip()
+        return title or f"{lat:.4f}, {lon:.4f}"
+    except Exception:
+        return f"{lat:.4f}, {lon:.4f}"
+
+
+def query_param_value(key: str) -> str:
+    raw = st.query_params.get(key)
+    if raw is None:
+        return ""
+    if isinstance(raw, list):
+        return str(raw[0]) if raw else ""
+    return str(raw)
+
+
+def clear_geo_query_params() -> None:
+    for key in GEO_QUERY_KEYS:
+        if key in st.query_params:
+            del st.query_params[key]
+
+
+def apply_browser_location_from_query(prefs: dict[str, Any]) -> bool:
+    status = query_param_value("geo_status").strip().lower()
+    if not status:
+        return False
+
+    try:
+        if status == "ok":
+            lat = float(query_param_value("geo_lat"))
+            lon = float(query_param_value("geo_lon"))
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                raise ValueError("Coordinates out of range")
+
+            prefs["location"] = {
+                "lat": lat,
+                "lon": lon,
+                "label": reverse_geocode_label(lat, lon),
+                "source": "browser",
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            st.session_state["prefs"] = prefs
+            save_preferences(prefs)
+            st.session_state["location_notice"] = "Browser geolocation applied."
+        elif status in {"denied", "unavailable"}:
+            st.session_state["location_notice"] = (
+                "Location permission denied/unavailable - keeping previous location."
+            )
+        else:
+            st.session_state["location_notice"] = (
+                "Could not read browser geolocation response - keeping previous location."
+            )
+    except Exception:
+        st.session_state["location_notice"] = (
+            "Could not parse browser geolocation - keeping previous location."
+        )
+    finally:
+        clear_geo_query_params()
+
+    return True
+
+
+def render_browser_geolocation_request() -> None:
+    components.html(
+        """
+        <script>
+        (function () {
+          const parentUrl = new URL(window.parent.location.href);
+          const params = parentUrl.searchParams;
+
+          function commit(status, lat, lon, errorCode) {
+            params.set("geo_status", status);
+            params.set("geo_ts", String(Date.now()));
+            if (lat !== null && lon !== null) {
+              params.set("geo_lat", String(lat));
+              params.set("geo_lon", String(lon));
+            } else {
+              params.delete("geo_lat");
+              params.delete("geo_lon");
+            }
+            if (errorCode) {
+              params.set("geo_error", String(errorCode));
+            } else {
+              params.delete("geo_error");
+            }
+            window.parent.location.search = params.toString();
+          }
+
+          if (!navigator.geolocation) {
+            commit("unavailable", null, null, "unsupported");
+            return;
+          }
+
+          navigator.geolocation.getCurrentPosition(
+            function (position) {
+              commit("ok", position.coords.latitude, position.coords.longitude, "");
+            },
+            function (error) {
+              commit("denied", null, null, error ? error.code : "unknown");
+            },
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+          );
+        })();
+        </script>
+        <div style="font-family: sans-serif; font-size: 0.9rem;">Requesting browser geolocation permission...</div>
+        """,
+        height=72,
+    )
+
+
 @st.cache_data(show_spinner=False, ttl=15 * 60)
 def approximate_location_from_ip() -> dict[str, Any] | None:
     try:
@@ -597,9 +740,13 @@ def move_item(values: list[str], index: int, step: int) -> list[str]:
     return updated
 
 
-def render_sidebar(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
+def render_sidebar(catalog: pd.DataFrame, catalog_meta: dict[str, Any], prefs: dict[str, Any]) -> None:
     with st.sidebar:
         st.header("Controls")
+
+        location_notice = st.session_state.pop("location_notice", "")
+        if location_notice:
+            st.info(location_notice)
 
         st.subheader("Location")
         location = prefs["location"]
@@ -612,14 +759,39 @@ def render_sidebar(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
             if resolved:
                 prefs["location"] = resolved
                 persist_and_rerun(prefs)
-            st.warning("Couldn't find that location - keeping previous location.")
+            else:
+                st.warning("Couldn't find that location - keeping previous location.")
 
-        if st.button("Use my location (approx)", use_container_width=True):
+        if st.button("Use browser location (permission)", use_container_width=True):
+            st.session_state["request_browser_geo"] = True
+
+        if st.session_state.get("request_browser_geo"):
+            render_browser_geolocation_request()
+            st.session_state["request_browser_geo"] = False
+
+        if st.button("Use my location (IP fallback)", use_container_width=True):
             resolved = approximate_location_from_ip()
             if resolved:
                 prefs["location"] = resolved
                 persist_and_rerun(prefs)
-            st.warning("Location permission denied/unavailable - keeping previous location.")
+            else:
+                st.warning("Location unavailable - keeping previous location.")
+
+        st.subheader("Catalog Ingestion")
+        st.caption(
+            f"Rows: {int(catalog_meta.get('row_count', len(catalog)))} | "
+            f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
+        )
+        catalog_counts = catalog_meta.get("catalog_counts", {})
+        if isinstance(catalog_counts, dict) and catalog_counts:
+            counts_line = " | ".join(f"{catalog_name}: {count}" for catalog_name, count in sorted(catalog_counts.items()))
+            st.caption(counts_line)
+        loaded_at = str(catalog_meta.get("loaded_at_utc", "")).strip()
+        if loaded_at:
+            st.caption(f"Loaded: {loaded_at}")
+        if st.button("Refresh catalog cache", use_container_width=True):
+            st.session_state["force_catalog_refresh"] = True
+            st.rerun()
 
         st.subheader("Obstructions (16-bin)")
         obstruction_frame = pd.DataFrame(
@@ -822,8 +994,12 @@ def main() -> None:
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
 
-    catalog = load_catalog()
-    render_sidebar(catalog=catalog, prefs=prefs)
+    if apply_browser_location_from_query(prefs):
+        st.rerun()
+
+    force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
+    catalog, catalog_meta = load_catalog(force_refresh=force_catalog_refresh)
+    render_sidebar(catalog=catalog, catalog_meta=catalog_meta, prefs=prefs)
 
     now_utc = datetime.now(timezone.utc)
     st.markdown(
@@ -841,6 +1017,7 @@ def main() -> None:
         f"<p class='small-note'>Alt/Az auto-refresh 60s<br>Updated: {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>",
         unsafe_allow_html=True,
     )
+    st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
 
     query = st.text_input(
         "Search (M / NGC / IC / Sh2 + common names)",
