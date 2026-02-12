@@ -14,8 +14,8 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
   - Object metadata
   - Current Alt/Az + 16-wind direction
   - Free-use image lookup (Wikimedia Commons, if available)
-  - Path Plot (Alt vs Az)
-  - Night Plot (hourly max altitude + direction + optional temperature)
+  - Path Plot (Alt vs Az, Line/Radial style, radial Dome View toggle)
+  - Night Plot (hourly stacked max altitude: obstructed + clear, direction + optional temperature)
 - Alt/Az auto-refresh every 60 seconds
 
 ## Project structure

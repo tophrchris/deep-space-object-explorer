@@ -472,20 +472,34 @@ def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], ob
 
 
 def build_path_plot_radial(
-    track: pd.DataFrame, events: dict[str, pd.Series | None], obstructions: dict[str, float]
+    track: pd.DataFrame,
+    events: dict[str, pd.Series | None],
+    obstructions: dict[str, float],
+    dome_view: bool,
 ) -> go.Figure:
     fig = go.Figure()
 
     obstruction_theta = [wind_bin_center(direction) for direction in WIND16] + [360.0]
-    obstruction_alt = [obstructions.get(direction, 20.0) for direction in WIND16]
+    obstruction_alt = [float(obstructions.get(direction, 20.0)) for direction in WIND16]
     obstruction_alt.append(obstruction_alt[0])
-    obstruction_r = [90.0 - float(value) for value in obstruction_alt]
-    horizon_r = [90.0 for _ in obstruction_theta]
+
+    if dome_view:
+        obstruction_boundary_r = [90.0 - value for value in obstruction_alt]
+        obstruction_baseline_r = [90.0 for _ in obstruction_theta]
+        track_r = (90.0 - track["alt"]).clip(lower=0.0, upper=90.0)
+        radial_ticktext = ["90", "60", "30", "0"]
+        radial_title = "Altitude (deg, center=90)"
+    else:
+        obstruction_boundary_r = obstruction_alt
+        obstruction_baseline_r = [0.0 for _ in obstruction_theta]
+        track_r = track["alt"].clip(lower=0.0, upper=90.0)
+        radial_ticktext = ["0", "30", "60", "90"]
+        radial_title = "Altitude (deg, center=0)"
 
     fig.add_trace(
         go.Scatterpolar(
             theta=obstruction_theta,
-            r=obstruction_r,
+            r=obstruction_boundary_r,
             mode="lines",
             line={"width": 0},
             showlegend=False,
@@ -495,7 +509,7 @@ def build_path_plot_radial(
     fig.add_trace(
         go.Scatterpolar(
             theta=obstruction_theta,
-            r=horizon_r,
+            r=obstruction_baseline_r,
             mode="lines",
             name="Obstructed region",
             line={"width": 0},
@@ -508,7 +522,7 @@ def build_path_plot_radial(
     fig.add_trace(
         go.Scatterpolar(
             theta=track["az"],
-            r=(90.0 - track["alt"]).clip(lower=0.0, upper=90.0),
+            r=track_r,
             mode="lines",
             name="Altitude path",
             line={"width": 3},
@@ -526,7 +540,11 @@ def build_path_plot_radial(
         fig.add_trace(
             go.Scatterpolar(
                 theta=[event["az"]],
-                r=[max(0.0, min(90.0, 90.0 - float(event["alt"])))],
+                r=[
+                    max(0.0, min(90.0, 90.0 - float(event["alt"])))
+                    if dome_view
+                    else max(0.0, min(90.0, float(event["alt"])))
+                ],
                 mode="markers+text",
                 text=[event_name.replace("_", " ").title()],
                 textposition="top center",
@@ -552,8 +570,8 @@ def build_path_plot_radial(
                 "range": [0, 90],
                 "tickmode": "array",
                 "tickvals": [0, 30, 60, 90],
-                "ticktext": ["90", "60", "30", "0"],
-                "title": "Altitude (deg)",
+                "ticktext": radial_ticktext,
+                "title": radial_title,
             },
         },
     )
@@ -616,6 +634,10 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float],
                 "hour": hour,
                 "hour_label": format_hour_label(hour),
                 "max_alt": max(float(max_row["alt"]), 0.0),
+                "obstructed_alt": min(
+                    max(float(max_row["alt"]), 0.0),
+                    max(float(max_row.get("min_alt_required", 0.0)), 0.0),
+                ),
                 "wind16": str(max_row["wind16"]),
                 "temp": temp,
             }
@@ -624,34 +646,69 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float],
     frame = pd.DataFrame(rows)
     if frame.empty:
         return go.Figure()
+    frame["clear_alt"] = (frame["max_alt"] - frame["obstructed_alt"]).clip(lower=0.0)
 
     labels = []
     for _, row in frame.iterrows():
         temp_str = format_temperature(row["temp"], temperature_unit)
         labels.append(f"{row['wind16']}<br>{temp_str}")
 
-    fig = go.Figure(
-        data=[
-            go.Bar(
-                x=frame["hour_label"],
-                y=frame["max_alt"],
-                text=labels,
-                textposition="outside",
-                customdata=frame["hour"].dt.strftime("%H:%M"),
-                hovertemplate="%{x} (%{customdata})<br>Max Alt %{y:.1f} deg<extra></extra>",
-                name="Max altitude",
-            )
-        ]
+    obstructed_hover = []
+    clear_hover = []
+    for _, row in frame.iterrows():
+        hour_str = pd.Timestamp(row["hour"]).strftime("%H:%M")
+        max_alt = float(row["max_alt"])
+        obstructed_alt = float(row["obstructed_alt"])
+        clear_alt = float(row["clear_alt"])
+        obstructed_hover.append(
+            f"{row['hour_label']} ({hour_str})<br>Max Alt {max_alt:.1f} deg<br>Obstructed {obstructed_alt:.1f} deg"
+        )
+        clear_hover.append(
+            f"{row['hour_label']} ({hour_str})<br>Max Alt {max_alt:.1f} deg<br>Clear {clear_alt:.1f} deg"
+        )
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=frame["hour_label"],
+            y=frame["obstructed_alt"],
+            hovertext=obstructed_hover,
+            hovertemplate="%{hovertext}<extra></extra>",
+            name="Obstructed",
+            marker={"color": "rgba(239, 68, 68, 0.55)"},
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=frame["hour_label"],
+            y=frame["clear_alt"],
+            hovertext=clear_hover,
+            hovertemplate="%{hovertext}<extra></extra>",
+            name="Clear",
+            marker={"color": "rgba(34, 197, 94, 0.65)"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=frame["hour_label"],
+            y=frame["max_alt"] + 1.5,
+            mode="text",
+            text=labels,
+            textposition="top center",
+            showlegend=False,
+            hoverinfo="skip",
+        )
     )
     fig.update_layout(
         title="Hourly forecast",
         height=300,
         margin={"l": 10, "r": 10, "t": 35, "b": 10},
+        barmode="stack",
         xaxis_title="Hour",
-        yaxis_title="Max altitude (deg)",
+        yaxis_title="Altitude (deg)",
     )
     fig.update_xaxes(type="category", categoryorder="array", categoryarray=frame["hour_label"].tolist())
-    fig.update_yaxes(range=[0, 90])
+    fig.update_yaxes(range=[0, 95])
     return fig
 
 
@@ -1235,14 +1292,20 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], tempe
             f"Culmination {format_time(events['culmination'])} | Last-visible {format_time(events['last_visible'])}"
         )
 
-        path_style = st.radio(
+        path_style = st.segmented_control(
             "Sky Position Style",
             options=["Line", "Radial"],
-            horizontal=True,
+            default="Line",
             key=f"path_style_{target_id}",
         )
         if path_style == "Radial":
-            path_figure = build_path_plot_radial(track=track, events=events, obstructions=prefs["obstructions"])
+            dome_view = st.toggle("Dome View", value=True, key="dome_view_enabled")
+            path_figure = build_path_plot_radial(
+                track=track,
+                events=events,
+                obstructions=prefs["obstructions"],
+                dome_view=dome_view,
+            )
         else:
             path_figure = build_path_plot(track=track, events=events, obstructions=prefs["obstructions"])
 
