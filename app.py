@@ -833,33 +833,13 @@ def render_target_table(
 def render_main_tabs(results: pd.DataFrame, favorites: pd.DataFrame, set_list: pd.DataFrame, prefs: dict[str, Any]) -> None:
     with st.container(border=True):
         st.subheader("Targets")
-        st.markdown(
-            """
-            <style>
-                .count-pill {
-                    display: inline-block;
-                    margin-right: 0.35rem;
-                    padding: 0.15rem 0.60rem;
-                    border-radius: 999px;
-                    font-size: 0.82rem;
-                    font-weight: 600;
-                    background: #f1f5f9;
-                    border: 1px solid #cbd5e1;
-                }
-            </style>
-            """,
-            unsafe_allow_html=True,
+        tab_results, tab_favorites, tab_set_list = st.tabs(
+            [
+                f"Results ({len(results)})",
+                f"Favorites ({len(favorites)})",
+                f"Set List ({len(set_list)})",
+            ]
         )
-        st.markdown(
-            (
-                f"<span class='count-pill'>Results {len(results)}</span>"
-                f"<span class='count-pill'>Favorites {len(favorites)}</span>"
-                f"<span class='count-pill'>Set List {len(set_list)}</span>"
-            ),
-            unsafe_allow_html=True,
-        )
-
-        tab_results, tab_favorites, tab_set_list = st.tabs(["Results", "Favorites", "Set List"])
 
         with tab_results:
             st.caption("Click a row to open target detail.")
