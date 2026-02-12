@@ -8,7 +8,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - Desktop split layout and phone-style stacked layout preview
 - Location controls (default Princeton, manual geocode, browser geolocation permission flow, IP fallback)
 - 16-bin obstruction editor (default 20 deg)
-- Favorites and Set List with local persistence
+- Favorites and Set List with browser-local persistence (per user/device)
 - Catalog ingestion module with normalized schema + disk cache + metadata
 - Target detail panel with:
   - Object metadata
@@ -23,7 +23,6 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - `app.py`: Streamlit app entry point
 - `catalog_ingestion.py`: catalog ingest + normalization + cache metadata
 - `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
-- `.state/preferences.json`: local persistence file created at runtime
 - `TODO.md`: prioritized build backlog
 
 ## Local setup
@@ -63,7 +62,7 @@ python scripts/ingest_catalog.py
 Notes:
 - The app uses `requirements.txt` automatically for Python dependencies.
 - `runtime.txt` pins Python to 3.11 for cloud parity.
-- If filesystem writes are restricted in cloud runtime, the app falls back to session-only preferences.
+- Preferences persist in browser `localStorage` (not shared across users).
 - For private repos, make sure Streamlit has GitHub access to this repository.
 
 ## Notes

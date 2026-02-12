@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 import re
 from datetime import datetime, time, timedelta, timezone
@@ -20,7 +22,7 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
-from streamlit_js_eval import get_browser_language, get_geolocation
+from streamlit_js_eval import get_browser_language, get_geolocation, get_local_storage, set_local_storage
 from streamlit_autorefresh import st_autorefresh
 from timezonefinder import TimezoneFinder
 
@@ -53,10 +55,10 @@ DEFAULT_LOCATION = {
     "resolved_at": "",
 }
 
-STATE_PATH = Path(".state/preferences.json")
 CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
+BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v1"
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -102,26 +104,46 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
     return prefs
 
 
-def load_preferences() -> dict[str, Any]:
-    if not STATE_PATH.exists():
-        return default_preferences()
+def encode_preferences_for_storage(prefs: dict[str, Any]) -> str:
+    compact_json = json.dumps(ensure_preferences_shape(prefs), separators=(",", ":"), ensure_ascii=True)
+    return base64.urlsafe_b64encode(compact_json.encode("utf-8")).decode("ascii")
 
+
+def decode_preferences_from_storage(raw_value: str) -> dict[str, Any] | None:
     try:
-        payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        decoded_json = base64.urlsafe_b64decode(str(raw_value).encode("ascii")).decode("utf-8")
+        payload = json.loads(decoded_json)
+        if not isinstance(payload, dict):
+            return None
         return ensure_preferences_shape(payload)
-    except (json.JSONDecodeError, OSError):
-        return default_preferences()
+    except Exception:
+        return None
+
+
+def load_preferences() -> dict[str, Any]:
+    raw_value = get_local_storage(BROWSER_PREFS_STORAGE_KEY, component_key="browser_prefs_read")
+    if isinstance(raw_value, str) and raw_value.strip():
+        decoded = decode_preferences_from_storage(raw_value)
+        if decoded is not None:
+            st.session_state.pop("prefs_persistence_notice", None)
+            return decoded
+    return default_preferences()
 
 
 def save_preferences(prefs: dict[str, Any]) -> bool:
     try:
-        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+        encoded = encode_preferences_for_storage(prefs)
+        payload_hash = hashlib.sha1(encoded.encode("ascii")).hexdigest()[:12]
+        set_local_storage(
+            BROWSER_PREFS_STORAGE_KEY,
+            encoded,
+            component_key=f"browser_prefs_write_{payload_hash}",
+        )
         st.session_state.pop("prefs_persistence_notice", None)
         return True
-    except OSError:
+    except Exception:
         st.session_state["prefs_persistence_notice"] = (
-            "Preferences file storage is unavailable here. Using session-only preferences."
+            "Browser-local preference storage is unavailable. Using session-only preferences."
         )
         return False
 
@@ -1387,8 +1409,16 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], tempe
 def main() -> None:
     st_autorefresh(interval=60_000, key="altaz_refresh")
 
+    if "prefs_bootstrap_runs" not in st.session_state:
+        st.session_state["prefs_bootstrap_runs"] = 0
     if "prefs" not in st.session_state:
+        st.session_state["prefs"] = default_preferences()
+
+    if int(st.session_state.get("prefs_bootstrap_runs", 0)) < 2:
         st.session_state["prefs"] = load_preferences()
+        st.session_state["prefs_bootstrap_runs"] = int(st.session_state.get("prefs_bootstrap_runs", 0)) + 1
+        if int(st.session_state.get("prefs_bootstrap_runs", 0)) < 2:
+            st.rerun()
 
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
