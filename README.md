@@ -55,7 +55,7 @@ python scripts/ingest_catalog.py
 
 ## Notes
 
-- This seed version includes a curated subset of catalog entries to prove the full app loop.
-- Catalog ingest currently reads the local seed and writes `data/dso_catalog_cache.parquet`.
+- Catalog ingest now loads full OpenNGC data for Messier/NGC/IC and merges local SH2 seed rows.
+- If live ingest fails, the app falls back to the local seed dataset.
 - Use the sidebar `Refresh catalog cache` button to force a re-ingest.
 - Weather and image lookups fail gracefully without breaking plots.
