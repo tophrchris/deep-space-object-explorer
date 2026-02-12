@@ -324,19 +324,57 @@ def format_time(series: pd.Series | None) -> str:
     return pd.Timestamp(series["time_local"]).strftime("%H:%M")
 
 
+def format_hour_label(value: pd.Timestamp | datetime) -> str:
+    hour = int(pd.Timestamp(value).hour)
+    suffix = "am" if hour < 12 else "pm"
+    display = hour % 12
+    if display == 0:
+        display = 12
+    return f"{display}{suffix}"
+
+
+def split_path_on_az_wrap(track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if track.empty:
+        return np.array([], dtype=float), np.array([], dtype=float), np.empty((0, 3), dtype=object)
+
+    az_values = track["az"].to_numpy(dtype=float)
+    alt_values = track["alt"].to_numpy(dtype=float)
+    time_values = track["time_local"].dt.strftime("%H:%M").to_numpy(dtype=object)
+    wind_values = track["wind16"].astype(str).to_numpy(dtype=object)
+    min_values = track["min_alt_required"].to_numpy(dtype=float)
+
+    x_values: list[float] = []
+    y_values: list[float] = []
+    custom_rows: list[list[object]] = []
+
+    for idx, azimuth in enumerate(az_values):
+        if idx > 0 and abs(float(azimuth) - float(az_values[idx - 1])) > 180.0:
+            x_values.append(np.nan)
+            y_values.append(np.nan)
+            custom_rows.append(["", "", np.nan])
+
+        x_values.append(float(azimuth))
+        y_values.append(float(alt_values[idx]))
+        custom_rows.append([time_values[idx], wind_values[idx], float(min_values[idx])])
+
+    return (
+        np.asarray(x_values, dtype=float),
+        np.asarray(y_values, dtype=float),
+        np.asarray(custom_rows, dtype=object),
+    )
+
+
 def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], obstructions: dict[str, float]) -> go.Figure:
+    path_x, path_y, path_custom = split_path_on_az_wrap(track)
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=track["az"],
-            y=track["alt"],
+            x=path_x,
+            y=path_y,
             mode="lines",
             name="Altitude path",
             line={"width": 3},
-            customdata=np.stack(
-                [track["time_local"].dt.strftime("%H:%M"), track["wind16"], track["min_alt_required"]],
-                axis=-1,
-            ),
+            customdata=path_custom,
             hovertemplate="Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[0]}<br>Dir %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
         )
     )
@@ -350,8 +388,11 @@ def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], ob
             x=obstruction_line_x,
             y=obstruction_line_y,
             mode="lines",
-            name="Obstruction floor",
-            line={"dash": "dot"},
+            name="Obstructed region",
+            line={"width": 0},
+            fill="tozeroy",
+            fillcolor="rgba(239, 68, 68, 0.20)",
+            hoverinfo="skip",
         )
     )
 
@@ -437,6 +478,7 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float])
         rows.append(
             {
                 "hour": hour,
+                "hour_label": format_hour_label(hour),
                 "max_alt": max(float(max_row["alt"]), 0.0),
                 "wind16": str(max_row["wind16"]),
                 "temp": temp,
@@ -455,11 +497,12 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float])
     fig = go.Figure(
         data=[
             go.Bar(
-                x=frame["hour"],
+                x=frame["hour_label"],
                 y=frame["max_alt"],
                 text=labels,
                 textposition="outside",
-                hovertemplate="%{x|%H:%M}<br>Max Alt %{y:.1f} deg<extra></extra>",
+                customdata=frame["hour"].dt.strftime("%H:%M"),
+                hovertemplate="%{x} (%{customdata})<br>Max Alt %{y:.1f} deg<extra></extra>",
                 name="Max altitude",
             )
         ]
@@ -470,6 +513,7 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float])
         xaxis_title="Hour",
         yaxis_title="Max altitude (deg)",
     )
+    fig.update_xaxes(type="category", categoryorder="array", categoryarray=frame["hour_label"].tolist())
     fig.update_yaxes(range=[0, 90])
     return fig
 
