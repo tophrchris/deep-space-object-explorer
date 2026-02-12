@@ -113,9 +113,17 @@ def load_preferences() -> dict[str, Any]:
         return default_preferences()
 
 
-def save_preferences(prefs: dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+def save_preferences(prefs: dict[str, Any]) -> bool:
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+        st.session_state.pop("prefs_persistence_notice", None)
+        return True
+    except OSError:
+        st.session_state["prefs_persistence_notice"] = (
+            "Preferences file storage is unavailable here. Using session-only preferences."
+        )
+        return False
 
 
 def persist_and_rerun(prefs: dict[str, Any]) -> None:
@@ -1142,6 +1150,10 @@ def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Ser
 def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
     with st.sidebar:
         st.header("Controls")
+
+        persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+        if persistence_notice:
+            st.warning(persistence_notice)
 
         location_notice = st.session_state.pop("location_notice", "")
         if location_notice:

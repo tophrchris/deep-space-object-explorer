@@ -53,6 +53,19 @@ streamlit run app.py
 python scripts/ingest_catalog.py
 ```
 
+## Deploy to Streamlit Community Cloud
+
+1. Push this repo to GitHub (private is fine).
+2. In Streamlit Community Cloud, click `Create app` and select this repo/branch.
+3. Set `Main file path` to `app.py`.
+4. Deploy.
+
+Notes:
+- The app uses `requirements.txt` automatically for Python dependencies.
+- `runtime.txt` pins Python to 3.11 for cloud parity.
+- If filesystem writes are restricted in cloud runtime, the app falls back to session-only preferences.
+- For private repos, make sure Streamlit has GitHub access to this repository.
+
 ## Notes
 
 - Catalog ingest now loads full OpenNGC data for Messier/NGC/IC and merges local SH2 seed rows.
