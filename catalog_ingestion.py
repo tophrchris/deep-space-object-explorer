@@ -319,10 +319,24 @@ def ingest_sh2_from_simbad() -> pd.DataFrame:
         FROM ident
         JOIN basic ON ident.oidref = basic.oid
         WHERE
-            UPPER(id) LIKE 'SH2-%'
-            OR UPPER(id) LIKE 'SH 2-%'
-            OR UPPER(id) LIKE 'SH2 %'
-            OR UPPER(id) LIKE 'SH 2 %'
+               id LIKE 'SH2-%'
+            OR id LIKE 'SH 2-%'
+            OR id LIKE 'SH  2-%'
+            OR id LIKE 'Sh2-%'
+            OR id LIKE 'Sh 2-%'
+            OR id LIKE 'Sh  2-%'
+            OR id LIKE 'sh2-%'
+            OR id LIKE 'sh 2-%'
+            OR id LIKE 'sh  2-%'
+            OR id LIKE 'SH2 %'
+            OR id LIKE 'SH 2 %'
+            OR id LIKE 'SH  2 %'
+            OR id LIKE 'Sh2 %'
+            OR id LIKE 'Sh 2 %'
+            OR id LIKE 'Sh  2 %'
+            OR id LIKE 'sh2 %'
+            OR id LIKE 'sh 2 %'
+            OR id LIKE 'sh  2 %'
     """
     source = _query_simbad_tap(query)
     if source.empty:
@@ -382,8 +396,14 @@ def build_simbad_m_ngc_reference() -> pd.DataFrame:
         FROM ident
         JOIN basic ON ident.oidref = basic.oid
         WHERE
-            UPPER(id) LIKE 'M %'
-            OR UPPER(id) LIKE 'NGC %'
+               id LIKE 'M %'
+            OR id LIKE 'M%'
+            OR id LIKE 'm %'
+            OR id LIKE 'm%'
+            OR id LIKE 'NGC %'
+            OR id LIKE 'NGC%'
+            OR id LIKE 'ngc %'
+            OR id LIKE 'ngc%'
     """
     source = _query_simbad_tap(query)
     if source.empty:
