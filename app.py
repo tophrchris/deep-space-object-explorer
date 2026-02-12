@@ -744,7 +744,173 @@ def move_item(values: list[str], index: int, step: int) -> list[str]:
     return updated
 
 
-def render_sidebar(catalog: pd.DataFrame, catalog_meta: dict[str, Any], prefs: dict[str, Any]) -> None:
+def sanitize_saved_lists(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
+    available_ids = set(catalog["primary_id"].tolist())
+    next_favorites = [item for item in prefs["favorites"] if item in available_ids]
+    next_set_list = [item for item in prefs["set_list"] if item in available_ids]
+
+    if next_favorites != prefs["favorites"] or next_set_list != prefs["set_list"]:
+        prefs["favorites"] = next_favorites
+        prefs["set_list"] = next_set_list
+        st.session_state["prefs"] = prefs
+        save_preferences(prefs)
+
+
+def subset_by_id_list(frame: pd.DataFrame, ordered_ids: list[str]) -> pd.DataFrame:
+    if not ordered_ids:
+        return frame.iloc[0:0].copy()
+
+    id_rank = {identifier: idx for idx, identifier in enumerate(ordered_ids)}
+    subset = frame[frame["primary_id"].isin(id_rank)].copy()
+    if subset.empty:
+        return subset
+
+    subset["_rank"] = subset["primary_id"].map(id_rank)
+    subset = subset.sort_values(by="_rank", ascending=True).drop(columns=["_rank"]).reset_index(drop=True)
+    return subset
+
+
+def render_target_table(
+    targets: pd.DataFrame,
+    *,
+    table_key: str,
+    empty_message: str,
+    auto_select_first: bool = False,
+) -> str | None:
+    display = targets[["primary_id", "common_name", "catalog", "object_type", "alt_now", "az_now", "wind16"]].copy()
+    display = display.rename(
+        columns={
+            "primary_id": "ID",
+            "common_name": "Name",
+            "catalog": "Catalog",
+            "object_type": "Type",
+            "alt_now": "Alt(now)",
+            "az_now": "Az(now)",
+            "wind16": "Dir",
+        }
+    )
+
+    table_event = st.dataframe(
+        display,
+        use_container_width=True,
+        height=360,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=table_key,
+    )
+
+    ids = targets["primary_id"].tolist()
+    if not ids:
+        st.info(empty_message)
+        return None
+
+    selected_id = st.session_state.get("selected_id")
+    if auto_select_first and (not selected_id or selected_id not in ids):
+        st.session_state["selected_id"] = ids[0]
+
+    selected_rows: list[int] = []
+    if table_event is not None:
+        try:
+            selected_rows = list(table_event.selection.rows)
+        except Exception:
+            if isinstance(table_event, dict):
+                selected_rows = list(table_event.get("selection", {}).get("rows", []))
+
+    if selected_rows:
+        selected_index = int(selected_rows[0])
+        if 0 <= selected_index < len(ids):
+            st.session_state["selected_id"] = ids[selected_index]
+
+    selected_id = st.session_state.get("selected_id")
+    if selected_id in ids:
+        st.caption(f"Selected: {selected_id}")
+        return str(selected_id)
+
+    return None
+
+
+def render_main_tabs(results: pd.DataFrame, favorites: pd.DataFrame, set_list: pd.DataFrame, prefs: dict[str, Any]) -> None:
+    with st.container(border=True):
+        st.subheader("Targets")
+        tab_results, tab_favorites, tab_set_list = st.tabs(
+            [
+                f"Results ({len(results)})",
+                f"Favorites ({len(favorites)})",
+                f"Set List ({len(set_list)})",
+            ]
+        )
+
+        with tab_results:
+            st.caption("Click a row to open target detail.")
+            render_target_table(
+                results,
+                table_key="results_table",
+                empty_message="No targets matched that search.",
+                auto_select_first=True,
+            )
+
+        with tab_favorites:
+            render_target_table(
+                favorites,
+                table_key="favorites_table",
+                empty_message="No favorites yet.",
+            )
+
+        with tab_set_list:
+            selected_in_set = render_target_table(
+                set_list,
+                table_key="set_list_table",
+                empty_message="Set list is empty.",
+            )
+
+            if not set_list.empty:
+                active_id = selected_in_set or st.session_state.get("selected_id")
+                if active_id in prefs["set_list"]:
+                    active_idx = prefs["set_list"].index(str(active_id))
+                    controls = st.columns(3)
+                    if controls[0].button(
+                        "Move Up",
+                        disabled=active_idx == 0,
+                        key="set_list_move_up_main",
+                        use_container_width=True,
+                    ):
+                        prefs["set_list"] = move_item(prefs["set_list"], active_idx, -1)
+                        persist_and_rerun(prefs)
+                    if controls[1].button(
+                        "Move Down",
+                        disabled=active_idx == len(prefs["set_list"]) - 1,
+                        key="set_list_move_down_main",
+                        use_container_width=True,
+                    ):
+                        prefs["set_list"] = move_item(prefs["set_list"], active_idx, 1)
+                        persist_and_rerun(prefs)
+                    if controls[2].button(
+                        "Remove",
+                        key="set_list_remove_main",
+                        use_container_width=True,
+                    ):
+                        prefs["set_list"] = remove_if_present(prefs["set_list"], str(active_id))
+                        persist_and_rerun(prefs)
+
+
+def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Series | None:
+    selected_id = st.session_state.get("selected_id")
+    if not selected_id:
+        return None
+
+    target = catalog[catalog["primary_id"] == selected_id]
+    if target.empty:
+        return None
+
+    location = prefs["location"]
+    enriched = compute_altaz_now(target.iloc[:1], lat=float(location["lat"]), lon=float(location["lon"]))
+    if enriched.empty:
+        return None
+    return enriched.iloc[0]
+
+
+def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any]) -> None:
     with st.sidebar:
         st.header("Controls")
 
@@ -783,7 +949,7 @@ def render_sidebar(catalog: pd.DataFrame, catalog_meta: dict[str, Any], prefs: d
 
         st.subheader("Catalog Ingestion")
         st.caption(
-            f"Rows: {int(catalog_meta.get('row_count', len(catalog)))} | "
+            f"Rows: {int(catalog_meta.get('row_count', 0))} | "
             f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
         )
         catalog_counts = catalog_meta.get("catalog_counts", {})
@@ -820,92 +986,6 @@ def render_sidebar(catalog: pd.DataFrame, catalog_meta: dict[str, Any], prefs: d
         if next_obstructions != prefs["obstructions"]:
             prefs["obstructions"] = next_obstructions
             save_preferences(prefs)
-
-        st.subheader("Favorites")
-        if not prefs["favorites"]:
-            st.caption("No favorites yet")
-        else:
-            for identifier in prefs["favorites"]:
-                if st.button(identifier, key=f"fav_open_{identifier}", use_container_width=True):
-                    st.session_state["selected_id"] = identifier
-                    st.rerun()
-
-        st.subheader("Set List (Tonight)")
-        if not prefs["set_list"]:
-            st.caption("Set list is empty")
-        else:
-            for idx, identifier in enumerate(prefs["set_list"]):
-                cols = st.columns([2.4, 1, 1, 1])
-                if cols[0].button(identifier, key=f"set_open_{identifier}_{idx}"):
-                    st.session_state["selected_id"] = identifier
-                    st.rerun()
-                if cols[1].button("↑", key=f"set_up_{identifier}_{idx}"):
-                    prefs["set_list"] = move_item(prefs["set_list"], idx, -1)
-                    persist_and_rerun(prefs)
-                if cols[2].button("↓", key=f"set_dn_{identifier}_{idx}"):
-                    prefs["set_list"] = move_item(prefs["set_list"], idx, 1)
-                    persist_and_rerun(prefs)
-                if cols[3].button("x", key=f"set_rm_{identifier}_{idx}"):
-                    prefs["set_list"] = remove_if_present(prefs["set_list"], identifier)
-                    persist_and_rerun(prefs)
-
-        available_ids = set(catalog["primary_id"].tolist())
-        prefs["favorites"] = [item for item in prefs["favorites"] if item in available_ids]
-        prefs["set_list"] = [item for item in prefs["set_list"] if item in available_ids]
-
-
-def render_results_panel(results: pd.DataFrame) -> None:
-    with st.container(border=True):
-        st.subheader("Results")
-        st.caption("Click a row to open target detail. Right columns: Alt(now) | Az(now) | 16-wind")
-
-        display = results[["primary_id", "common_name", "catalog", "object_type", "alt_now", "az_now", "wind16"]].copy()
-        display = display.rename(
-            columns={
-                "primary_id": "ID",
-                "common_name": "Name",
-                "catalog": "Catalog",
-                "object_type": "Type",
-                "alt_now": "Alt(now)",
-                "az_now": "Az(now)",
-                "wind16": "Dir",
-            }
-        )
-        table_event = st.dataframe(
-            display,
-            use_container_width=True,
-            height=430,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="results_table",
-        )
-
-        ids = results["primary_id"].tolist()
-        if not ids:
-            st.info("No targets matched that search.")
-            return
-
-        selected_id = st.session_state.get("selected_id")
-        if selected_id not in ids:
-            st.session_state["selected_id"] = ids[0]
-
-        selected_rows: list[int] = []
-        if table_event is not None:
-            try:
-                selected_rows = list(table_event.selection.rows)
-            except Exception:
-                if isinstance(table_event, dict):
-                    selected_rows = list(table_event.get("selection", {}).get("rows", []))
-
-        if selected_rows:
-            selected_index = int(selected_rows[0])
-            if 0 <= selected_index < len(ids):
-                st.session_state["selected_id"] = ids[selected_index]
-
-        current_id = st.session_state.get("selected_id")
-        if current_id:
-            st.caption(f"Selected: {current_id}")
 
 
 def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any]) -> None:
@@ -1024,7 +1104,8 @@ def main() -> None:
 
     force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
     catalog, catalog_meta = load_catalog(force_refresh=force_catalog_refresh)
-    render_sidebar(catalog=catalog, catalog_meta=catalog_meta, prefs=prefs)
+    sanitize_saved_lists(catalog=catalog, prefs=prefs)
+    render_sidebar(catalog_meta=catalog_meta, prefs=prefs)
 
     now_utc = datetime.now(timezone.utc)
     st.markdown(
@@ -1051,32 +1132,32 @@ def main() -> None:
 
     filtered = search_catalog(catalog, query)
     location = prefs["location"]
-    enriched = compute_altaz_now(filtered, lat=float(location["lat"]), lon=float(location["lon"]))
+    results_enriched = compute_altaz_now(filtered, lat=float(location["lat"]), lon=float(location["lon"]))
+    favorites_enriched = compute_altaz_now(
+        subset_by_id_list(catalog, prefs["favorites"]),
+        lat=float(location["lat"]),
+        lon=float(location["lon"]),
+    )
+    set_list_enriched = compute_altaz_now(
+        subset_by_id_list(catalog, prefs["set_list"]),
+        lat=float(location["lat"]),
+        lon=float(location["lon"]),
+    )
 
     use_phone_layout = st.toggle("Phone layout preview", value=False)
 
     if use_phone_layout:
-        render_results_panel(enriched)
-        selected_id = st.session_state.get("selected_id")
-        selected_row = (
-            enriched[enriched["primary_id"] == selected_id].iloc[0]
-            if selected_id in set(enriched["primary_id"].tolist())
-            else None
-        )
+        render_main_tabs(results_enriched, favorites_enriched, set_list_enriched, prefs)
+        selected_row = resolve_selected_row(catalog, prefs)
         with st.container(border=True):
             st.markdown("### Detail bottom sheet")
             render_detail_panel(selected=selected_row, prefs=prefs)
     else:
         result_col, detail_col = st.columns([1.1, 1])
         with result_col:
-            render_results_panel(enriched)
+            render_main_tabs(results_enriched, favorites_enriched, set_list_enriched, prefs)
 
-        selected_id = st.session_state.get("selected_id")
-        selected_row = (
-            enriched[enriched["primary_id"] == selected_id].iloc[0]
-            if selected_id in set(enriched["primary_id"].tolist())
-            else None
-        )
+        selected_row = resolve_selected_row(catalog, prefs)
         with detail_col:
             render_detail_panel(selected=selected_row, prefs=prefs)
 
