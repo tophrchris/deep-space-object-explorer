@@ -1,4 +1,4 @@
-# DSO Explorer — Web Prototype PRD (v1.1)
+# DSO Explorer — Web Prototype PRD (v1.2)
 
 > This document supersedes `dso_explorer_web_prd_v0.md` and reflects the implemented product state through **February 13, 2026**.
 
@@ -29,14 +29,27 @@
 - `common_name`
 - `object_type`
 - `ra_deg`, `dec_deg`
-- `constellation` (when available)
+- `constellation`
+- `aliases`
+- `image_url`, `image_attribution_url`, `license_label`
+- `description`
+- `info_url`
+- `dist_value`, `dist_unit`
+- `redshift`
+- `morphology`
+- `emission_lines`
 
 - Catalog loading behavior:
-- Full OpenNGC ingestion for M/NGC/IC.
-- SH2 rows merged from local seed data.
-- Disk cache + metadata with migration/version handling.
-- Fallback to local seed data if live ingest fails.
-- In-app `Refresh catalog cache` control.
+- App loader is mediated through `catalog_service.load_catalog_data(...)` with feature modes:
+- `legacy` (active default)
+- `curated_parquet` (available fallback mode)
+- Legacy path now passes `data/DSO_CATALOG_ENRICHED.CSV` into ingestion.
+- Enriched rows load first and remain authoritative by `primary_id`.
+- Parquet cache rows are appended only for IDs not present in enriched data.
+- Legacy ingest route (OpenNGC + SIMBAD + seed fallback) remains available for rebuild/fallback.
+- Disk cache + metadata include ingestion-version migration behavior.
+- In-app `Refresh catalog cache` control remains available on the Settings page.
+- Search index includes `description` in addition to ID/name/aliases/catalog tokens.
 
 ### 3.2 Location handling
 
@@ -66,19 +79,39 @@
 
 ### 3.5 Main UI structure
 
-- Desktop split: Targets pane 35%, Detail pane 65%.
-- Phone preview mode: stacked layout with detail bottom-sheet style container.
-- Targets pane includes:
-- In-pane search input.
-- Tabs with live counts in labels: Results, Favorites, Set List.
-- Row-click selection behavior for all three tabs.
-- Set List reorder/remove actions in main pane.
+- App is now multi-page:
+- `Explorer` page
+- `Settings` page
+- Navigation uses `st.navigation`/`st.Page` when available, with sidebar-radio fallback when unavailable.
+- Settings page sections are implemented and grouped as:
+- Location
+- Display
+- Catalog
+- Obstructions
+- Settings Backup / Restore
+- Explorer page keeps search-first target selection flow plus detail/plot review.
 
 ### 3.6 Detail panel
 
 - Header with ID/name + Favorite and Set List toggles.
-- Free-use image lookup via Wikimedia (with attribution/license when available).
+- Three-column detail layout:
+- Left: image
+- Middle: description + links
+- Right: property/value table
+- Image rendering behavior:
+- Prefer catalog `image_url` (direct image URL) first.
+- Fallback to Wikimedia lookup only when catalog image URL is missing.
+- Render at max 400x400 while preserving aspect ratio (scale-to-fit, no distortion).
+- Middle-column links include:
+- image source link
+- background/info link
 - Object attributes presented as key/value property table.
+- Property rows with blank/`-` values are suppressed.
+- Property table includes enrichment fields now surfaced in UI:
+- `dist_value`, `dist_unit`
+- `redshift`
+- `morphology`
+- `emission_lines` (displayed as emissions details)
 - Tonight event summary line (rise, first-visible, culmination, last-visible).
 
 ### 3.7 Plot system
@@ -152,9 +185,13 @@
 
 ## 5. Acceptance criteria (v1)
 
-- User can search across M/NGC/IC/SH2 and select a target by row click.
-- Results/Favorites/Set List appear as tabs in the Targets pane with counts.
-- Detail panel shows required metadata, list actions, image attribution behavior, and two always-visible plots.
+- User can search across M/NGC/IC/SH2 and select a target from search suggestions.
+- App provides dedicated `Explorer` and `Settings` pages with stable navigation.
+- Settings page contains clearly defined sections for location, display, catalog, obstructions, and settings backup/restore.
+- Catalog load path supports enriched-first ingest with cache-only ID supplementation, preserving enriched values for overlapping IDs.
+- Detail panel shows required metadata, list actions, image/source/background attribution behavior, and two always-visible plots.
+- Detail panel uses the implemented 3-column layout with image scaling at max 400x400 and preserved aspect ratio.
+- Detail property table hides blank rows and surfaces enriched fields where available.
 - Sky plot supports Line/Radial and radial Dome View axis inversion.
 - Sky plot includes full-night paths for selected + Set List targets, per-target event labels, and directional movement arrows.
 - Sky obstruction rendering uses hard stepped per-direction floors in light gray.
@@ -164,7 +201,7 @@
 - Browser geolocation failure cases do not replace prior valid location.
 - App runs locally and is deployable to Streamlit Community Cloud using `main` + `app.py`.
 
-## 6. Change log from v0 to v1 (implemented)
+## 6. Change log (v0 -> current v1.2)
 
 - Full catalog ingestion via OpenNGC with cache migration and SH2 merge (PR #13).
 - Result row click opens detail directly (PR #14).
@@ -208,3 +245,14 @@
 - culmination direction
 - Set List pinned state
 - Added bulk Set List toggling from summary table via multi-row selection.
+- Multi-page app refactor with dedicated Settings page sections (issue #42, PR #43).
+- Catalog service layer introduced for loader-mode routing (`legacy` / `curated_parquet`) and centralized search/index behavior.
+- Enrichment pipeline integrated via standalone `dso_enricher/` project and app-side enriched catalog ingestion.
+- App catalog source now includes `data/DSO_CATALOG_ENRICHED.CSV` with enriched schema fields wired through ingestion and UI.
+- Enriched-first + parquet supplementation behavior added to preserve enriched rows while recovering cache-only targets (PR #45).
+- Search indexing expanded to include `description`.
+- Detail panel updated to 3-column layout with:
+- scaled direct image rendering (max 400x400, aspect ratio preserved)
+- description + source/background links column
+- enriched property/value table
+- Detail property table row rendering adjusted to suppress blank visual rows (commit `d991f41`).

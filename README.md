@@ -83,6 +83,16 @@ Notes:
 - Additional catalog quality and enrichment follow-ups
 - Catalog issue drafts to file as GitHub issues: [`catalog_issue_backlog.md`](catalog_issue_backlog.md)
 - Next-pass UI/UX polish after core behavior stabilizes
+- main planning workflow ideas:
+  - start with "Tonight at a glance"
+    - key conditions (visibility, weather, etc) hour by hour
+  - find a target (either recommended or search), see target details and hourly forecast for the target
+  - add the target to the candidate list for a given hour
+  - all targets show up on the Sky Position plot
+  - use the "tonights plan" plot to make hour by hour decisions
+- improved settings experience
+- more instructional content
+- "about this app" page with contact info
 
 ## Notes
 

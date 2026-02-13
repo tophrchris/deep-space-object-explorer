@@ -136,10 +136,8 @@ HOUR12_COUNTRY_CODES = {
     "US",
 }
 EVENT_LABELS: list[tuple[str, str]] = [
-    ("rise", "Rise"),
-    ("set", "Set"),
-    ("first_visible", "First Visible"),
-    ("last_visible", "Last Visible"),
+    ("first_visible", "First"),
+    ("last_visible", "Last"),
     ("culmination", "Culmination"),
 ]
 PATH_LINE_COLORS = [
@@ -154,9 +152,19 @@ PATH_LINE_COLORS = [
     "#7f7f7f",
     "#bcbd22",
 ]
-OBSTRUCTION_FILL_COLOR = "rgba(226, 232, 240, 0.40)"
+OBSTRUCTION_FILL_COLOR = "rgba(181, 186, 192, 0.40)"
 OBSTRUCTION_LINE_COLOR = "rgba(148, 163, 184, 0.95)"
 CARDINAL_GRIDLINE_COLOR = "rgba(100, 116, 139, 0.45)"
+DETAIL_PANE_STACK_BREAKPOINT_PX = 800
+PATH_PLOT_BACKGROUND_COLOR = "#E2F0FB"
+PATH_PLOT_HORIZONTAL_GRID_COLOR = "rgba(255, 255, 255, 0.95)"
+PATH_DIRECTION_ARROW_COLOR = "#111111"
+PATH_DIRECTION_ARROW_SIZE_PRIMARY = 10
+PATH_DIRECTION_ARROW_SIZE_OVERLAY = 9
+PATH_DIRECTION_MARKERS_PRIMARY = 4
+PATH_DIRECTION_MARKERS_OVERLAY = 3
+PATH_ENDPOINT_MARKER_SIZE_PRIMARY = 13
+PATH_ENDPOINT_MARKER_SIZE_OVERLAY = 11
 
 
 def default_preferences() -> dict[str, Any]:
@@ -405,17 +413,6 @@ def format_display_time(value: pd.Timestamp | datetime, use_12_hour: bool, inclu
         fmt = "%I:%M %p" if use_12_hour else "%H:%M"
     rendered = timestamp.strftime(fmt)
     return normalize_12_hour_label(rendered) if use_12_hour else rendered
-
-
-def format_display_time_values(
-    values: pd.Series | pd.DatetimeIndex | list[pd.Timestamp | datetime], use_12_hour: bool
-) -> np.ndarray:
-    dt_index = pd.DatetimeIndex(pd.to_datetime(values))
-    fmt = "%I:%M %p" if use_12_hour else "%H:%M"
-    rendered = dt_index.strftime(fmt).tolist()
-    if use_12_hour:
-        rendered = [normalize_12_hour_label(value) for value in rendered]
-    return np.asarray(rendered, dtype=object)
 
 
 def format_temperature(temp_celsius: float | None, unit: str) -> str:
@@ -670,11 +667,9 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         [
             "line_swatch",
             "target",
-            "rise",
             "first_visible",
             "culmination",
             "last_visible",
-            "set",
             "visible_total",
             "culmination_alt",
             "culmination_dir",
@@ -684,11 +679,9 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         columns={
             "line_swatch": "Line",
             "target": "Target",
-            "rise": "Rise",
             "first_visible": "First Visible",
             "culmination": "Peak",
             "last_visible": "Last Visible",
-            "set": "Set",
             "visible_total": "Duration",
             "culmination_alt": "Max Alt",
             "culmination_dir": "Direction",
@@ -711,17 +704,15 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         hide_index=True,
         use_container_width=True,
         on_select="rerun",
-        selection_mode="multi-row",
+        selection_mode="single-row",
         key="sky_summary_table",
         column_config={
             "Line": st.column_config.TextColumn(width="small"),
             "Target": st.column_config.TextColumn(width="large"),
-            "Rise": st.column_config.TextColumn(width="small"),
             "First Visible": st.column_config.TextColumn(width="small"),
             "Peak": st.column_config.TextColumn(width="small"),
             "Max Alt": st.column_config.TextColumn(width="small"),
             "Last Visible": st.column_config.TextColumn(width="small"),
-            "Set": st.column_config.TextColumn(width="small"),
             "Duration": st.column_config.TextColumn(width="small"),
             "Direction": st.column_config.TextColumn(width="small"),
             "Set List": st.column_config.TextColumn(width="small"),
@@ -751,11 +742,18 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         selected_ids.append(primary_id)
         selected_targets.append(str(selected_row.get("target", primary_id)))
 
+    if selected_ids:
+        selected_for_detail = selected_ids[0]
+        current_selected = str(st.session_state.get("selected_id") or "").strip()
+        if selected_for_detail and selected_for_detail != current_selected:
+            st.session_state["selected_id"] = selected_for_detail
+            st.rerun()
+
     action_cols = st.columns([5, 2], gap="small")
     if selected_targets:
         action_cols[0].caption(f"Selected: {', '.join(selected_targets)}")
     else:
-        action_cols[0].caption("Select one or more summary rows to toggle Set List.")
+        action_cols[0].caption("Click a summary row to select that target and toggle Set List.")
 
     if action_cols[1].button(
         "Toggle Selected",
@@ -775,37 +773,54 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
 
 
 def format_hour_label(value: pd.Timestamp | datetime, use_12_hour: bool) -> str:
-    return format_display_time(value, use_12_hour=use_12_hour)
+    timestamp = pd.Timestamp(value)
+    if use_12_hour:
+        return normalize_12_hour_label(timestamp.strftime("%I%p"))
+    return timestamp.strftime("%H")
+
+
+def build_path_hovertext(target_label: str, emission_details: str, time_values: np.ndarray) -> np.ndarray:
+    emissions = str(emission_details or "").strip()
+    emissions_line = f"<br>Emissions: {emissions}" if emissions else ""
+
+    hover_values: list[str] = []
+    for value in time_values:
+        time_text = str(value).strip()
+        if time_text:
+            hover_values.append(f"{target_label}{emissions_line}<br>Time: {time_text}")
+        else:
+            hover_values.append("")
+    return np.asarray(hover_values, dtype=object)
 
 
 def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if track.empty:
-        return np.array([], dtype=float), np.array([], dtype=float), np.empty((0, 3), dtype=object)
+        return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=object)
 
     az_values = track["az"].to_numpy(dtype=float)
     alt_values = track["alt"].to_numpy(dtype=float)
-    time_values = format_display_time_values(track["time_local"], use_12_hour=use_12_hour)
-    wind_values = track["wind16"].astype(str).to_numpy(dtype=object)
-    min_values = track["min_alt_required"].to_numpy(dtype=float)
+    time_values = [
+        format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in track["time_local"].tolist()
+    ]
 
     x_values: list[float] = []
     y_values: list[float] = []
-    custom_rows: list[list[object]] = []
+    hover_times: list[str] = []
 
     for idx, azimuth in enumerate(az_values):
         if idx > 0 and abs(float(azimuth) - float(az_values[idx - 1])) > 180.0:
             x_values.append(np.nan)
             y_values.append(np.nan)
-            custom_rows.append(["", "", np.nan])
+            hover_times.append("")
 
         x_values.append(float(azimuth))
         y_values.append(float(alt_values[idx]))
-        custom_rows.append([time_values[idx], wind_values[idx], float(min_values[idx])])
+        hover_times.append(time_values[idx])
 
     return (
         np.asarray(x_values, dtype=float),
         np.asarray(y_values, dtype=float),
-        np.asarray(custom_rows, dtype=object),
+        np.asarray(hover_times, dtype=object),
     )
 
 
@@ -826,11 +841,6 @@ def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, 
         event = events.get(event_key)
         if event is None:
             continue
-        if event_key == "rise":
-            visible_at_rise = event.get("visible")
-            # Only show "Rise" when the object is still obstructed at the rise timestamp.
-            if pd.isna(visible_at_rise) or bool(visible_at_rise):
-                continue
         if event_key == "culmination" and suppress_culmination:
             continue
         labeled.append((event_label, event))
@@ -844,90 +854,148 @@ def sample_direction_indices(length: int, max_markers: int = 6) -> list[int]:
     return list(range(step, length - 1, step))
 
 
-def direction_markers_cartesian(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def direction_marker_segments_cartesian(
+    track: pd.DataFrame, max_markers: int
+) -> list[tuple[float, float, float, float]]:
     if track.empty:
-        return (
-            np.array([], dtype=float),
-            np.array([], dtype=float),
-            np.array([], dtype=float),
-            np.array([], dtype=object),
-        )
+        return []
 
     az_values = track["az"].to_numpy(dtype=float)
     alt_values = track["alt"].to_numpy(dtype=float)
-    time_values = format_display_time_values(track["time_local"], use_12_hour=use_12_hour)
-    indices = [idx for idx in sample_direction_indices(len(track)) if idx < len(track) - 1]
+    indices = [idx for idx in sample_direction_indices(len(track), max_markers=max_markers) if idx < len(track) - 1]
 
-    x_values: list[float] = []
-    y_values: list[float] = []
-    angles: list[float] = []
-    labels: list[object] = []
-
+    segments: list[tuple[float, float, float, float]] = []
     for idx in indices:
         next_idx = idx + 1
-        dx = ((float(az_values[next_idx]) - float(az_values[idx]) + 180.0) % 360.0) - 180.0
-        dy = float(alt_values[next_idx]) - float(alt_values[idx])
-        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        az_start = float(az_values[idx])
+        az_end = float(az_values[next_idx])
+        alt_start = float(alt_values[idx])
+        alt_end = float(alt_values[next_idx])
+        if abs(az_end - az_start) > 180.0:
+            # Cartesian path view splits across azimuth wrap, so skip wrap-crossing marker segments.
             continue
-
-        x_values.append(float(az_values[idx]))
-        y_values.append(float(alt_values[idx]))
-        angles.append(float(np.degrees(np.arctan2(dy, dx))))
-        labels.append(f"{time_values[idx]} -> {time_values[next_idx]}")
-
-    return (
-        np.asarray(x_values, dtype=float),
-        np.asarray(y_values, dtype=float),
-        np.asarray(angles, dtype=float),
-        np.asarray(labels, dtype=object),
-    )
+        if abs(az_end - az_start) < 1e-9 and abs(alt_end - alt_start) < 1e-9:
+            continue
+        segments.append((az_start, alt_start, az_end, alt_end))
+    return segments
 
 
-def direction_markers_radial(
-    track: pd.DataFrame, radial_values: np.ndarray, use_12_hour: bool
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def direction_marker_segments_radial(
+    track: pd.DataFrame, radial_values: np.ndarray, max_markers: int
+) -> list[tuple[float, float, float, float]]:
     if track.empty:
-        return (
-            np.array([], dtype=float),
-            np.array([], dtype=float),
-            np.array([], dtype=float),
-            np.array([], dtype=object),
-        )
+        return []
 
     theta_values = track["az"].to_numpy(dtype=float)
     r_values = np.asarray(radial_values, dtype=float)
-    time_values = format_display_time_values(track["time_local"], use_12_hour=use_12_hour)
-    indices = [idx for idx in sample_direction_indices(len(track)) if idx < len(track) - 1]
+    indices = [idx for idx in sample_direction_indices(len(track), max_markers=max_markers) if idx < len(track) - 1]
 
-    theta_markers: list[float] = []
-    radial_markers: list[float] = []
-    angles: list[float] = []
-    labels: list[object] = []
-
+    segments: list[tuple[float, float, float, float]] = []
     for idx in indices:
         next_idx = idx + 1
-        current_theta = np.deg2rad(theta_values[idx])
-        next_theta = np.deg2rad(theta_values[next_idx])
-        current_x = float(r_values[idx]) * float(np.sin(current_theta))
-        current_y = float(r_values[idx]) * float(np.cos(current_theta))
-        next_x = float(r_values[next_idx]) * float(np.sin(next_theta))
-        next_y = float(r_values[next_idx]) * float(np.cos(next_theta))
-        dx = next_x - current_x
-        dy = next_y - current_y
-        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        theta_start = float(theta_values[idx])
+        theta_end = float(theta_values[next_idx])
+        r_start = float(r_values[idx])
+        r_end = float(r_values[next_idx])
+        if abs(theta_end - theta_start) > 180.0:
             continue
+        if abs(theta_end - theta_start) < 1e-9 and abs(r_end - r_start) < 1e-9:
+            continue
+        segments.append((theta_start, r_start, theta_end, r_end))
+    return segments
 
-        theta_markers.append(float(theta_values[idx]))
-        radial_markers.append(float(r_values[idx]))
-        angles.append(float(np.degrees(np.arctan2(dy, dx))))
-        labels.append(f"{time_values[idx]} -> {time_values[next_idx]}")
 
-    return (
-        np.asarray(theta_markers, dtype=float),
-        np.asarray(radial_markers, dtype=float),
-        np.asarray(angles, dtype=float),
-        np.asarray(labels, dtype=object),
-    )
+def track_event_index(track: pd.DataFrame, event: pd.Series | None) -> int | None:
+    if event is None or track.empty:
+        return None
+    try:
+        position = track.index.get_loc(event.name)
+    except Exception:
+        return None
+
+    if isinstance(position, slice):
+        return int(position.start) if position.start is not None else None
+    if isinstance(position, np.ndarray):
+        if position.size == 0:
+            return None
+        return int(position[0])
+    try:
+        return int(position)
+    except Exception:
+        return None
+
+
+def endpoint_marker_segments_cartesian(
+    track: pd.DataFrame, events: dict[str, pd.Series | None]
+) -> tuple[tuple[float, float, float, float] | None, tuple[float, float, float, float] | None]:
+    rise = events.get("rise")
+    set_event = events.get("set")
+    rise_index = track_event_index(track, rise)
+    set_index = track_event_index(track, set_event)
+
+    rise_segment: tuple[float, float, float, float] | None = None
+    if rise is not None and rise_index is not None:
+        neighbor = rise_index + 1 if rise_index + 1 < len(track) else None
+        if neighbor is not None:
+            az_rise = float(track.iloc[rise_index]["az"])
+            alt_rise = float(track.iloc[rise_index]["alt"])
+            az_next = float(track.iloc[neighbor]["az"])
+            alt_next = float(track.iloc[neighbor]["alt"])
+            if abs(az_next - az_rise) <= 180.0 and (
+                abs(az_next - az_rise) >= 1e-9 or abs(alt_next - alt_rise) >= 1e-9
+            ):
+                # Reverse points so the tail marker is drawn at the rise location.
+                rise_segment = (az_next, alt_next, az_rise, alt_rise)
+
+    set_segment: tuple[float, float, float, float] | None = None
+    if set_event is not None and set_index is not None:
+        neighbor = set_index - 1 if set_index - 1 >= 0 else None
+        if neighbor is not None:
+            az_prev = float(track.iloc[neighbor]["az"])
+            alt_prev = float(track.iloc[neighbor]["alt"])
+            az_set = float(track.iloc[set_index]["az"])
+            alt_set = float(track.iloc[set_index]["alt"])
+            if abs(az_set - az_prev) <= 180.0 and (abs(az_set - az_prev) >= 1e-9 or abs(alt_set - alt_prev) >= 1e-9):
+                set_segment = (az_prev, alt_prev, az_set, alt_set)
+
+    return rise_segment, set_segment
+
+
+def endpoint_marker_segments_radial(
+    track: pd.DataFrame,
+    events: dict[str, pd.Series | None],
+    radial_values: np.ndarray,
+) -> tuple[tuple[float, float, float, float] | None, tuple[float, float, float, float] | None]:
+    rise = events.get("rise")
+    set_event = events.get("set")
+    rise_index = track_event_index(track, rise)
+    set_index = track_event_index(track, set_event)
+
+    rise_segment: tuple[float, float, float, float] | None = None
+    if rise is not None and rise_index is not None and rise_index + 1 < len(track):
+        neighbor = rise_index + 1
+        theta_rise = float(track.iloc[rise_index]["az"])
+        r_rise = float(radial_values[rise_index])
+        theta_next = float(track.iloc[neighbor]["az"])
+        r_next = float(radial_values[neighbor])
+        if abs(theta_next - theta_rise) <= 180.0 and (
+            abs(theta_next - theta_rise) >= 1e-9 or abs(r_next - r_rise) >= 1e-9
+        ):
+            rise_segment = (theta_next, r_next, theta_rise, r_rise)
+
+    set_segment: tuple[float, float, float, float] | None = None
+    if set_event is not None and set_index is not None and set_index - 1 >= 0:
+        neighbor = set_index - 1
+        theta_prev = float(track.iloc[neighbor]["az"])
+        r_prev = float(radial_values[neighbor])
+        theta_set = float(track.iloc[set_index]["az"])
+        r_set = float(radial_values[set_index])
+        if abs(theta_set - theta_prev) <= 180.0 and (
+            abs(theta_set - theta_prev) >= 1e-9 or abs(r_set - r_prev) >= 1e-9
+        ):
+            set_segment = (theta_prev, r_prev, theta_set, r_set)
+
+    return rise_segment, set_segment
 
 
 def obstruction_step_profile(obstructions: dict[str, float]) -> tuple[np.ndarray, np.ndarray]:
@@ -956,6 +1024,7 @@ def build_path_plot(
     events: dict[str, pd.Series | None],
     obstructions: dict[str, float],
     selected_label: str,
+    selected_emissions: str,
     selected_color: str,
     use_12_hour: bool,
     set_list_tracks: list[dict[str, Any]] | None = None,
@@ -989,7 +1058,8 @@ def build_path_plot(
         )
     )
 
-    path_x, path_y, path_custom = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
+    path_x, path_y, path_times = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
+    selected_hover = build_path_hovertext(selected_label, selected_emissions, path_times)
     fig.add_trace(
         go.Scatter(
             x=path_x,
@@ -997,30 +1067,63 @@ def build_path_plot(
             mode="lines",
             name=selected_label,
             line={"width": 3, "color": selected_color},
-            customdata=path_custom,
-            hovertemplate="Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[0]}<br>Direction %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
+            hovertext=selected_hover,
+            hovertemplate="%{hovertext}<extra></extra>",
         )
     )
-
-    direction_x, direction_y, direction_angles, direction_labels = direction_markers_cartesian(
-        track, use_12_hour=use_12_hour
-    )
-    if direction_x.size:
+    rise_segment, set_segment = endpoint_marker_segments_cartesian(track, events)
+    if rise_segment is not None:
         fig.add_trace(
             go.Scatter(
-                x=direction_x,
-                y=direction_y,
+                x=[rise_segment[0], rise_segment[2]],
+                y=[rise_segment[1], rise_segment[3]],
                 mode="markers",
                 showlegend=False,
                 marker={
-                    "size": 12,
-                    "symbol": "arrow-right",
+                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
+                    "symbol": "line-ew",
+                    "angleref": "previous",
                     "color": selected_color,
-                    "angle": direction_angles,
+                    "line": {"width": 2, "color": selected_color},
+                },
+                hoverinfo="skip",
+            )
+        )
+    if set_segment is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[set_segment[0], set_segment[2]],
+                y=[set_segment[1], set_segment[3]],
+                mode="markers",
+                showlegend=False,
+                marker={
+                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
+                    "symbol": "arrow-right",
+                    "angleref": "previous",
+                    "color": selected_color,
                     "line": {"width": 0},
                 },
-                customdata=np.stack([direction_labels], axis=-1),
-                hovertemplate=f"{selected_label}<br>Moving: %{{customdata[0]}}<extra></extra>",
+                hoverinfo="skip",
+            )
+        )
+
+    direction_segments = direction_marker_segments_cartesian(track, max_markers=PATH_DIRECTION_MARKERS_PRIMARY)
+    for segment in direction_segments:
+        x_start, y_start, x_end, y_end = segment
+        fig.add_trace(
+            go.Scatter(
+                x=[x_start, x_end],
+                y=[y_start, y_end],
+                mode="markers",
+                showlegend=False,
+                marker={
+                    "size": [0, PATH_DIRECTION_ARROW_SIZE_PRIMARY],
+                    "symbol": "arrow-right",
+                    "angleref": "previous",
+                    "color": PATH_DIRECTION_ARROW_COLOR,
+                    "line": {"width": 0},
+                },
+                hoverinfo="skip",
             )
         )
 
@@ -1053,20 +1156,14 @@ def build_path_plot(
             overlay_track = target_track.get("track")
             if not isinstance(overlay_track, pd.DataFrame) or overlay_track.empty:
                 continue
-            path_x, path_y, path_custom = split_path_on_az_wrap(overlay_track, use_12_hour=use_12_hour)
+            path_x, path_y, path_times = split_path_on_az_wrap(overlay_track, use_12_hour=use_12_hour)
             if path_x.size == 0:
                 continue
 
             target_label = str(target_track.get("label", "Set List target"))
             target_color = str(target_track.get("color", "#22c55e"))
-            overlay_custom = np.stack(
-                [
-                    np.full(path_x.shape[0], target_label, dtype=object),
-                    path_custom[:, 0],
-                    path_custom[:, 1],
-                ],
-                axis=-1,
-            )
+            target_emissions = str(target_track.get("emission_lines_display") or "").strip()
+            overlay_hover = build_path_hovertext(target_label, target_emissions, path_times)
             fig.add_trace(
                 go.Scatter(
                     x=path_x,
@@ -1075,30 +1172,67 @@ def build_path_plot(
                     name=target_label,
                     showlegend=False,
                     line={"width": 2.2, "color": target_color},
-                    customdata=overlay_custom,
-                    hovertemplate="%{customdata[0]}<br>Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[1]}<br>Direction %{customdata[2]}<extra></extra>",
+                    hovertext=overlay_hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
-
-            overlay_direction_x, overlay_direction_y, overlay_direction_angles, overlay_direction_labels = (
-                direction_markers_cartesian(overlay_track, use_12_hour=use_12_hour)
+            overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_cartesian(
+                overlay_track, target_track.get("events", {})
             )
-            if overlay_direction_x.size:
+            if overlay_rise_segment is not None:
                 fig.add_trace(
                     go.Scatter(
-                        x=overlay_direction_x,
-                        y=overlay_direction_y,
+                        x=[overlay_rise_segment[0], overlay_rise_segment[2]],
+                        y=[overlay_rise_segment[1], overlay_rise_segment[3]],
                         mode="markers",
                         showlegend=False,
                         marker={
-                            "size": 11,
-                            "symbol": "arrow-right",
+                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
+                            "symbol": "line-ew",
+                            "angleref": "previous",
                             "color": target_color,
-                            "angle": overlay_direction_angles,
+                            "line": {"width": 2, "color": target_color},
+                        },
+                        hoverinfo="skip",
+                    )
+                )
+            if overlay_set_segment is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[overlay_set_segment[0], overlay_set_segment[2]],
+                        y=[overlay_set_segment[1], overlay_set_segment[3]],
+                        mode="markers",
+                        showlegend=False,
+                        marker={
+                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
+                            "symbol": "arrow-right",
+                            "angleref": "previous",
+                            "color": target_color,
                             "line": {"width": 0},
                         },
-                        customdata=np.stack([overlay_direction_labels], axis=-1),
-                        hovertemplate=f"{target_label}<br>Moving: %{{customdata[0]}}<extra></extra>",
+                        hoverinfo="skip",
+                    )
+                )
+
+            overlay_direction_segments = direction_marker_segments_cartesian(
+                overlay_track, max_markers=PATH_DIRECTION_MARKERS_OVERLAY
+            )
+            for segment in overlay_direction_segments:
+                x_start, y_start, x_end, y_end = segment
+                fig.add_trace(
+                    go.Scatter(
+                        x=[x_start, x_end],
+                        y=[y_start, y_end],
+                        mode="markers",
+                        showlegend=False,
+                        marker={
+                            "size": [0, PATH_DIRECTION_ARROW_SIZE_OVERLAY],
+                            "symbol": "arrow-right",
+                            "angleref": "previous",
+                            "color": PATH_DIRECTION_ARROW_COLOR,
+                            "line": {"width": 0},
+                        },
+                        hoverinfo="skip",
                     )
                 )
 
@@ -1131,11 +1265,17 @@ def build_path_plot(
         height=330,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
+        plot_bgcolor=PATH_PLOT_BACKGROUND_COLOR,
         xaxis_title="Azimuth",
         yaxis_title="Altitude (deg)",
     )
     fig.update_xaxes(tickvals=[i * 22.5 for i in range(16)], ticktext=WIND16, range=[0, 360])
-    fig.update_yaxes(range=[0, 90])
+    fig.update_yaxes(
+        range=[0, 90],
+        showgrid=True,
+        gridcolor=PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        gridwidth=1,
+    )
     return fig
 
 
@@ -1145,6 +1285,7 @@ def build_path_plot_radial(
     obstructions: dict[str, float],
     dome_view: bool,
     selected_label: str,
+    selected_emissions: str,
     selected_color: str,
     use_12_hour: bool,
     set_list_tracks: list[dict[str, Any]] | None = None,
@@ -1201,6 +1342,11 @@ def build_path_plot_radial(
             )
         )
 
+    selected_time_values = np.asarray(
+        [format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in track["time_local"].tolist()],
+        dtype=object,
+    )
+    selected_hover = build_path_hovertext(selected_label, selected_emissions, selected_time_values)
     fig.add_trace(
         go.Scatterpolar(
             theta=track["az"],
@@ -1208,38 +1354,66 @@ def build_path_plot_radial(
             mode="lines",
             name=selected_label,
             line={"width": 3, "color": selected_color},
-            customdata=np.stack(
-                [
-                    format_display_time_values(track["time_local"], use_12_hour=use_12_hour),
-                    track["wind16"],
-                    track["min_alt_required"],
-                    track["alt"],
-                ],
-                axis=-1,
-            ),
-            hovertemplate="Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[0]}<br>Direction %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
+            hovertext=selected_hover,
+            hovertemplate="%{hovertext}<extra></extra>",
         )
     )
-
-    selected_direction_theta, selected_direction_r, selected_direction_angles, selected_direction_labels = (
-        direction_markers_radial(track, np.asarray(track_r, dtype=float), use_12_hour=use_12_hour)
-    )
-    if selected_direction_theta.size:
+    radial_values = np.asarray(track_r, dtype=float)
+    rise_segment, set_segment = endpoint_marker_segments_radial(track, events, radial_values)
+    if rise_segment is not None:
         fig.add_trace(
             go.Scatterpolar(
-                theta=selected_direction_theta,
-                r=selected_direction_r,
+                theta=[rise_segment[0], rise_segment[2]],
+                r=[rise_segment[1], rise_segment[3]],
                 mode="markers",
                 showlegend=False,
                 marker={
-                    "size": 12,
-                    "symbol": "arrow-right",
+                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
+                    "symbol": "line-ew",
+                    "angleref": "previous",
                     "color": selected_color,
-                    "angle": selected_direction_angles,
+                    "line": {"width": 2, "color": selected_color},
+                },
+                hoverinfo="skip",
+            )
+        )
+    if set_segment is not None:
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[set_segment[0], set_segment[2]],
+                r=[set_segment[1], set_segment[3]],
+                mode="markers",
+                showlegend=False,
+                marker={
+                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
+                    "symbol": "arrow-right",
+                    "angleref": "previous",
+                    "color": selected_color,
                     "line": {"width": 0},
                 },
-                customdata=np.stack([selected_direction_labels], axis=-1),
-                hovertemplate=f"{selected_label}<br>Moving: %{{customdata[0]}}<extra></extra>",
+                hoverinfo="skip",
+            )
+        )
+
+    selected_direction_segments = direction_marker_segments_radial(
+        track, np.asarray(track_r, dtype=float), max_markers=PATH_DIRECTION_MARKERS_PRIMARY
+    )
+    for segment in selected_direction_segments:
+        theta_start, r_start, theta_end, r_end = segment
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[theta_start, theta_end],
+                r=[r_start, r_end],
+                mode="markers",
+                showlegend=False,
+                marker={
+                    "size": [0, PATH_DIRECTION_ARROW_SIZE_PRIMARY],
+                    "symbol": "arrow-right",
+                    "angleref": "previous",
+                    "color": PATH_DIRECTION_ARROW_COLOR,
+                    "line": {"width": 0},
+                },
+                hoverinfo="skip",
             )
         )
 
@@ -1278,17 +1452,17 @@ def build_path_plot_radial(
 
             target_label = str(target_track.get("label", "Set List target"))
             target_color = str(target_track.get("color", "#22c55e"))
+            target_emissions = str(target_track.get("emission_lines_display") or "").strip()
             overlay_alt = overlay_track["alt"].clip(lower=0.0, upper=90.0)
             overlay_r = (90.0 - overlay_alt) if dome_view else overlay_alt
-            overlay_custom = np.stack(
+            overlay_time_values = np.asarray(
                 [
-                    np.full(len(overlay_track), target_label, dtype=object),
-                    format_display_time_values(overlay_track["time_local"], use_12_hour=use_12_hour),
-                    overlay_track["wind16"].astype(str),
-                    overlay_track["alt"],
+                    format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+                    for value in overlay_track["time_local"].tolist()
                 ],
-                axis=-1,
+                dtype=object,
             )
+            overlay_hover = build_path_hovertext(target_label, target_emissions, overlay_time_values)
             fig.add_trace(
                 go.Scatterpolar(
                     theta=overlay_track["az"],
@@ -1297,32 +1471,68 @@ def build_path_plot_radial(
                     name=target_label,
                     showlegend=False,
                     line={"width": 2.2, "color": target_color},
-                    customdata=overlay_custom,
-                    hovertemplate="%{customdata[0]}<br>Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[1]}<br>Direction %{customdata[2]}<extra></extra>",
+                    hovertext=overlay_hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
-
-            overlay_direction_theta, overlay_direction_r, overlay_direction_angles, overlay_direction_labels = (
-                direction_markers_radial(
-                    overlay_track, np.asarray(overlay_r, dtype=float), use_12_hour=use_12_hour
-                )
+            overlay_radial_values = np.asarray(overlay_r, dtype=float)
+            overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_radial(
+                overlay_track, target_track.get("events", {}), overlay_radial_values
             )
-            if overlay_direction_theta.size:
+            if overlay_rise_segment is not None:
                 fig.add_trace(
                     go.Scatterpolar(
-                        theta=overlay_direction_theta,
-                        r=overlay_direction_r,
+                        theta=[overlay_rise_segment[0], overlay_rise_segment[2]],
+                        r=[overlay_rise_segment[1], overlay_rise_segment[3]],
                         mode="markers",
                         showlegend=False,
                         marker={
-                            "size": 11,
-                            "symbol": "arrow-right",
+                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
+                            "symbol": "line-ew",
+                            "angleref": "previous",
                             "color": target_color,
-                            "angle": overlay_direction_angles,
+                            "line": {"width": 2, "color": target_color},
+                        },
+                        hoverinfo="skip",
+                    )
+                )
+            if overlay_set_segment is not None:
+                fig.add_trace(
+                    go.Scatterpolar(
+                        theta=[overlay_set_segment[0], overlay_set_segment[2]],
+                        r=[overlay_set_segment[1], overlay_set_segment[3]],
+                        mode="markers",
+                        showlegend=False,
+                        marker={
+                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
+                            "symbol": "arrow-right",
+                            "angleref": "previous",
+                            "color": target_color,
                             "line": {"width": 0},
                         },
-                        customdata=np.stack([overlay_direction_labels], axis=-1),
-                        hovertemplate=f"{target_label}<br>Moving: %{{customdata[0]}}<extra></extra>",
+                        hoverinfo="skip",
+                    )
+                )
+
+            overlay_direction_segments = direction_marker_segments_radial(
+                overlay_track, np.asarray(overlay_r, dtype=float), max_markers=PATH_DIRECTION_MARKERS_OVERLAY
+            )
+            for segment in overlay_direction_segments:
+                theta_start, r_start, theta_end, r_end = segment
+                fig.add_trace(
+                    go.Scatterpolar(
+                        theta=[theta_start, theta_end],
+                        r=[r_start, r_end],
+                        mode="markers",
+                        showlegend=False,
+                        marker={
+                            "size": [0, PATH_DIRECTION_ARROW_SIZE_OVERLAY],
+                            "symbol": "arrow-right",
+                            "angleref": "previous",
+                            "color": PATH_DIRECTION_ARROW_COLOR,
+                            "line": {"width": 0},
+                        },
+                        hoverinfo="skip",
                     )
                 )
 
@@ -1361,6 +1571,7 @@ def build_path_plot_radial(
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
         polar={
+            "bgcolor": PATH_PLOT_BACKGROUND_COLOR,
             "angularaxis": {
                 "rotation": 90,
                 "direction": "clockwise",
@@ -1374,6 +1585,7 @@ def build_path_plot_radial(
                 "tickvals": [0, 30, 60, 90],
                 "ticktext": radial_ticktext,
                 "title": radial_title,
+                "gridcolor": PATH_PLOT_HORIZONTAL_GRID_COLOR,
             },
         },
     )
@@ -1483,7 +1695,10 @@ def build_night_plot(
             hovertext=obstructed_hover,
             hovertemplate="%{hovertext}<extra></extra>",
             name="Obstructed",
-            marker={"color": "rgba(239, 68, 68, 0.55)"},
+            marker={
+                "color": OBSTRUCTION_FILL_COLOR,
+                "line": {"color": OBSTRUCTION_LINE_COLOR, "width": 1},
+            },
         )
     )
     fig.add_trace(
@@ -1493,16 +1708,16 @@ def build_night_plot(
             hovertext=clear_hover,
             hovertemplate="%{hovertext}<extra></extra>",
             name="Clear",
-            marker={"color": "rgba(34, 197, 94, 0.65)"},
+            marker={"color": "#044179"},
         )
     )
     fig.add_trace(
         go.Scatter(
             x=frame["hour_label"],
-            y=frame["max_alt"] + 1.5,
+            y=np.full(len(frame), -4.5),
             mode="text",
             text=labels,
-            textposition="top center",
+            textposition="middle center",
             showlegend=False,
             hoverinfo="skip",
         )
@@ -1514,9 +1729,10 @@ def build_night_plot(
 
     fig.update_layout(
         title=title,
-        height=300,
+        height=400,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         barmode="stack",
+        bargap=0.06,
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -1524,11 +1740,17 @@ def build_night_plot(
             "xanchor": "left",
             "x": 0.0,
         },
-        xaxis_title="Hour",
         yaxis_title="Altitude (deg)",
     )
-    fig.update_xaxes(type="category", categoryorder="array", categoryarray=frame["hour_label"].tolist())
-    fig.update_yaxes(range=[0, 95])
+    fig.update_xaxes(
+        type="category",
+        categoryorder="array",
+        categoryarray=frame["hour_label"].tolist(),
+        showgrid=True,
+        gridwidth=1,
+        gridcolor="rgba(148, 163, 184, 0.35)",
+    )
+    fig.update_yaxes(range=[-10, 95], tickvals=[0, 15, 30, 45, 60, 75, 90])
     return fig
 
 
@@ -2375,6 +2597,7 @@ def render_detail_panel(
     prefs: dict[str, Any],
     temperature_unit: str,
     use_12_hour: bool,
+    detail_stack_vertical: bool,
 ) -> None:
     def clean_text(value: Any) -> str:
         if value is None:
@@ -2438,7 +2661,17 @@ def render_detail_panel(
 
         st.caption(f"Catalog: {selected['catalog']} | Type: {selected.get('object_type') or '-'}")
 
-        detail_cols = st.columns([1.05, 1.15, 1.0])
+        if detail_stack_vertical:
+            image_container = st.container()
+            description_container = st.container()
+            property_container = st.container()
+            forecast_container = st.container()
+        else:
+            detail_cols = st.columns([1.05, 1.15, 1.0, 1.2])
+            image_container = detail_cols[0]
+            description_container = detail_cols[1]
+            property_container = detail_cols[2]
+            forecast_container = detail_cols[3]
         catalog_image_url = clean_text(selected.get("image_url"))
         image_source_url = clean_text(selected.get("image_attribution_url"))
         image_license = clean_text(selected.get("license_label"))
@@ -2463,7 +2696,7 @@ def render_detail_panel(
         emission_details_display = re.sub(r"[\[\]]", "", emission_details)
         description = clean_text(selected.get("description"))
 
-        with detail_cols[0]:
+        with image_container:
             if image_url:
                 image_url_html = html.escape(image_url, quote=True)
                 image_tag = (
@@ -2476,7 +2709,7 @@ def render_detail_panel(
             else:
                 st.info("No image URL available for this target.")
 
-        with detail_cols[1]:
+        with description_container:
             st.markdown("**Description**")
             st.write(description or "-")
             if image_source_url:
@@ -2486,7 +2719,7 @@ def render_detail_panel(
             if image_license:
                 st.caption(f"License/Credit: {image_license}")
 
-        with detail_cols[2]:
+        with property_container:
             property_items = [
                 {
                     "Property": "RA / Dec",
@@ -2519,6 +2752,8 @@ def render_detail_panel(
                     use_container_width=True,
                     height=table_height,
                 )
+        with forecast_container:
+            forecast_placeholder = st.empty()
 
         location = prefs["location"]
         window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
@@ -2561,11 +2796,13 @@ def render_detail_panel(
             set_list_label = (
                 f"{set_list_target_id} - {set_list_common_name}" if set_list_common_name else set_list_target_id
             )
+            set_list_emission_details = re.sub(r"[\[\]]", "", clean_text(set_list_target.get("emission_lines")))
             set_list_tracks.append(
                 {
                     "primary_id": set_list_target_id,
                     "common_name": set_list_common_name,
                     "label": set_list_label,
+                    "emission_lines_display": set_list_emission_details,
                     "color": PATH_LINE_COLORS[color_cursor % len(PATH_LINE_COLORS)],
                     "track": set_list_track,
                     "events": extract_events(set_list_track),
@@ -2618,6 +2855,7 @@ def render_detail_panel(
                 obstructions=prefs["obstructions"],
                 dome_view=dome_view,
                 selected_label=selected_label,
+                selected_emissions=emission_details_display,
                 selected_color=selected_color,
                 use_12_hour=use_12_hour,
                 set_list_tracks=set_list_tracks,
@@ -2628,6 +2866,7 @@ def render_detail_panel(
                 events=events,
                 obstructions=prefs["obstructions"],
                 selected_label=selected_label,
+                selected_emissions=emission_details_display,
                 selected_color=selected_color,
                 use_12_hour=use_12_hour,
                 set_list_tracks=set_list_tracks,
@@ -2657,7 +2896,7 @@ def render_detail_panel(
             start_local_iso=window_start.isoformat(),
             end_local_iso=window_end.isoformat(),
         )
-        st.plotly_chart(
+        forecast_placeholder.plotly_chart(
             build_night_plot(
                 track=track,
                 temperature_by_hour=temperatures,
@@ -2676,6 +2915,7 @@ def render_explorer_page(
     prefs: dict[str, Any],
     temperature_unit: str,
     use_12_hour: bool,
+    detail_stack_vertical: bool,
 ) -> None:
     persistence_notice = st.session_state.get("prefs_persistence_notice", "")
     if persistence_notice:
@@ -2726,6 +2966,7 @@ def render_explorer_page(
             prefs=prefs,
             temperature_unit=temperature_unit,
             use_12_hour=use_12_hour,
+            detail_stack_vertical=detail_stack_vertical,
         )
 
 
@@ -2776,6 +3017,21 @@ def main() -> None:
         st.session_state["browser_hour_cycle"] = browser_hour_cycle_raw.strip()
     browser_hour_cycle = st.session_state.get("browser_hour_cycle")
     use_12_hour = resolve_12_hour_clock(browser_language, browser_hour_cycle)
+    viewport_width_raw = streamlit_js_eval(
+        js_expressions="window.innerWidth",
+        key="browser_viewport_width_probe",
+    )
+    if isinstance(viewport_width_raw, (int, float)) and float(viewport_width_raw) > 0:
+        st.session_state["browser_viewport_width"] = int(float(viewport_width_raw))
+    elif isinstance(viewport_width_raw, str):
+        try:
+            parsed_width = float(viewport_width_raw.strip())
+            if parsed_width > 0:
+                st.session_state["browser_viewport_width"] = int(parsed_width)
+        except (TypeError, ValueError):
+            pass
+    browser_viewport_width = int(st.session_state.get("browser_viewport_width", 1920))
+    detail_stack_vertical = browser_viewport_width < DETAIL_PANE_STACK_BREAKPOINT_PX
 
     effective_temperature_unit = resolve_temperature_unit(
         str(prefs.get("temperature_unit", "auto")),
@@ -2801,6 +3057,7 @@ def main() -> None:
             prefs=prefs,
             temperature_unit=effective_temperature_unit,
             use_12_hour=use_12_hour,
+            detail_stack_vertical=detail_stack_vertical,
         )
 
     def settings_page() -> None:
