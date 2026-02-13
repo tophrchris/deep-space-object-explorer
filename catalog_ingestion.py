@@ -82,6 +82,13 @@ def _merge_alias_values(existing: str, additions: list[str]) -> str:
     return ";".join(merged)
 
 
+def _error_summary(error: Exception) -> str:
+    message = str(error).strip()
+    if message:
+        return f"{error.__class__.__name__}: {message}"
+    return error.__class__.__name__
+
+
 def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
@@ -277,7 +284,7 @@ def _query_simbad_tap(query: str) -> pd.DataFrame:
 
     if last_error is None:
         raise RuntimeError("SIMBAD TAP query failed without explicit error")
-    raise RuntimeError(f"SIMBAD TAP query failed: {last_error.__class__.__name__}") from last_error
+    raise RuntimeError(f"SIMBAD TAP query failed: {_error_summary(last_error)}") from last_error
 
 
 def _canonical_primary_id_from_simbad_identifier(raw_identifier: str) -> str | None:
@@ -628,7 +635,7 @@ def load_unified_catalog(
         frame = ingest_from_seed(seed_path)
         load_mode = "seed_fallback"
         source_parts.append(str(seed_path))
-        notes.append(f"OpenNGC ingest failed: {error.__class__.__name__}")
+        notes.append(f"OpenNGC ingest failed: {_error_summary(error)}")
 
     try:
         sh2_frame = ingest_sh2_from_simbad()
@@ -639,7 +646,7 @@ def load_unified_catalog(
         sh2_frame = ingest_sh2_from_seed(seed_path)
         simbad_metadata["sh2_source"] = "seed_fallback"
         simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
-        notes.append(f"SIMBAD SH2 ingest failed: {error.__class__.__name__}")
+        notes.append(f"SIMBAD SH2 ingest failed: {_error_summary(error)}")
 
     frame = merge_catalogs(frame, sh2_frame)
 
@@ -650,7 +657,7 @@ def load_unified_catalog(
         simbad_metadata["m_ngc_enriched_rows"] = int(enriched_count)
     except Exception as error:
         simbad_metadata["m_ngc_enriched_rows"] = 0
-        notes.append(f"SIMBAD M/NGC enrichment failed: {error.__class__.__name__}")
+        notes.append(f"SIMBAD M/NGC enrichment failed: {_error_summary(error)}")
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(cache_path, index=False)
