@@ -1,8 +1,8 @@
-# DSO Explorer — Web Prototype PRD (v1)
+# DSO Explorer — Web Prototype PRD (v1.1)
 
-> This document supersedes `dso_explorer_web_prd_v0.md` and reflects the implemented product state after merged changes through **February 12, 2026**.
+> This document supersedes `dso_explorer_web_prd_v0.md` and reflects the implemented product state through **February 13, 2026**.
 
-- Updated: 2026-02-12
+- Updated: 2026-02-13
 - Platforms: phone + tablet + laptop (responsive)
 - Runtime target: Streamlit Community Cloud (private GitHub repo supported)
 
@@ -89,7 +89,24 @@
 - `true`: center = 90 deg altitude.
 - `false`: center = 0 deg altitude.
 - Style and dome preferences persist across target switches.
-- Legend positioned above chart.
+- Selected target always renders as full-night path.
+- Set List targets render as additional full-night paths (same sunset->sunrise window).
+- All plotted target paths are solid lines and color-coded by target.
+- Event labels are rendered per plotted target:
+- `Rise`, `Set`, `First Visible`, `Last Visible`, `Culmination`.
+- Direction arrows are rendered along each plotted path to indicate motion over time.
+- Obstruction region renders as a hard stepped 16-bin floor (no smoothing), with light-gray fill.
+- Sky Position legend is disabled; path identity is provided in the summary table below the plot.
+- Sky Position Summary table (under chart):
+- Implemented as sortable Streamlit dataframe.
+- Columns:
+- `Line` (color swatch)
+- `Target`
+- `Rise`, `First Visible`, `Culmination`, `Last Visible`, `Set`
+- `Visible` (total visible duration across tonight window)
+- `Culm Dir` (compass direction at culmination)
+- `Set List` (Pinned/Unpinned state)
+- Multi-row selection supports bulk Set List toggling via `Toggle Selected` action.
 
 - Hourly Forecast plot:
 - Stacked hourly bars where total height is hourly max altitude.
@@ -139,6 +156,9 @@
 - Results/Favorites/Set List appear as tabs in the Targets pane with counts.
 - Detail panel shows required metadata, list actions, image attribution behavior, and two always-visible plots.
 - Sky plot supports Line/Radial and radial Dome View axis inversion.
+- Sky plot includes full-night paths for selected + Set List targets, per-target event labels, and directional movement arrows.
+- Sky obstruction rendering uses hard stepped per-direction floors in light gray.
+- Sky Position summary appears under the chart as a sortable table with event times, total visible time, culmination direction, and bulk Set List toggling.
 - Hourly plot renders stacked obstructed/clear bars with direction and temperature labeling.
 - Alt/Az refreshes at least every 60 seconds.
 - Browser geolocation failure cases do not replace prior valid location.
@@ -175,3 +195,16 @@
 - runtime pin
 - cloud-safe preference persistence fallback
 - README deploy instructions (commit `69dd9cc`)
+
+- Sky Position multi-target enhancement set (issue #32 branch):
+- Set List entries plotted as full-night path overlays (not single-point markers).
+- Paths standardized to solid lines, with per-target event labels and motion-direction arrows.
+- Sky Position legend removed.
+- Obstruction region changed to hard stepped floors with light-gray styling.
+- Added sortable Sky Position summary dataframe with:
+- color swatch line indicator
+- rise/first visible/culmination/last visible/set times
+- total visible duration
+- culmination direction
+- Set List pinned state
+- Added bulk Set List toggling from summary table via multi-row selection.
