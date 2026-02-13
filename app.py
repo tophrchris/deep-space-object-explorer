@@ -1840,7 +1840,7 @@ def render_searchbox_results(catalog: pd.DataFrame, *, lat: float, lon: float) -
             placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
             key="targets_searchbox_component",
             help="Type to filter suggestions, then use arrow keys + Enter to select.",
-            clear_on_submit=False,
+            clear_on_submit=True,
             edit_after_submit="option",
             rerun_on_update=True,
             debounce=150,
