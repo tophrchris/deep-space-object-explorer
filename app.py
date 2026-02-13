@@ -34,6 +34,13 @@ from streamlit_js_eval import (
     streamlit_js_eval,
 )
 from streamlit_autorefresh import st_autorefresh
+from prefs_cookie_backup import (
+    bootstrap_cookie_backup,
+    get_cookie_backup_notice,
+    read_preferences_cookie_backup,
+    set_cookie_backup_runtime_enabled,
+    write_preferences_cookie_backup,
+)
 from timezonefinder import TimezoneFinder
 
 st.set_page_config(page_title="DSO Explorer", page_icon="✨", layout="wide")
@@ -87,6 +94,9 @@ CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
 BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v1"
+ENABLE_COOKIE_BACKUP = True
+PREFS_BOOTSTRAP_MAX_RUNS = 6
+PREFS_BOOTSTRAP_RETRY_INTERVAL_MS = 250
 SETTINGS_EXPORT_FORMAT_VERSION = 1
 
 TEMPERATURE_UNIT_OPTIONS = {
@@ -187,32 +197,94 @@ def decode_preferences_from_storage(raw_value: str) -> dict[str, Any] | None:
         return None
 
 
-def load_preferences() -> dict[str, Any]:
-    raw_value = get_local_storage(BROWSER_PREFS_STORAGE_KEY, component_key="browser_prefs_read")
-    if isinstance(raw_value, str) and raw_value.strip():
-        decoded = decode_preferences_from_storage(raw_value)
+# Optional cookie backup is isolated in `prefs_cookie_backup.py`.
+# Toggle `ENABLE_COOKIE_BACKUP` above to disable it without code removal.
+# Full removal later: delete the `prefs_cookie_backup` import, remove the
+# integration calls below, remove `extra-streamlit-components` from requirements,
+# and delete `prefs_cookie_backup.py`.
+
+
+def load_preferences() -> tuple[dict[str, Any], bool]:
+    retry_needed = False
+    raw_local = get_local_storage(BROWSER_PREFS_STORAGE_KEY, component_key="browser_prefs_read")
+    local_exists_probe = streamlit_js_eval(
+        js_expressions=(
+            "Object.prototype.hasOwnProperty.call(window.localStorage, "
+            + json.dumps(BROWSER_PREFS_STORAGE_KEY)
+            + ")"
+        ),
+        key="browser_prefs_local_exists_probe",
+    )
+
+    if raw_local is None and local_exists_probe is None:
+        retry_needed = True
+
+    if isinstance(raw_local, str) and raw_local.strip():
+        decoded = decode_preferences_from_storage(raw_local)
         if decoded is not None:
             st.session_state.pop("prefs_persistence_notice", None)
-            return decoded
-    return default_preferences()
+            return decoded, False
+    elif local_exists_probe is True:
+        # Local key appears to exist but returned value is unavailable in this pass.
+        retry_needed = True
+
+    raw_cookie = read_preferences_cookie_backup()
+    if isinstance(raw_cookie, str) and raw_cookie.strip():
+        decoded_cookie = decode_preferences_from_storage(raw_cookie)
+        if decoded_cookie is not None:
+            try:
+                payload_hash = hashlib.sha1(raw_cookie.encode("ascii")).hexdigest()[:12]
+                set_local_storage(
+                    BROWSER_PREFS_STORAGE_KEY,
+                    raw_cookie,
+                    component_key=f"browser_prefs_rehydrate_{payload_hash}",
+                )
+            except Exception:
+                pass
+
+            st.session_state.pop("prefs_persistence_notice", None)
+            return decoded_cookie, False
+
+    return default_preferences(), retry_needed
 
 
 def save_preferences(prefs: dict[str, Any]) -> bool:
     try:
         encoded = encode_preferences_for_storage(prefs)
-        payload_hash = hashlib.sha1(encoded.encode("ascii")).hexdigest()[:12]
-        set_local_storage(
-            BROWSER_PREFS_STORAGE_KEY,
-            encoded,
-            component_key=f"browser_prefs_write_{payload_hash}",
-        )
-        st.session_state.pop("prefs_persistence_notice", None)
-        return True
     except Exception:
         st.session_state["prefs_persistence_notice"] = (
             "Browser-local preference storage is unavailable. Using session-only preferences."
         )
         return False
+
+    payload_hash = hashlib.sha1(encoded.encode("ascii")).hexdigest()[:12]
+    local_saved = False
+    try:
+        set_local_storage(
+            BROWSER_PREFS_STORAGE_KEY,
+            encoded,
+            component_key=f"browser_prefs_write_{payload_hash}",
+        )
+        local_saved = True
+    except Exception:
+        local_saved = False
+
+    cookie_saved = write_preferences_cookie_backup(encoded)
+
+    if local_saved:
+        st.session_state.pop("prefs_persistence_notice", None)
+        return True
+
+    if cookie_saved:
+        st.session_state["prefs_persistence_notice"] = (
+            "Browser-local preference storage is unavailable. Using cookie backup preferences."
+        )
+        return True
+
+    st.session_state["prefs_persistence_notice"] = (
+        "Browser-local preference storage is unavailable. Using session-only preferences."
+    )
+    return False
 
 
 def build_settings_export_payload(prefs: dict[str, Any]) -> dict[str, Any]:
@@ -1344,7 +1416,7 @@ def build_path_plot_radial(
 
     fig.update_layout(
         title="Sky Position",
-        height=330,
+        height=660,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
         polar={
@@ -1910,26 +1982,32 @@ def searchbox_target_options(
     catalog: pd.DataFrame,
     lat: float,
     lon: float,
-    favorite_ids: set[str] | None = None,
+    favorite_ids: list[str] | set[str] | None = None,
     max_options: int = 10,
 ) -> list[tuple[str, str]]:
     query = str(search_term or "").strip()
     if not query:
         return []
 
-    favorite_set = {str(value) for value in (favorite_ids or set())}
-    matches = search_catalog(catalog, query).copy()
+    favorite_list = [str(value) for value in (favorite_ids or [])]
+    favorite_set = set(favorite_list)
+    query_norm = normalize_text(query)
+    if query_norm in {"favorite", "favorites"}:
+        matches = subset_by_id_list(catalog, favorite_list).copy()
+    else:
+        matches = search_catalog(catalog, query).copy()
     if matches.empty:
         return []
 
-    matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
-    matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
-    matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
-    matches = matches.sort_values(
-        by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
-        ascending=[True, True, True, True],
-        kind="stable",
-    ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
+    if query_norm not in {"favorite", "favorites"}:
+        matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
+        matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
+        matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
+        matches = matches.sort_values(
+            by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
+            ascending=[True, True, True, True],
+            kind="stable",
+        ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
     matches = matches.head(max_options)
 
     enriched = compute_altaz_now(matches, lat=lat, lon=lon)
@@ -1950,7 +2028,7 @@ def render_searchbox_results(
     *,
     lat: float,
     lon: float,
-    favorite_ids: set[str] | None = None,
+    favorite_ids: list[str] | set[str] | None = None,
 ) -> str | None:
     if catalog.empty:
         st.info("No targets matched that search.")
@@ -2165,6 +2243,10 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_
         persistence_notice = st.session_state.get("prefs_persistence_notice", "")
         if persistence_notice:
             st.warning(persistence_notice)
+
+        cookie_backup_notice = get_cookie_backup_notice()
+        if cookie_backup_notice:
+            st.caption(cookie_backup_notice)
 
         location_notice = st.session_state.pop("location_notice", "")
         if location_notice:
@@ -2547,17 +2629,32 @@ def render_detail_panel(
 
 def main() -> None:
     st_autorefresh(interval=60_000, key="altaz_refresh")
+    set_cookie_backup_runtime_enabled(ENABLE_COOKIE_BACKUP)
+    bootstrap_cookie_backup()
 
     if "prefs_bootstrap_runs" not in st.session_state:
         st.session_state["prefs_bootstrap_runs"] = 0
+    if "prefs_bootstrapped" not in st.session_state:
+        st.session_state["prefs_bootstrapped"] = False
     if "prefs" not in st.session_state:
         st.session_state["prefs"] = default_preferences()
 
-    if int(st.session_state.get("prefs_bootstrap_runs", 0)) < 2:
-        st.session_state["prefs"] = load_preferences()
-        st.session_state["prefs_bootstrap_runs"] = int(st.session_state.get("prefs_bootstrap_runs", 0)) + 1
-        if int(st.session_state.get("prefs_bootstrap_runs", 0)) < 2:
-            st.rerun()
+    if not bool(st.session_state.get("prefs_bootstrapped", False)):
+        runs = int(st.session_state.get("prefs_bootstrap_runs", 0))
+        loaded_prefs, retry_needed = load_preferences()
+        st.session_state["prefs"] = loaded_prefs
+        runs += 1
+        st.session_state["prefs_bootstrap_runs"] = runs
+
+        if retry_needed and runs < PREFS_BOOTSTRAP_MAX_RUNS:
+            st_autorefresh(
+                interval=PREFS_BOOTSTRAP_RETRY_INTERVAL_MS,
+                limit=1,
+                key=f"prefs_bootstrap_wait_{runs}",
+            )
+            st.stop()
+
+        st.session_state["prefs_bootstrapped"] = True
 
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
@@ -2611,7 +2708,7 @@ def main() -> None:
     )
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
     location = prefs["location"]
-    favorite_ids = {str(item) for item in prefs["favorites"]}
+    favorite_ids = [str(item) for item in prefs["favorites"]]
     with st.container():
         st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
         render_searchbox_results(
