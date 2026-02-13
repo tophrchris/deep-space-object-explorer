@@ -1766,7 +1766,7 @@ def subset_by_id_list(frame: pd.DataFrame, ordered_ids: list[str]) -> pd.DataFra
     return subset
 
 
-def format_search_suggestion(row: pd.Series) -> str:
+def format_search_suggestion(row: pd.Series, *, is_favorite: bool = False) -> str:
     primary_id = str(row.get("primary_id") or "").strip() or "Unknown ID"
     common_name = str(row.get("common_name") or "").strip()
     object_type = str(row.get("object_type") or "").strip() or "Unknown type"
@@ -1779,7 +1779,30 @@ def format_search_suggestion(row: pd.Series) -> str:
         alt_text = "--"
 
     id_and_name = f"{primary_id} - {common_name}" if common_name else primary_id
-    return f"{id_and_name} • {object_type} • {arrow} {wind} {alt_text}"
+    favorite_suffix = " ⭐" if is_favorite else ""
+    return f"{id_and_name} • {object_type} • {arrow} {wind} {alt_text}{favorite_suffix}"
+
+
+def catalog_search_rank(catalog_value: str | None) -> int:
+    norm = normalize_text(catalog_value)
+    if norm in {"m", "messier"} or norm.startswith("messier"):
+        return 0
+    if norm.startswith("sha") or norm.startswith("sh2") or norm.startswith("sh") or norm.startswith("sharpless"):
+        return 1
+    if norm.startswith("ic"):
+        return 2
+    if norm.startswith("ngc"):
+        return 3
+    return 4
+
+
+def object_type_search_rank(object_type_value: str | None) -> int:
+    norm = normalize_text(object_type_value)
+    if "galaxy" in norm:
+        return 0
+    if "nebula" in norm or "hii" in norm:
+        return 1
+    return 2
 
 
 def clear_targets_search_selection() -> None:
@@ -1793,21 +1816,48 @@ def searchbox_target_options(
     catalog: pd.DataFrame,
     lat: float,
     lon: float,
+    favorite_ids: set[str] | None = None,
     max_options: int = 10,
 ) -> list[tuple[str, str]]:
     query = str(search_term or "").strip()
     if not query:
         return []
 
-    matches = search_catalog(catalog, query).head(max_options).copy()
+    favorite_set = {str(value) for value in (favorite_ids or set())}
+    matches = search_catalog(catalog, query).copy()
     if matches.empty:
         return []
 
+    matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
+    matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
+    matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
+    matches = matches.sort_values(
+        by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
+        ascending=[True, True, True, True],
+        kind="stable",
+    ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
+    matches = matches.head(max_options)
+
     enriched = compute_altaz_now(matches, lat=lat, lon=lon)
-    return [(format_search_suggestion(row), str(row["primary_id"])) for _, row in enriched.iterrows()]
+    options: list[tuple[str, str]] = []
+    for _, row in enriched.iterrows():
+        primary_id = str(row.get("primary_id") or "")
+        options.append(
+            (
+                format_search_suggestion(row, is_favorite=primary_id in favorite_set),
+                primary_id,
+            )
+        )
+    return options
 
 
-def render_searchbox_results(catalog: pd.DataFrame, *, lat: float, lon: float) -> str | None:
+def render_searchbox_results(
+    catalog: pd.DataFrame,
+    *,
+    lat: float,
+    lon: float,
+    favorite_ids: set[str] | None = None,
+) -> str | None:
     if catalog.empty:
         st.info("No targets matched that search.")
         return None
@@ -1834,6 +1884,7 @@ def render_searchbox_results(catalog: pd.DataFrame, *, lat: float, lon: float) -
                 catalog=catalog,
                 lat=lat,
                 lon=lon,
+                favorite_ids=favorite_ids,
                 max_options=10,
             ),
             label="Search",
@@ -2198,8 +2249,10 @@ def render_detail_panel(
             title = f"{target_id} - {selected['common_name']}"
         header_cols[0].markdown(f"### {title}")
 
-        favorite_label = "Remove Favorite" if is_favorite else "Add Favorite"
-        if header_cols[1].button(favorite_label, use_container_width=True):
+        # Emoji toggle: filled yellow star when favorited, hollow star when not.
+        favorite_label = "⭐" if is_favorite else "☆"
+        favorite_help = "Unfavorite target" if is_favorite else "Favorite target"
+        if header_cols[1].button(favorite_label, use_container_width=True, help=favorite_help):
             prefs["favorites"] = (
                 remove_if_present(prefs["favorites"], target_id)
                 if is_favorite
@@ -2466,44 +2519,26 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    location = prefs["location"]
+    favorite_ids = {str(item) for item in prefs["favorites"]}
+    with st.container():
+        st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
+        render_searchbox_results(
+            catalog,
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+            favorite_ids=favorite_ids,
+        )
 
-    use_phone_layout = st.toggle("Phone layout preview", value=False)
-
-    if use_phone_layout:
-        render_main_tabs(catalog, prefs)
-        selected_row = resolve_selected_row(catalog, prefs)
-        if selected_row is not None or bool(prefs["set_list"]):
-            with st.container(border=True):
-                st.markdown("### Detail bottom sheet")
-                render_detail_panel(
-                    selected=selected_row,
-                    catalog=catalog,
-                    prefs=prefs,
-                    temperature_unit=effective_temperature_unit,
-                    use_12_hour=use_12_hour,
-                )
-    else:
-        selected_hint = bool(st.session_state.get("selected_id") or prefs["set_list"])
-
-        if selected_hint:
-            result_col, detail_col = st.columns([35, 65])
-            with result_col:
-                render_main_tabs(catalog, prefs)
-
-            selected_row = resolve_selected_row(catalog, prefs)
-            if selected_row is not None or bool(prefs["set_list"]):
-                with detail_col:
-                    render_detail_panel(
-                        selected=selected_row,
-                        catalog=catalog,
-                        prefs=prefs,
-                        temperature_unit=effective_temperature_unit,
-                        use_12_hour=use_12_hour,
-                    )
-        else:
-            render_main_tabs(catalog, prefs)
-            if resolve_selected_row(catalog, prefs) is not None:
-                st.rerun()
+    selected_row = resolve_selected_row(catalog, prefs)
+    if selected_row is not None or bool(prefs["set_list"]):
+        render_detail_panel(
+            selected=selected_row,
+            catalog=catalog,
+            prefs=prefs,
+            temperature_unit=effective_temperature_unit,
+            use_12_hour=use_12_hour,
+        )
 
 
 if __name__ == "__main__":
