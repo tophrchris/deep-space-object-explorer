@@ -81,20 +81,44 @@ def search_catalog(catalog: pd.DataFrame, query: str) -> pd.DataFrame:
 
     indexed = _ensure_search_index(catalog)
     canonical = canonicalize_designation(query)
-    query_norm = normalize_text(query)
-    canonical_norm = normalize_text(canonical)
+    query_tokens = _build_search_tokens(query=query, canonical=canonical)
 
-    exact_mask = (indexed["primary_id_norm"] == query_norm) | (indexed["primary_id_norm"] == canonical_norm)
-    alias_exact = indexed["aliases_norm"].str.contains(query_norm, regex=False) | indexed["aliases_norm"].str.contains(
-        canonical_norm,
-        regex=False,
-    )
-    partial_mask = indexed["search_blob_norm"].str.contains(query_norm, regex=False)
+    exact_mask = pd.Series(False, index=indexed.index)
+    alias_exact = pd.Series(False, index=indexed.index)
+    partial_mask = pd.Series(False, index=indexed.index)
+    for token in query_tokens:
+        exact_mask = exact_mask | (indexed["primary_id_norm"] == token)
+        alias_exact = alias_exact | indexed["aliases_norm"].str.contains(token, regex=False)
+        partial_mask = partial_mask | indexed["search_blob_norm"].str.contains(token, regex=False)
 
     results = indexed[exact_mask | alias_exact | partial_mask].copy()
     results["_rank"] = np.where(exact_mask.loc[results.index] | alias_exact.loc[results.index], 0, 1)
     results = results.sort_values(by=["_rank", "catalog", "primary_id"], ascending=[True, True, True])
     return results.drop(columns=["_rank"])
+
+
+def _build_search_tokens(query: str, canonical: str) -> list[str]:
+    query_norm = normalize_text(query)
+    canonical_norm = normalize_text(canonical)
+    tokens = {query_norm, canonical_norm}
+
+    # Tolerate common emission-line query variants:
+    # - `Olll` / `Nll` / `Sll` where `l` is used instead of `I`
+    # - shorthand `O3`, `N2`, `S2`
+    if re.fullmatch(r"o[l1]{3}", query_norm):
+        tokens.add("oiii")
+    if re.fullmatch(r"n[l1]{2}", query_norm):
+        tokens.add("nii")
+    if re.fullmatch(r"s[l1]{2}", query_norm):
+        tokens.add("sii")
+    if query_norm == "o3":
+        tokens.add("oiii")
+    if query_norm == "n2":
+        tokens.add("nii")
+    if query_norm == "s2":
+        tokens.add("sii")
+
+    return [token for token in tokens if token]
 
 
 def load_catalog_data(
