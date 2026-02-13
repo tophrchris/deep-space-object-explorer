@@ -102,6 +102,7 @@ def load_catalog_data(
     seed_path: Path,
     cache_path: Path,
     metadata_path: Path,
+    enriched_path: Path | None = None,
     force_refresh: bool = False,
     mode: str = CATALOG_MODE_LEGACY,
     curated_path: Path | None = None,
@@ -156,6 +157,7 @@ def load_catalog_data(
         seed_path=seed_path,
         cache_path=cache_path,
         metadata_path=metadata_path,
+        enriched_path=enriched_path,
         force_refresh=force_refresh,
     )
     indexed = _build_search_index(frame)
@@ -230,7 +232,7 @@ def _ensure_search_index(catalog: pd.DataFrame) -> pd.DataFrame:
 
 def _build_search_index(frame: pd.DataFrame) -> pd.DataFrame:
     indexed = frame.copy()
-    for column in ["common_name", "object_type", "constellation", "aliases", "catalog"]:
+    for column in ["common_name", "object_type", "constellation", "aliases", "catalog", "description"]:
         if column in indexed.columns:
             indexed[column] = indexed[column].fillna("")
 
@@ -244,6 +246,8 @@ def _build_search_index(frame: pd.DataFrame) -> pd.DataFrame:
         + indexed["aliases"].fillna("")
         + " "
         + indexed["catalog"].fillna("")
+        + " "
+        + indexed["description"].fillna("")
     ).map(normalize_text)
 
     return indexed
