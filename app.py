@@ -774,6 +774,17 @@ def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.nd
 
 
 def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, pd.Series]]:
+    suppress_culmination = False
+    first_visible = events.get("first_visible")
+    culmination = events.get("culmination")
+    if first_visible is not None and culmination is not None:
+        try:
+            first_visible_time = pd.Timestamp(first_visible["time_local"])
+            culmination_time = pd.Timestamp(culmination["time_local"])
+            suppress_culmination = abs(culmination_time - first_visible_time) <= pd.Timedelta(minutes=15)
+        except Exception:
+            suppress_culmination = False
+
     labeled: list[tuple[str, pd.Series]] = []
     for event_key, event_label in EVENT_LABELS:
         event = events.get(event_key)
@@ -784,6 +795,8 @@ def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, 
             # Only show "Rise" when the object is still obstructed at the rise timestamp.
             if pd.isna(visible_at_rise) or bool(visible_at_rise):
                 continue
+        if event_key == "culmination" and suppress_culmination:
+            continue
         labeled.append((event_label, event))
     return labeled
 
