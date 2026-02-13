@@ -1,4 +1,5 @@
 streamlit>=1.40
+streamlit-searchbox>=0.1.24
 streamlit-autorefresh>=1.0
 pandas>=2.0
 numpy>=1.25

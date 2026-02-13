@@ -22,6 +22,10 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
+try:
+    from streamlit_searchbox import st_searchbox
+except Exception:
+    st_searchbox = None
 from streamlit_js_eval import (
     get_browser_language,
     get_geolocation,
@@ -129,7 +133,6 @@ PATH_LINE_COLORS = [
 OBSTRUCTION_FILL_COLOR = "rgba(226, 232, 240, 0.40)"
 OBSTRUCTION_LINE_COLOR = "rgba(148, 163, 184, 0.95)"
 CARDINAL_GRIDLINE_COLOR = "rgba(100, 116, 139, 0.45)"
-SEARCHBOX_EMPTY_OPTION = "__EMPTY_SEARCHBOX_OPTION__"
 
 
 def default_preferences() -> dict[str, Any]:
@@ -1780,27 +1783,36 @@ def format_search_suggestion(row: pd.Series) -> str:
 
 
 def clear_targets_search_selection() -> None:
-    st.session_state["targets_searchbox_pick"] = SEARCHBOX_EMPTY_OPTION
+    st.session_state.pop("targets_searchbox_component", None)
+    st.session_state["targets_searchbox_cleared"] = True
 
 
-def render_searchbox_results(targets: pd.DataFrame) -> str | None:
-    if targets.empty:
+def searchbox_target_options(
+    search_term: str,
+    *,
+    catalog: pd.DataFrame,
+    lat: float,
+    lon: float,
+    max_options: int = 10,
+) -> list[tuple[str, str]]:
+    query = str(search_term or "").strip()
+    if not query:
+        return []
+
+    matches = search_catalog(catalog, query).head(max_options).copy()
+    if matches.empty:
+        return []
+
+    enriched = compute_altaz_now(matches, lat=lat, lon=lon)
+    return [(format_search_suggestion(row), str(row["primary_id"])) for _, row in enriched.iterrows()]
+
+
+def render_searchbox_results(catalog: pd.DataFrame, *, lat: float, lon: float) -> str | None:
+    if catalog.empty:
         st.info("No targets matched that search.")
         return None
 
-    suggestions = targets.copy()
-    suggestion_ids = suggestions["primary_id"].astype(str).tolist()
-    options = [SEARCHBOX_EMPTY_OPTION, *suggestion_ids]
-    suggestion_labels = {
-        str(row["primary_id"]): format_search_suggestion(row)
-        for _, row in suggestions.iterrows()
-    }
-
-    current_selected = st.session_state.get("selected_id")
-    current_pick = st.session_state.get("targets_searchbox_pick", SEARCHBOX_EMPTY_OPTION)
-    if current_pick not in options:
-        current_pick = SEARCHBOX_EMPTY_OPTION
-    default_index = options.index(current_pick)
+    current_selected = str(st.session_state.get("selected_id") or "").strip()
 
     search_col, clear_col = st.columns([6, 1])
     with clear_col:
@@ -1808,35 +1820,61 @@ def render_searchbox_results(targets: pd.DataFrame) -> str | None:
             "Clear",
             key="targets_searchbox_clear",
             use_container_width=True,
-            disabled=(st.session_state.get("targets_searchbox_pick", SEARCHBOX_EMPTY_OPTION) == SEARCHBOX_EMPTY_OPTION),
+            disabled=not isinstance(st.session_state.get("targets_searchbox_component"), dict),
             on_click=clear_targets_search_selection,
         )
     with search_col:
-        picked = st.selectbox(
-            "Search",
-            options=options,
-            index=default_index,
-            key="targets_searchbox_pick",
-            placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
-            help="Type to filter suggestions, then use arrow keys + Enter to select.",
-            format_func=lambda value: (
-                "Type to search targets (M31, NGC 7000, Orion Nebula...)"
-                if str(value) == SEARCHBOX_EMPTY_OPTION
-                else suggestion_labels.get(str(value), str(value))
+        if st_searchbox is None:
+            st.warning("`streamlit-searchbox` is unavailable; install dependencies to enable searchbox UI.")
+            return None
+
+        picked = st_searchbox(
+            search_function=lambda search_term: searchbox_target_options(
+                search_term,
+                catalog=catalog,
+                lat=lat,
+                lon=lon,
+                max_options=10,
             ),
+            label="Search",
+            placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
+            key="targets_searchbox_component",
+            help="Type to filter suggestions, then use arrow keys + Enter to select.",
+            clear_on_submit=False,
+            edit_after_submit="option",
+            rerun_on_update=True,
+            debounce=150,
         )
 
-    if str(picked) == SEARCHBOX_EMPTY_OPTION:
-        if current_selected in suggestion_ids:
-            st.caption(f"Search cleared. Detail remains on selected target: {current_selected}")
-            return None
-        st.caption("No target selected. Type to search and choose a target.")
+    picked_value = str(picked).strip() if picked is not None else ""
+    if picked_value:
+        st.session_state["selected_id"] = picked_value
+        st.caption(f"Selected: {picked_value}")
+        return picked_value
+
+    search_state = st.session_state.get("targets_searchbox_component")
+    search_term = str(search_state.get("search", "")).strip() if isinstance(search_state, dict) else ""
+    options_js = search_state.get("options_js", []) if isinstance(search_state, dict) else []
+    options_count = len(options_js) if isinstance(options_js, list) else 0
+    was_cleared = bool(st.session_state.pop("targets_searchbox_cleared", False))
+
+    if search_term and options_count == 0:
+        st.caption("No targets matched that search.")
         return None
 
-    selected_id = str(picked)
-    st.session_state["selected_id"] = selected_id
-    st.caption(f"Selected: {selected_id}")
-    return selected_id
+    if current_selected:
+        if was_cleared:
+            st.caption(f"Search cleared. Detail remains on selected target: {current_selected}")
+        else:
+            st.caption(f"No search selection. Detail remains on selected target: {current_selected}")
+        return None
+
+    if search_term:
+        st.caption("Use arrow keys and Enter to choose a target.")
+        return None
+
+    st.caption("No target selected. Type to search and choose a target.")
+    return None
 
 
 def render_target_table(
@@ -1903,21 +1941,23 @@ def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
     with st.container(border=True):
         st.subheader("Targets")
         location = prefs["location"]
-        results = compute_altaz_now(catalog, lat=float(location["lat"]), lon=float(location["lon"]))
+        location_lat = float(location["lat"])
+        location_lon = float(location["lon"])
+        results_count = len(catalog)
         favorites = compute_altaz_now(
             subset_by_id_list(catalog, prefs["favorites"]),
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
+            lat=location_lat,
+            lon=location_lon,
         )
         set_list = compute_altaz_now(
             subset_by_id_list(catalog, prefs["set_list"]),
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
+            lat=location_lat,
+            lon=location_lon,
         )
 
         tab_results, tab_favorites, tab_set_list = st.tabs(
             [
-                f"Results ({len(results)})",
+                f"Results ({results_count})",
                 f"Favorites ({len(favorites)})",
                 f"Set List ({len(set_list)})",
             ]
@@ -1925,7 +1965,7 @@ def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
 
         with tab_results:
             st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
-            render_searchbox_results(results)
+            render_searchbox_results(catalog, lat=location_lat, lon=location_lon)
 
         with tab_favorites:
             render_target_table(
@@ -2443,12 +2483,7 @@ def main() -> None:
                     use_12_hour=use_12_hour,
                 )
     else:
-        searchbox_pick = st.session_state.get("targets_searchbox_pick")
-        selected_hint = bool(
-            st.session_state.get("selected_id")
-            or (searchbox_pick and str(searchbox_pick) != SEARCHBOX_EMPTY_OPTION)
-            or prefs["set_list"]
-        )
+        selected_hint = bool(st.session_state.get("selected_id") or prefs["set_list"])
 
         if selected_hint:
             result_col, detail_col = st.columns([35, 65])
