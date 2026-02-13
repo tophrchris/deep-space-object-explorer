@@ -2460,6 +2460,7 @@ def render_detail_panel(
         redshift = format_numeric(selected.get("redshift"))
         morphology = clean_text(selected.get("morphology"))
         emission_details = clean_text(selected.get("emission_lines"))
+        emission_details_display = re.sub(r"[\[\]]", "", emission_details)
         description = clean_text(selected.get("description"))
 
         with detail_cols[0]:
@@ -2501,7 +2502,7 @@ def render_detail_panel(
                 {"Property": "Distance Unit", "Value": dist_unit or "-"},
                 {"Property": "Redshift", "Value": redshift or "-"},
                 {"Property": "Morphology", "Value": morphology or "-"},
-                {"Property": "Emissions Details", "Value": emission_details or "-"},
+                {"Property": "Emissions Details", "Value": emission_details_display or "-"},
             ]
             property_rows = pd.DataFrame(
                 [
