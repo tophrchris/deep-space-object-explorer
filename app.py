@@ -52,6 +52,24 @@ WIND16 = [
     "NW",
     "NNW",
 ]
+WIND16_ARROWS = {
+    "N": "↑",
+    "NNE": "↑",
+    "NE": "↗",
+    "ENE": "↗",
+    "E": "→",
+    "ESE": "↘",
+    "SE": "↘",
+    "SSE": "↓",
+    "S": "↓",
+    "SSW": "↓",
+    "SW": "↙",
+    "WSW": "↙",
+    "W": "←",
+    "WNW": "↖",
+    "NW": "↖",
+    "NNW": "↑",
+}
 
 DEFAULT_LOCATION = {
     "lat": 40.3573,
@@ -111,6 +129,7 @@ PATH_LINE_COLORS = [
 OBSTRUCTION_FILL_COLOR = "rgba(226, 232, 240, 0.40)"
 OBSTRUCTION_LINE_COLOR = "rgba(148, 163, 184, 0.95)"
 CARDINAL_GRIDLINE_COLOR = "rgba(100, 116, 139, 0.45)"
+SEARCHBOX_EMPTY_OPTION = "__EMPTY_SEARCHBOX_OPTION__"
 
 
 def default_preferences() -> dict[str, Any]:
@@ -1744,6 +1763,82 @@ def subset_by_id_list(frame: pd.DataFrame, ordered_ids: list[str]) -> pd.DataFra
     return subset
 
 
+def format_search_suggestion(row: pd.Series) -> str:
+    primary_id = str(row.get("primary_id") or "").strip() or "Unknown ID"
+    common_name = str(row.get("common_name") or "").strip()
+    object_type = str(row.get("object_type") or "").strip() or "Unknown type"
+    wind = str(row.get("wind16") or "").strip() or "--"
+    arrow = WIND16_ARROWS.get(wind, "🧭")
+    alt_now = row.get("alt_now")
+    try:
+        alt_text = f"{float(alt_now):.0f} deg"
+    except (TypeError, ValueError):
+        alt_text = "--"
+
+    id_and_name = f"{primary_id} - {common_name}" if common_name else primary_id
+    return f"{id_and_name} • {object_type} • {arrow} {wind} {alt_text}"
+
+
+def clear_targets_search_selection() -> None:
+    st.session_state["targets_searchbox_pick"] = SEARCHBOX_EMPTY_OPTION
+
+
+def render_searchbox_results(targets: pd.DataFrame) -> str | None:
+    if targets.empty:
+        st.info("No targets matched that search.")
+        return None
+
+    suggestions = targets.copy()
+    suggestion_ids = suggestions["primary_id"].astype(str).tolist()
+    options = [SEARCHBOX_EMPTY_OPTION, *suggestion_ids]
+    suggestion_labels = {
+        str(row["primary_id"]): format_search_suggestion(row)
+        for _, row in suggestions.iterrows()
+    }
+
+    current_selected = st.session_state.get("selected_id")
+    current_pick = st.session_state.get("targets_searchbox_pick", SEARCHBOX_EMPTY_OPTION)
+    if current_pick not in options:
+        current_pick = SEARCHBOX_EMPTY_OPTION
+    default_index = options.index(current_pick)
+
+    search_col, clear_col = st.columns([6, 1])
+    with clear_col:
+        st.button(
+            "Clear",
+            key="targets_searchbox_clear",
+            use_container_width=True,
+            disabled=(st.session_state.get("targets_searchbox_pick", SEARCHBOX_EMPTY_OPTION) == SEARCHBOX_EMPTY_OPTION),
+            on_click=clear_targets_search_selection,
+        )
+    with search_col:
+        picked = st.selectbox(
+            "Search",
+            options=options,
+            index=default_index,
+            key="targets_searchbox_pick",
+            placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
+            help="Type to filter suggestions, then use arrow keys + Enter to select.",
+            format_func=lambda value: (
+                "Type to search targets (M31, NGC 7000, Orion Nebula...)"
+                if str(value) == SEARCHBOX_EMPTY_OPTION
+                else suggestion_labels.get(str(value), str(value))
+            ),
+        )
+
+    if str(picked) == SEARCHBOX_EMPTY_OPTION:
+        if current_selected in suggestion_ids:
+            st.caption(f"Search cleared. Detail remains on selected target: {current_selected}")
+            return None
+        st.caption("No target selected. Type to search and choose a target.")
+        return None
+
+    selected_id = str(picked)
+    st.session_state["selected_id"] = selected_id
+    st.caption(f"Selected: {selected_id}")
+    return selected_id
+
+
 def render_target_table(
     targets: pd.DataFrame,
     *,
@@ -1807,14 +1902,8 @@ def render_target_table(
 def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
     with st.container(border=True):
         st.subheader("Targets")
-        query = st.text_input(
-            "Search (M / NGC / IC / Sh2 + common names)",
-            placeholder="M31, NGC 7000, IC1805, Sh2-132, Orion Nebula",
-            key="targets_search_query",
-        )
         location = prefs["location"]
-        filtered = search_catalog(catalog, query)
-        results = compute_altaz_now(filtered, lat=float(location["lat"]), lon=float(location["lon"]))
+        results = compute_altaz_now(catalog, lat=float(location["lat"]), lon=float(location["lon"]))
         favorites = compute_altaz_now(
             subset_by_id_list(catalog, prefs["favorites"]),
             lat=float(location["lat"]),
@@ -1835,13 +1924,8 @@ def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
         )
 
         with tab_results:
-            st.caption("Click a row to open target detail.")
-            render_target_table(
-                results,
-                table_key="results_table",
-                empty_message="No targets matched that search.",
-                auto_select_first=True,
-            )
+            st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
+            render_searchbox_results(results)
 
         with tab_favorites:
             render_target_table(
@@ -2060,8 +2144,8 @@ def render_detail_panel(
 
         if selected is None:
             st.info("Select a target from results to view detail and plots.")
-            st.plotly_chart(go.Figure(), use_container_width=True)
-            st.plotly_chart(go.Figure(), use_container_width=True)
+            st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_path_plot")
+            st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_night_plot")
             return
 
         target_id = str(selected["primary_id"])
@@ -2243,6 +2327,7 @@ def render_detail_panel(
         st.plotly_chart(
             path_figure,
             use_container_width=True,
+            key="detail_path_plot",
         )
         summary_rows = build_sky_position_summary_rows(
             selected_id=target_id,
@@ -2272,6 +2357,7 @@ def render_detail_panel(
                 use_12_hour=use_12_hour,
             ),
             use_container_width=True,
+            key="detail_night_plot",
         )
 
 
@@ -2346,29 +2432,43 @@ def main() -> None:
     if use_phone_layout:
         render_main_tabs(catalog, prefs)
         selected_row = resolve_selected_row(catalog, prefs)
-        with st.container(border=True):
-            st.markdown("### Detail bottom sheet")
-            render_detail_panel(
-                selected=selected_row,
-                catalog=catalog,
-                prefs=prefs,
-                temperature_unit=effective_temperature_unit,
-                use_12_hour=use_12_hour,
-            )
+        if selected_row is not None or bool(prefs["set_list"]):
+            with st.container(border=True):
+                st.markdown("### Detail bottom sheet")
+                render_detail_panel(
+                    selected=selected_row,
+                    catalog=catalog,
+                    prefs=prefs,
+                    temperature_unit=effective_temperature_unit,
+                    use_12_hour=use_12_hour,
+                )
     else:
-        result_col, detail_col = st.columns([35, 65])
-        with result_col:
-            render_main_tabs(catalog, prefs)
+        searchbox_pick = st.session_state.get("targets_searchbox_pick")
+        selected_hint = bool(
+            st.session_state.get("selected_id")
+            or (searchbox_pick and str(searchbox_pick) != SEARCHBOX_EMPTY_OPTION)
+            or prefs["set_list"]
+        )
 
-        selected_row = resolve_selected_row(catalog, prefs)
-        with detail_col:
-            render_detail_panel(
-                selected=selected_row,
-                catalog=catalog,
-                prefs=prefs,
-                temperature_unit=effective_temperature_unit,
-                use_12_hour=use_12_hour,
-            )
+        if selected_hint:
+            result_col, detail_col = st.columns([35, 65])
+            with result_col:
+                render_main_tabs(catalog, prefs)
+
+            selected_row = resolve_selected_row(catalog, prefs)
+            if selected_row is not None or bool(prefs["set_list"]):
+                with detail_col:
+                    render_detail_panel(
+                        selected=selected_row,
+                        catalog=catalog,
+                        prefs=prefs,
+                        temperature_unit=effective_temperature_unit,
+                        use_12_hour=use_12_hour,
+                    )
+        else:
+            render_main_tabs(catalog, prefs)
+            if resolve_selected_row(catalog, prefs) is not None:
+                st.rerun()
 
 
 if __name__ == "__main__":
