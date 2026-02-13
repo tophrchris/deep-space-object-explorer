@@ -930,7 +930,7 @@ def build_path_plot(
             name=selected_label,
             line={"width": 3, "color": selected_color},
             customdata=path_custom,
-            hovertemplate="Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[0]}<br>Dir %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
+            hovertemplate="Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[0]}<br>Direction %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
         )
     )
 
@@ -1008,7 +1008,7 @@ def build_path_plot(
                     showlegend=False,
                     line={"width": 2.2, "color": target_color},
                     customdata=overlay_custom,
-                    hovertemplate="%{customdata[0]}<br>Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[1]}<br>Dir %{customdata[2]}<extra></extra>",
+                    hovertemplate="%{customdata[0]}<br>Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Time %{customdata[1]}<br>Direction %{customdata[2]}<extra></extra>",
                 )
             )
 
@@ -1137,7 +1137,7 @@ def build_path_plot_radial(
                 ],
                 axis=-1,
             ),
-            hovertemplate="Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[0]}<br>Dir %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
+            hovertemplate="Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[0]}<br>Direction %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
         )
     )
 
@@ -1218,7 +1218,7 @@ def build_path_plot_radial(
                     showlegend=False,
                     line={"width": 2.2, "color": target_color},
                     customdata=overlay_custom,
-                    hovertemplate="%{customdata[0]}<br>Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[1]}<br>Dir %{customdata[2]}<extra></extra>",
+                    hovertemplate="%{customdata[0]}<br>Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[1]}<br>Direction %{customdata[2]}<extra></extra>",
                 )
             )
 
@@ -1715,7 +1715,7 @@ def render_target_table(
             "object_type": "Type",
             "alt_now": "Alt(now)",
             "az_now": "Az(now)",
-            "wind16": "Dir",
+            "wind16": "Direction",
         }
     )
 
@@ -2077,7 +2077,7 @@ def render_detail_panel(
                         "Property": "Alt / Az (now)",
                         "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
                     },
-                    {"Property": "16-wind", "Value": str(selected["wind16"])},
+                    {"Property": "Direction", "Value": str(selected["wind16"])},
                 ]
             )
             st.dataframe(property_rows, hide_index=True, use_container_width=True, height=180)
