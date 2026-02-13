@@ -22,6 +22,10 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
+try:
+    from streamlit_searchbox import st_searchbox
+except Exception:
+    st_searchbox = None
 from streamlit_js_eval import (
     get_browser_language,
     get_geolocation,
@@ -52,6 +56,24 @@ WIND16 = [
     "NW",
     "NNW",
 ]
+WIND16_ARROWS = {
+    "N": "↑",
+    "NNE": "↑",
+    "NE": "↗",
+    "ENE": "↗",
+    "E": "→",
+    "ESE": "↘",
+    "SE": "↘",
+    "SSE": "↓",
+    "S": "↓",
+    "SSW": "↓",
+    "SW": "↙",
+    "WSW": "↙",
+    "W": "←",
+    "WNW": "↖",
+    "NW": "↖",
+    "NNW": "↑",
+}
 
 DEFAULT_LOCATION = {
     "lat": 40.3573,
@@ -1744,6 +1766,168 @@ def subset_by_id_list(frame: pd.DataFrame, ordered_ids: list[str]) -> pd.DataFra
     return subset
 
 
+def format_search_suggestion(row: pd.Series, *, is_favorite: bool = False) -> str:
+    primary_id = str(row.get("primary_id") or "").strip() or "Unknown ID"
+    common_name = str(row.get("common_name") or "").strip()
+    object_type = str(row.get("object_type") or "").strip() or "Unknown type"
+    wind = str(row.get("wind16") or "").strip() or "--"
+    arrow = WIND16_ARROWS.get(wind, "🧭")
+    alt_now = row.get("alt_now")
+    try:
+        alt_text = f"{float(alt_now):.0f} deg"
+    except (TypeError, ValueError):
+        alt_text = "--"
+
+    id_and_name = f"{primary_id} - {common_name}" if common_name else primary_id
+    favorite_suffix = " ⭐" if is_favorite else ""
+    return f"{id_and_name} • {object_type} • {arrow} {wind} {alt_text}{favorite_suffix}"
+
+
+def catalog_search_rank(catalog_value: str | None) -> int:
+    norm = normalize_text(catalog_value)
+    if norm in {"m", "messier"} or norm.startswith("messier"):
+        return 0
+    if norm.startswith("sha") or norm.startswith("sh2") or norm.startswith("sh") or norm.startswith("sharpless"):
+        return 1
+    if norm.startswith("ic"):
+        return 2
+    if norm.startswith("ngc"):
+        return 3
+    return 4
+
+
+def object_type_search_rank(object_type_value: str | None) -> int:
+    norm = normalize_text(object_type_value)
+    if "galaxy" in norm:
+        return 0
+    if "nebula" in norm or "hii" in norm:
+        return 1
+    return 2
+
+
+def clear_targets_search_selection() -> None:
+    st.session_state.pop("targets_searchbox_component", None)
+    st.session_state["targets_searchbox_cleared"] = True
+
+
+def searchbox_target_options(
+    search_term: str,
+    *,
+    catalog: pd.DataFrame,
+    lat: float,
+    lon: float,
+    favorite_ids: set[str] | None = None,
+    max_options: int = 10,
+) -> list[tuple[str, str]]:
+    query = str(search_term or "").strip()
+    if not query:
+        return []
+
+    favorite_set = {str(value) for value in (favorite_ids or set())}
+    matches = search_catalog(catalog, query).copy()
+    if matches.empty:
+        return []
+
+    matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
+    matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
+    matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
+    matches = matches.sort_values(
+        by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
+        ascending=[True, True, True, True],
+        kind="stable",
+    ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
+    matches = matches.head(max_options)
+
+    enriched = compute_altaz_now(matches, lat=lat, lon=lon)
+    options: list[tuple[str, str]] = []
+    for _, row in enriched.iterrows():
+        primary_id = str(row.get("primary_id") or "")
+        options.append(
+            (
+                format_search_suggestion(row, is_favorite=primary_id in favorite_set),
+                primary_id,
+            )
+        )
+    return options
+
+
+def render_searchbox_results(
+    catalog: pd.DataFrame,
+    *,
+    lat: float,
+    lon: float,
+    favorite_ids: set[str] | None = None,
+) -> str | None:
+    if catalog.empty:
+        st.info("No targets matched that search.")
+        return None
+
+    current_selected = str(st.session_state.get("selected_id") or "").strip()
+
+    search_col, clear_col = st.columns([6, 1])
+    with clear_col:
+        st.button(
+            "Clear",
+            key="targets_searchbox_clear",
+            use_container_width=True,
+            disabled=not isinstance(st.session_state.get("targets_searchbox_component"), dict),
+            on_click=clear_targets_search_selection,
+        )
+    with search_col:
+        if st_searchbox is None:
+            st.warning("`streamlit-searchbox` is unavailable; install dependencies to enable searchbox UI.")
+            return None
+
+        picked = st_searchbox(
+            search_function=lambda search_term: searchbox_target_options(
+                search_term,
+                catalog=catalog,
+                lat=lat,
+                lon=lon,
+                favorite_ids=favorite_ids,
+                max_options=10,
+            ),
+            label="Search",
+            placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
+            key="targets_searchbox_component",
+            help="Type to filter suggestions, then use arrow keys + Enter to select.",
+            clear_on_submit=True,
+            edit_after_submit="option",
+            rerun_on_update=True,
+            debounce=150,
+        )
+
+    picked_value = str(picked).strip() if picked is not None else ""
+    if picked_value:
+        st.session_state["selected_id"] = picked_value
+        st.caption(f"Selected: {picked_value}")
+        return picked_value
+
+    search_state = st.session_state.get("targets_searchbox_component")
+    search_term = str(search_state.get("search", "")).strip() if isinstance(search_state, dict) else ""
+    options_js = search_state.get("options_js", []) if isinstance(search_state, dict) else []
+    options_count = len(options_js) if isinstance(options_js, list) else 0
+    was_cleared = bool(st.session_state.pop("targets_searchbox_cleared", False))
+
+    if search_term and options_count == 0:
+        st.caption("No targets matched that search.")
+        return None
+
+    if current_selected:
+        if was_cleared:
+            st.caption(f"Search cleared. Detail remains on selected target: {current_selected}")
+        else:
+            st.caption(f"No search selection. Detail remains on selected target: {current_selected}")
+        return None
+
+    if search_term:
+        st.caption("Use arrow keys and Enter to choose a target.")
+        return None
+
+    st.caption("No target selected. Type to search and choose a target.")
+    return None
+
+
 def render_target_table(
     targets: pd.DataFrame,
     *,
@@ -1807,41 +1991,32 @@ def render_target_table(
 def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
     with st.container(border=True):
         st.subheader("Targets")
-        query = st.text_input(
-            "Search (M / NGC / IC / Sh2 + common names)",
-            placeholder="M31, NGC 7000, IC1805, Sh2-132, Orion Nebula",
-            key="targets_search_query",
-        )
         location = prefs["location"]
-        filtered = search_catalog(catalog, query)
-        results = compute_altaz_now(filtered, lat=float(location["lat"]), lon=float(location["lon"]))
+        location_lat = float(location["lat"])
+        location_lon = float(location["lon"])
+        results_count = len(catalog)
         favorites = compute_altaz_now(
             subset_by_id_list(catalog, prefs["favorites"]),
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
+            lat=location_lat,
+            lon=location_lon,
         )
         set_list = compute_altaz_now(
             subset_by_id_list(catalog, prefs["set_list"]),
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
+            lat=location_lat,
+            lon=location_lon,
         )
 
         tab_results, tab_favorites, tab_set_list = st.tabs(
             [
-                f"Results ({len(results)})",
+                f"Results ({results_count})",
                 f"Favorites ({len(favorites)})",
                 f"Set List ({len(set_list)})",
             ]
         )
 
         with tab_results:
-            st.caption("Click a row to open target detail.")
-            render_target_table(
-                results,
-                table_key="results_table",
-                empty_message="No targets matched that search.",
-                auto_select_first=True,
-            )
+            st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
+            render_searchbox_results(catalog, lat=location_lat, lon=location_lon)
 
         with tab_favorites:
             render_target_table(
@@ -2060,8 +2235,8 @@ def render_detail_panel(
 
         if selected is None:
             st.info("Select a target from results to view detail and plots.")
-            st.plotly_chart(go.Figure(), use_container_width=True)
-            st.plotly_chart(go.Figure(), use_container_width=True)
+            st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_path_plot")
+            st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_night_plot")
             return
 
         target_id = str(selected["primary_id"])
@@ -2074,8 +2249,10 @@ def render_detail_panel(
             title = f"{target_id} - {selected['common_name']}"
         header_cols[0].markdown(f"### {title}")
 
-        favorite_label = "Remove Favorite" if is_favorite else "Add Favorite"
-        if header_cols[1].button(favorite_label, use_container_width=True):
+        # Emoji toggle: filled yellow star when favorited, hollow star when not.
+        favorite_label = "⭐" if is_favorite else "☆"
+        favorite_help = "Unfavorite target" if is_favorite else "Favorite target"
+        if header_cols[1].button(favorite_label, use_container_width=True, help=favorite_help):
             prefs["favorites"] = (
                 remove_if_present(prefs["favorites"], target_id)
                 if is_favorite
@@ -2243,6 +2420,7 @@ def render_detail_panel(
         st.plotly_chart(
             path_figure,
             use_container_width=True,
+            key="detail_path_plot",
         )
         summary_rows = build_sky_position_summary_rows(
             selected_id=target_id,
@@ -2272,6 +2450,7 @@ def render_detail_panel(
                 use_12_hour=use_12_hour,
             ),
             use_container_width=True,
+            key="detail_night_plot",
         )
 
 
@@ -2340,35 +2519,26 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    location = prefs["location"]
+    favorite_ids = {str(item) for item in prefs["favorites"]}
+    with st.container():
+        st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
+        render_searchbox_results(
+            catalog,
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+            favorite_ids=favorite_ids,
+        )
 
-    use_phone_layout = st.toggle("Phone layout preview", value=False)
-
-    if use_phone_layout:
-        render_main_tabs(catalog, prefs)
-        selected_row = resolve_selected_row(catalog, prefs)
-        with st.container(border=True):
-            st.markdown("### Detail bottom sheet")
-            render_detail_panel(
-                selected=selected_row,
-                catalog=catalog,
-                prefs=prefs,
-                temperature_unit=effective_temperature_unit,
-                use_12_hour=use_12_hour,
-            )
-    else:
-        result_col, detail_col = st.columns([35, 65])
-        with result_col:
-            render_main_tabs(catalog, prefs)
-
-        selected_row = resolve_selected_row(catalog, prefs)
-        with detail_col:
-            render_detail_panel(
-                selected=selected_row,
-                catalog=catalog,
-                prefs=prefs,
-                temperature_unit=effective_temperature_unit,
-                use_12_hour=use_12_hour,
-            )
+    selected_row = resolve_selected_row(catalog, prefs)
+    if selected_row is not None or bool(prefs["set_list"]):
+        render_detail_panel(
+            selected=selected_row,
+            catalog=catalog,
+            prefs=prefs,
+            temperature_unit=effective_temperature_unit,
+            use_12_hour=use_12_hour,
+        )
 
 
 if __name__ == "__main__":
