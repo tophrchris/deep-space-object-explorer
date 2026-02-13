@@ -24,6 +24,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - `app.py`: Streamlit app entry point
 - `catalog_ingestion.py`: catalog ingest + normalization + cache metadata
 - `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
+- `catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
 - `TODO.md`: prioritized build backlog
 
 ## Local setup
@@ -80,6 +81,7 @@ Notes:
 - Layout refactor and interaction flow cleanup (`#27`)
 - Location UX/robustness improvements (`#28`, `#17`, `#2`)
 - Additional catalog quality and enrichment follow-ups
+- Catalog issue drafts to file as GitHub issues: [`catalog_issue_backlog.md`](catalog_issue_backlog.md)
 - Next-pass UI/UX polish after core behavior stabilizes
 
 ## Notes
