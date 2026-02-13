@@ -66,6 +66,22 @@ Notes:
 - Preferences persist in browser `localStorage` (not shared across users).
 - For private repos, make sure Streamlit has GitHub access to this repository.
 
+## Release milestones
+
+- `v0.1.0` (Pre-release): complete
+  - Tag: `v0.1.0`
+  - Release: <https://github.com/tophrchris/deep-space-object-explorer/releases/tag/v0.1.0>
+  - Milestone: <https://github.com/tophrchris/deep-space-object-explorer/milestone/1>
+- `v0.2.0`: in progress
+  - Milestone: <https://github.com/tophrchris/deep-space-object-explorer/milestone/2>
+
+## v0.2.0 roadmap
+
+- Layout refactor and interaction flow cleanup (`#27`)
+- Location UX/robustness improvements (`#28`, `#17`, `#2`)
+- Additional catalog quality and enrichment follow-ups
+- Next-pass UI/UX polish after core behavior stabilizes
+
 ## Notes
 
 - Catalog ingest loads full OpenNGC data and augments it with SIMBAD (`NAME` objects are retained, with unmatched rows kept as `SIMBAD` catalog entries).
