@@ -29,8 +29,18 @@ OPTIONAL_COLUMNS = [
     "license_label",
 ]
 
+ENRICHED_OPTIONAL_COLUMNS = [
+    "description",
+    "info_url",
+    "dist_value",
+    "dist_unit",
+    "redshift",
+    "morphology",
+    "emission_lines",
+]
+
 CATALOG_CACHE_MAX_AGE_HOURS = 24
-INGESTION_VERSION = 3
+INGESTION_VERSION = 5
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
 SIMBAD_TAP_SYNC_ENDPOINTS = [
@@ -117,11 +127,11 @@ def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
     normalized = frame.copy()
 
-    for column in OPTIONAL_COLUMNS:
+    for column in OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS:
         if column not in normalized.columns:
             normalized[column] = ""
 
-    normalized = normalized[REQUIRED_COLUMNS + OPTIONAL_COLUMNS]
+    normalized = normalized[REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS]
 
     normalized["primary_id"] = normalized["primary_id"].fillna("").astype(str).str.strip()
     normalized["catalog"] = normalized["catalog"].fillna("").astype(str).str.upper().str.strip()
@@ -129,9 +139,16 @@ def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     normalized["object_type"] = normalized["object_type"].fillna("").astype(str).str.strip()
     normalized["constellation"] = normalized["constellation"].fillna("").astype(str).str.strip()
     normalized["aliases"] = normalized["aliases"].fillna("").astype(str).str.strip()
+    normalized["description"] = normalized["description"].fillna("").astype(str).str.strip()
+    normalized["info_url"] = normalized["info_url"].fillna("").astype(str).str.strip()
+    normalized["dist_unit"] = normalized["dist_unit"].fillna("").astype(str).str.strip()
+    normalized["morphology"] = normalized["morphology"].fillna("").astype(str).str.strip()
+    normalized["emission_lines"] = normalized["emission_lines"].fillna("").astype(str).str.strip()
 
     normalized["ra_deg"] = pd.to_numeric(normalized["ra_deg"], errors="coerce")
     normalized["dec_deg"] = pd.to_numeric(normalized["dec_deg"], errors="coerce")
+    normalized["dist_value"] = pd.to_numeric(normalized["dist_value"], errors="coerce")
+    normalized["redshift"] = pd.to_numeric(normalized["redshift"], errors="coerce")
 
     normalized = normalized.dropna(subset=["ra_deg", "dec_deg"])
     normalized = normalized[normalized["primary_id"] != ""]
@@ -215,6 +232,36 @@ def _parse_name_designation(name_raw: str) -> tuple[str, str, str] | None:
 
     primary_id = f"{catalog} {number}" if not suffix else f"{catalog} {number} {suffix}"
     return primary_id, catalog, number
+
+
+def _normalize_primary_id_for_app(primary_id_raw: str) -> str:
+    compact = " ".join(str(primary_id_raw).strip().split())
+    if not compact:
+        return ""
+
+    messier_match = re.match(r"^M\s*0*([0-9]+)$", compact, flags=re.IGNORECASE)
+    if messier_match:
+        return f"M{int(messier_match.group(1))}"
+
+    ngc_match = re.match(r"^NGC\s*0*([0-9]+)(.*)$", compact, flags=re.IGNORECASE)
+    if ngc_match:
+        number = str(int(ngc_match.group(1)))
+        suffix = str(ngc_match.group(2)).strip()
+        return f"NGC {number}" if not suffix else f"NGC {number} {suffix}"
+
+    ic_match = re.match(r"^IC\s*0*([0-9]+)(.*)$", compact, flags=re.IGNORECASE)
+    if ic_match:
+        number = str(int(ic_match.group(1)))
+        suffix = str(ic_match.group(2)).strip()
+        return f"IC {number}" if not suffix else f"IC {number} {suffix}"
+
+    sh2_match = re.match(r"^(SH2|SH2-|SH\s*2-?)\s*0*([0-9]+)(.*)$", compact, flags=re.IGNORECASE)
+    if sh2_match:
+        number = str(int(sh2_match.group(2)))
+        suffix = str(sh2_match.group(3)).strip()
+        return f"Sh2-{number}" if not suffix else f"Sh2-{number}{suffix}"
+
+    return compact
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -349,7 +396,7 @@ def _strip_name_prefix(raw_identifier: str) -> str:
 
 def _catalog_from_primary_id(primary_id: str) -> str:
     cleaned = str(primary_id).strip()
-    if re.fullmatch(r"M[0-9]+", cleaned):
+    if re.fullmatch(r"M\s*[0-9]+", cleaned, flags=re.IGNORECASE):
         return "M"
     if cleaned.startswith("NGC "):
         return "NGC"
@@ -364,6 +411,45 @@ def _primary_id_rank(primary_id: str) -> tuple[int, int]:
     order = {"M": 0, "NGC": 1, "IC": 2, "SH2": 3, "SIMBAD": 4}
     catalog = _catalog_from_primary_id(primary_id)
     return order.get(catalog, 5), len(str(primary_id))
+
+
+def _parse_json_list(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    text = str(raw or "").strip()
+    if not text:
+        return []
+
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, list):
+            return [str(item).strip() for item in payload if str(item).strip()]
+    except json.JSONDecodeError:
+        pass
+
+    if ";" in text:
+        return [item.strip() for item in text.split(";") if item.strip()]
+    return [text]
+
+
+def _catalog_from_enriched_family(id_family_guess: str, primary_id: str) -> str:
+    family = str(id_family_guess or "").strip().lower()
+    if family == "messier":
+        return "M"
+    if family == "ngc":
+        return "NGC"
+    if family == "ic":
+        return "IC"
+    if family == "caldwell":
+        return "C"
+    if family == "survey":
+        if str(primary_id).upper().startswith("SH2"):
+            return "SH2"
+        return "SURVEY"
+    if family == "common_name":
+        return _catalog_from_primary_id(primary_id)
+    return _catalog_from_primary_id(primary_id)
 
 
 def _prefer_primary_id(current: str, candidate: str) -> str:
@@ -626,17 +712,78 @@ def ingest_from_seed(seed_path: Path) -> pd.DataFrame:
     return _normalize_frame(source)
 
 
+def ingest_from_enriched_csv(enriched_path: Path) -> pd.DataFrame:
+    if not enriched_path.exists():
+        raise FileNotFoundError(f"Enriched catalog CSV not found: {enriched_path}")
+
+    source = pd.read_csv(enriched_path, keep_default_na=False)
+    if source.empty:
+        raise ValueError("Enriched catalog CSV is empty")
+
+    records: list[dict[str, Any]] = []
+    for _, row in source.iterrows():
+        primary_candidate = (
+            str(row.get("id_norm", "")).strip()
+            or str(row.get("simbad_main_id", "")).strip()
+            or str(row.get("id_raw", "")).strip()
+        )
+        primary_id = _normalize_primary_id_for_app(primary_candidate)
+        if not primary_id:
+            continue
+
+        cross_ids = _parse_json_list(row.get("cross_ids", ""))
+        aliases = [item for item in _dedupe_preserve_order(cross_ids) if item and item != primary_id]
+        links = _parse_json_list(row.get("links", ""))
+        info_url = str(links[0]).strip() if links else str(row.get("simbad_object_url", "")).strip()
+        emission_lines = _parse_json_list(row.get("emission_lines", ""))
+
+        catalog_guess = str(row.get("catalog", "")).strip().upper()
+        catalog = catalog_guess or _catalog_from_enriched_family(str(row.get("id_family_guess", "")), primary_id)
+
+        object_type_norm = str(row.get("object_type_norm", "")).strip()
+        object_type_simbad = str(row.get("object_type_simbad", "")).strip()
+        object_type = object_type_norm or object_type_simbad
+
+        records.append(
+            {
+                "primary_id": primary_id,
+                "catalog": catalog,
+                "common_name": str(row.get("common_name", "")).strip(),
+                "object_type": object_type,
+                "ra_deg": row.get("ra_j2000_deg", ""),
+                "dec_deg": row.get("dec_j2000_deg", ""),
+                "constellation": str(row.get("constellation", "")).strip(),
+                "aliases": ";".join(aliases),
+                "image_url": str(row.get("hero_image_url", "")).strip(),
+                "image_attribution_url": info_url,
+                "license_label": str(row.get("hero_image_credit", "")).strip(),
+                "description": str(row.get("description", "")).strip(),
+                "info_url": info_url,
+                "dist_value": row.get("dist_value", ""),
+                "dist_unit": str(row.get("dist_unit", "")).strip(),
+                "redshift": row.get("redshift", ""),
+                "morphology": str(row.get("morphology", "")).strip(),
+                "emission_lines": "; ".join(emission_lines),
+            }
+        )
+
+    if not records:
+        raise ValueError("Enriched catalog CSV produced zero valid rows")
+
+    return _normalize_frame(pd.DataFrame.from_records(records))
+
+
 def ingest_sh2_from_seed(seed_path: Path) -> pd.DataFrame:
     if not seed_path.exists():
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
+        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
 
     source = pd.read_csv(seed_path)
     if "catalog" not in source.columns:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
+        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
 
     sh2 = source[source["catalog"].fillna("").astype(str).str.upper() == "SH2"].copy()
     if sh2.empty:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
+        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
 
     return _normalize_frame(sh2)
 
@@ -718,20 +865,39 @@ def merge_catalogs(primary: pd.DataFrame, additional: pd.DataFrame) -> pd.DataFr
     return _normalize_frame(combined)
 
 
+def merge_catalog_with_cache_only_additions(primary: pd.DataFrame, cached: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    if cached.empty:
+        return _normalize_frame(primary), 0
+
+    primary_ids = set(primary["primary_id"].astype(str).tolist())
+    additions = cached[~cached["primary_id"].astype(str).isin(primary_ids)].copy()
+    if additions.empty:
+        return _normalize_frame(primary), 0
+
+    merged = merge_catalogs(primary, additions)
+    return merged, int(len(additions))
+
+
 def load_unified_catalog(
     *,
     seed_path: Path,
     cache_path: Path,
     metadata_path: Path,
+    enriched_path: Path | None = None,
     force_refresh: bool = False,
     max_cache_age_hours: int = CATALOG_CACHE_MAX_AGE_HOURS,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     metadata = _read_metadata(metadata_path)
+    prefer_enriched = enriched_path is not None and enriched_path.exists()
 
     can_use_cache = (
         not force_refresh
         and _cache_is_fresh(cache_path, max_cache_age_hours)
         and not _cache_requires_rebuild(metadata)
+        and (
+            not prefer_enriched
+            or str(metadata.get("load_mode", "")) in {"enriched_csv", "enriched_csv_plus_cache"}
+        )
     )
 
     if can_use_cache:
@@ -750,25 +916,56 @@ def load_unified_catalog(
     simbad_metadata: dict[str, Any] = {}
     simbad_named_objects: pd.DataFrame | None = None
 
-    try:
-        frame = ingest_from_openngc()
-        load_mode = "openngc_ingest"
-        source_parts.append(OPENNGC_SOURCE_URL)
-    except Exception as error:
-        frame = ingest_from_seed(seed_path)
-        load_mode = "seed_fallback"
-        source_parts.append(str(seed_path))
-        notes.append(f"OpenNGC ingest failed: {_error_summary(error)}")
+    if prefer_enriched:
+        try:
+            frame = ingest_from_enriched_csv(enriched_path)
+            load_mode = "enriched_csv"
+            source_parts.append(str(enriched_path))
+            simbad_metadata["named_object_rows"] = 0
+            simbad_metadata["named_catalog_rows"] = 0
+            simbad_metadata["named_new_rows_added"] = 0
+            simbad_metadata["sh2_source"] = "enriched_csv"
+            simbad_metadata["sh2_row_count"] = int((frame["catalog"] == "SH2").sum())
+            simbad_metadata["m_ngc_enriched_rows"] = 0
 
-    try:
-        simbad_named_objects = fetch_simbad_named_objects()
-        source_parts.append("SIMBAD NAME objects (sim-tap)")
-        simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
-    except Exception as error:
-        simbad_metadata["named_object_rows"] = 0
-        notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
+            simbad_metadata["parquet_row_count"] = 0
+            simbad_metadata["parquet_rows_added"] = 0
+            if cache_path.exists():
+                try:
+                    cached = pd.read_parquet(cache_path)
+                    cached_frame = _normalize_frame(cached)
+                    simbad_metadata["parquet_row_count"] = int(len(cached_frame))
+                    frame, parquet_rows_added = merge_catalog_with_cache_only_additions(frame, cached_frame)
+                    simbad_metadata["parquet_rows_added"] = int(parquet_rows_added)
+                    if parquet_rows_added > 0:
+                        load_mode = "enriched_csv_plus_cache"
+                        source_parts.append(str(cache_path))
+                except Exception as error:
+                    notes.append(f"Parquet supplement ingest failed: {_error_summary(error)}")
+        except Exception as error:
+            notes.append(f"Enriched CSV ingest failed: {_error_summary(error)}")
+            prefer_enriched = False
 
-    if simbad_named_objects is not None:
+    if not prefer_enriched:
+        try:
+            frame = ingest_from_openngc()
+            load_mode = "openngc_ingest"
+            source_parts.append(OPENNGC_SOURCE_URL)
+        except Exception as error:
+            frame = ingest_from_seed(seed_path)
+            load_mode = "seed_fallback"
+            source_parts.append(str(seed_path))
+            notes.append(f"OpenNGC ingest failed: {_error_summary(error)}")
+
+        try:
+            simbad_named_objects = fetch_simbad_named_objects()
+            source_parts.append("SIMBAD NAME objects (sim-tap)")
+            simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
+        except Exception as error:
+            simbad_metadata["named_object_rows"] = 0
+            notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
+
+    if not prefer_enriched and simbad_named_objects is not None:
         try:
             simbad_named_frame = ingest_all_from_simbad_named_objects(simbad_named_objects)
             simbad_metadata["named_catalog_rows"] = int(len(simbad_named_frame))
@@ -795,7 +992,7 @@ def load_unified_catalog(
             simbad_metadata["sh2_source"] = "seed_fallback"
             simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
             notes.append(f"SIMBAD full ingest failed: {_error_summary(error)}")
-    else:
+    elif not prefer_enriched:
         sh2_frame = ingest_sh2_from_seed(seed_path)
         frame = merge_catalogs(frame, sh2_frame)
         simbad_metadata["named_catalog_rows"] = 0
@@ -804,7 +1001,7 @@ def load_unified_catalog(
         simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
         notes.append("SIMBAD SH2 ingest skipped: named-object source unavailable")
 
-    if simbad_named_objects is not None:
+    if not prefer_enriched and simbad_named_objects is not None:
         try:
             simbad_reference = build_simbad_m_ngc_reference(simbad_named_objects)
             frame, enriched_count = enrich_with_simbad_m_ngc(frame, simbad_reference)
@@ -812,7 +1009,7 @@ def load_unified_catalog(
         except Exception as error:
             simbad_metadata["m_ngc_enriched_rows"] = 0
             notes.append(f"SIMBAD M/NGC enrichment failed: {_error_summary(error)}")
-    else:
+    elif not prefer_enriched:
         simbad_metadata["m_ngc_enriched_rows"] = 0
         notes.append("SIMBAD M/NGC enrichment skipped: named-object source unavailable")
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import html
 import json
 import re
 from datetime import datetime, time, timedelta, timezone
@@ -100,6 +101,7 @@ CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
 CURATED_CATALOG_PATH = Path("data/dso_catalog_curated.parquet")
+CATALOG_ENRICHED_PATH = Path("data/DSO_CATALOG_ENRICHED.CSV")
 # Catalog rollout feature flag:
 # - "legacy": current loader (`catalog_ingestion.load_unified_catalog`)
 # - "curated_parquet": read directly from `CURATED_CATALOG_PATH` and fallback to legacy on validation/load errors
@@ -2374,6 +2376,27 @@ def render_detail_panel(
     temperature_unit: str,
     use_12_hour: bool,
 ) -> None:
+    def clean_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and not np.isfinite(value):
+            return ""
+        text = str(value).strip()
+        if text.lower() in {"nan", "none"}:
+            return ""
+        return text
+
+    def format_numeric(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return clean_text(value)
+        if not np.isfinite(numeric):
+            return ""
+        return f"{numeric:.6g}"
+
     with st.container(border=True):
         st.subheader("Detail")
 
@@ -2415,38 +2438,80 @@ def render_detail_panel(
 
         st.caption(f"Catalog: {selected['catalog']} | Type: {selected.get('object_type') or '-'}")
 
-        image_cols = st.columns([1.3, 1])
-        search_phrase = selected.get("common_name") or selected.get("primary_id")
-        image_data = fetch_free_use_image(str(search_phrase))
+        detail_cols = st.columns([1.05, 1.15, 1.0])
+        catalog_image_url = clean_text(selected.get("image_url"))
+        image_source_url = clean_text(selected.get("image_attribution_url"))
+        image_license = clean_text(selected.get("license_label"))
+        info_url = clean_text(selected.get("info_url")) or image_source_url
+        if not image_source_url:
+            image_source_url = info_url
 
-        with image_cols[0]:
+        image_url = catalog_image_url
+        if not image_url:
+            search_phrase = selected.get("common_name") or selected.get("primary_id")
+            image_data = fetch_free_use_image(str(search_phrase))
             if image_data and image_data.get("image_url"):
-                st.image(image_data["image_url"], use_container_width=True)
-                attribution = image_data.get("source_url")
-                license_label = image_data.get("license_label", "Unknown")
-                if attribution:
-                    st.caption(f"Source: [Wikimedia Commons]({attribution}) | License: {license_label}")
-                else:
-                    st.caption(f"License: {license_label}")
-            else:
-                st.info("No free-use image found for this target.")
+                image_url = clean_text(image_data.get("image_url"))
+                image_source_url = clean_text(image_data.get("source_url")) or image_source_url
+                image_license = clean_text(image_data.get("license_label")) or image_license
 
-        with image_cols[1]:
+        dist_value = format_numeric(selected.get("dist_value"))
+        dist_unit = clean_text(selected.get("dist_unit"))
+        redshift = format_numeric(selected.get("redshift"))
+        morphology = clean_text(selected.get("morphology"))
+        emission_details = clean_text(selected.get("emission_lines"))
+        description = clean_text(selected.get("description"))
+
+        with detail_cols[0]:
+            if image_url:
+                image_url_html = html.escape(image_url, quote=True)
+                image_tag = (
+                    '<div style="width:400px; height:400px; max-width:100%; display:flex; align-items:center; justify-content:center;">'
+                    f'<img src="{image_url_html}" '
+                    'style="max-width:400px; max-height:400px; width:auto; height:auto; object-fit:contain; object-position:center;" />'
+                    "</div>"
+                )
+                st.markdown(image_tag, unsafe_allow_html=True)
+            else:
+                st.info("No image URL available for this target.")
+
+        with detail_cols[1]:
+            st.markdown("**Description**")
+            st.write(description or "-")
+            if image_source_url:
+                st.caption(f"Image source: [Open link]({image_source_url})")
+            if info_url:
+                st.caption(f"Background: [Open object page]({info_url})")
+            if image_license:
+                st.caption(f"License/Credit: {image_license}")
+
+        with detail_cols[2]:
+            property_items = [
+                {
+                    "Property": "RA / Dec",
+                    "Value": f"{float(selected['ra_deg']):.4f} deg / {float(selected['dec_deg']):.4f} deg",
+                },
+                {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
+                {
+                    "Property": "Alt / Az (now)",
+                    "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
+                },
+                {"Property": "Direction", "Value": str(selected["wind16"])},
+                {"Property": "Distance Value", "Value": dist_value or "-"},
+                {"Property": "Distance Unit", "Value": dist_unit or "-"},
+                {"Property": "Redshift", "Value": redshift or "-"},
+                {"Property": "Morphology", "Value": morphology or "-"},
+                {"Property": "Emissions Details", "Value": emission_details or "-"},
+            ]
             property_rows = pd.DataFrame(
                 [
-                    {
-                        "Property": "RA / Dec",
-                        "Value": f"{float(selected['ra_deg']):.4f} deg / {float(selected['dec_deg']):.4f} deg",
-                    },
-                    {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
-                    {
-                        "Property": "Alt / Az (now)",
-                        "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
-                    },
-                    {"Property": "Direction", "Value": str(selected["wind16"])},
+                    row
+                    for row in property_items
+                    if (clean_text(row.get("Value", "")) and clean_text(row.get("Value", "")) != "-")
                 ]
             )
-            st.dataframe(property_rows, hide_index=True, use_container_width=True, height=180)
+            if not property_rows.empty:
+                st.dataframe(property_rows, hide_index=True, use_container_width=True, height=320)
 
         location = prefs["location"]
         window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
@@ -2715,6 +2780,7 @@ def main() -> None:
         seed_path=CATALOG_SEED_PATH,
         cache_path=CATALOG_CACHE_PATH,
         metadata_path=CATALOG_META_PATH,
+        enriched_path=CATALOG_ENRICHED_PATH,
         force_refresh=force_catalog_refresh,
         mode=CATALOG_LOADER_MODE,
         curated_path=CURATED_CATALOG_PATH,
