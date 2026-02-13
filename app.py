@@ -779,6 +779,11 @@ def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, 
         event = events.get(event_key)
         if event is None:
             continue
+        if event_key == "rise":
+            visible_at_rise = event.get("visible")
+            # Only show "Rise" when the object is still obstructed at the rise timestamp.
+            if pd.isna(visible_at_rise) or bool(visible_at_rise):
+                continue
         labeled.append((event_label, event))
     return labeled
 
