@@ -38,6 +38,26 @@ SIMBAD_TAP_SYNC_ENDPOINTS = [
     "https://simbad.u-strasbg.fr/simbad/sim-tap/sync",
 ]
 SIMBAD_TIMEOUT_SECONDS = 90
+SIMBAD_NAMED_OBJECTS_QUERY = """
+    SELECT
+      b.oid,
+      b.main_id,
+      b.ra,
+      b.dec,
+      b.otype,
+      i.id AS name_identifier
+    FROM basic AS b
+    JOIN ident AS i
+      ON b.oid = i.oidref
+    WHERE
+      i.id LIKE 'NAME %'
+      AND b.oid IN (
+        SELECT DISTINCT b2.oid
+        FROM basic AS b2
+        JOIN ident AS i2
+          ON b2.oid = i2.oidref
+      )
+"""
 
 OPENNGC_TYPE_MAP = {
     "*": "Star",
@@ -292,6 +312,11 @@ def _canonical_primary_id_from_simbad_identifier(raw_identifier: str) -> str | N
     if not compact:
         return None
 
+    if compact.startswith("NAME "):
+        compact = compact[5:].strip()
+        if not compact:
+            return None
+
     messier_match = re.match(r"^M\s*0*([0-9]+)$", compact)
     if messier_match:
         return f"M{int(messier_match.group(1))}"
@@ -304,7 +329,7 @@ def _canonical_primary_id_from_simbad_identifier(raw_identifier: str) -> str | N
             return f"NGC {ngc_number} {suffix}"
         return f"NGC {ngc_number}"
 
-    sh2_match = re.match(r"^SH\s*2[-\s]*0*([0-9]+)\s*([A-Z]*)$", compact)
+    sh2_match = re.match(r"^SH\.?\s*2[-\s]*0*([0-9]+)\s*([A-Z]*)$", compact)
     if sh2_match:
         sh2_number = str(int(sh2_match.group(1)))
         suffix = str(sh2_match.group(2)).strip()
@@ -315,50 +340,39 @@ def _canonical_primary_id_from_simbad_identifier(raw_identifier: str) -> str | N
     return None
 
 
-def ingest_sh2_from_simbad() -> pd.DataFrame:
-    query = """
-        SELECT
-            id AS identifier,
-            basic.main_id AS main_id,
-            basic.ra AS ra_deg,
-            basic.dec AS dec_deg,
-            basic.otype AS object_type
-        FROM ident
-        JOIN basic ON ident.oidref = basic.oid
-        WHERE
-               id LIKE 'SH2-%'
-            OR id LIKE 'SH 2-%'
-            OR id LIKE 'SH  2-%'
-            OR id LIKE 'Sh2-%'
-            OR id LIKE 'Sh 2-%'
-            OR id LIKE 'Sh  2-%'
-            OR id LIKE 'sh2-%'
-            OR id LIKE 'sh 2-%'
-            OR id LIKE 'sh  2-%'
-            OR id LIKE 'SH2 %'
-            OR id LIKE 'SH 2 %'
-            OR id LIKE 'SH  2 %'
-            OR id LIKE 'Sh2 %'
-            OR id LIKE 'Sh 2 %'
-            OR id LIKE 'Sh  2 %'
-            OR id LIKE 'sh2 %'
-            OR id LIKE 'sh 2 %'
-            OR id LIKE 'sh  2 %'
-    """
-    source = _query_simbad_tap(query)
+def fetch_simbad_named_objects() -> pd.DataFrame:
+    source = _query_simbad_tap(SIMBAD_NAMED_OBJECTS_QUERY)
     if source.empty:
-        raise ValueError("SIMBAD SH2 query returned zero rows")
+        raise ValueError("SIMBAD named-object query returned zero rows")
 
-    required = {"identifier", "main_id", "ra_deg", "dec_deg", "object_type"}
+    required = {"oid", "main_id", "ra", "dec", "otype", "name_identifier"}
     missing_columns = required - set(source.columns)
     if missing_columns:
         missing_list = ", ".join(sorted(missing_columns))
-        raise ValueError(f"SIMBAD SH2 query missing columns: {missing_list}")
+        raise ValueError(f"SIMBAD named-object query missing columns: {missing_list}")
+
+    return source
+
+
+def ingest_sh2_from_simbad(named_objects: pd.DataFrame) -> pd.DataFrame:
+    if named_objects.empty:
+        raise ValueError("SIMBAD named-object source is empty for SH2 ingest")
 
     records: dict[str, dict[str, Any]] = {}
-    for _, row in source.iterrows():
-        primary_id = _canonical_primary_id_from_simbad_identifier(str(row["identifier"]))
-        if primary_id is None or not primary_id.startswith("Sh2-"):
+    for _, row in named_objects.iterrows():
+        candidates = [
+            str(row.get("name_identifier", "")).strip(),
+            str(row.get("main_id", "")).strip(),
+        ]
+
+        primary_id: str | None = None
+        for candidate in candidates:
+            resolved = _canonical_primary_id_from_simbad_identifier(candidate)
+            if resolved and resolved.startswith("Sh2-"):
+                primary_id = resolved
+                break
+
+        if primary_id is None:
             continue
 
         if primary_id not in records:
@@ -366,9 +380,9 @@ def ingest_sh2_from_simbad() -> pd.DataFrame:
                 "primary_id": primary_id,
                 "catalog": "SH2",
                 "common_name": "",
-                "object_type": str(row.get("object_type", "")).strip(),
-                "ra_deg": row.get("ra_deg", ""),
-                "dec_deg": row.get("dec_deg", ""),
+                "object_type": str(row.get("otype", "")).strip(),
+                "ra_deg": row.get("ra", ""),
+                "dec_deg": row.get("dec", ""),
                 "constellation": "",
                 "aliases": "",
                 "image_url": "",
@@ -376,9 +390,9 @@ def ingest_sh2_from_simbad() -> pd.DataFrame:
                 "license_label": "",
             }
 
-        identifier = str(row.get("identifier", "")).strip()
+        name_identifier = str(row.get("name_identifier", "")).strip()
         main_id = str(row.get("main_id", "")).strip()
-        alias_candidates = [identifier]
+        alias_candidates = [name_identifier]
         if main_id and main_id != primary_id:
             alias_candidates.append(main_id)
 
@@ -388,68 +402,55 @@ def ingest_sh2_from_simbad() -> pd.DataFrame:
             entry["common_name"] = main_id
 
     if not records:
-        raise ValueError("SIMBAD SH2 query could not map any rows to Sh2 identifiers")
+        raise ValueError("SIMBAD named-object query could not map any SH2 rows")
 
     frame = pd.DataFrame.from_records(list(records.values()))
     return _normalize_frame(frame)
 
 
-def build_simbad_m_ngc_reference() -> pd.DataFrame:
-    query = """
-        SELECT
-            id AS identifier,
-            basic.main_id AS main_id,
-            basic.otype AS object_type
-        FROM ident
-        JOIN basic ON ident.oidref = basic.oid
-        WHERE
-               id LIKE 'M %'
-            OR id LIKE 'M%'
-            OR id LIKE 'm %'
-            OR id LIKE 'm%'
-            OR id LIKE 'NGC %'
-            OR id LIKE 'NGC%'
-            OR id LIKE 'ngc %'
-            OR id LIKE 'ngc%'
-    """
-    source = _query_simbad_tap(query)
-    if source.empty:
-        raise ValueError("SIMBAD M/NGC enrichment query returned zero rows")
-
-    required = {"identifier", "main_id", "object_type"}
-    missing_columns = required - set(source.columns)
-    if missing_columns:
-        missing_list = ", ".join(sorted(missing_columns))
-        raise ValueError(f"SIMBAD M/NGC query missing columns: {missing_list}")
+def build_simbad_m_ngc_reference(named_objects: pd.DataFrame) -> pd.DataFrame:
+    if named_objects.empty:
+        raise ValueError("SIMBAD named-object source is empty for M/NGC enrichment")
 
     records: dict[str, dict[str, Any]] = {}
-    for _, row in source.iterrows():
-        identifier = str(row.get("identifier", "")).strip()
-        primary_id = _canonical_primary_id_from_simbad_identifier(identifier)
-        if primary_id is None or not (primary_id.startswith("M") or primary_id.startswith("NGC ")):
+    for _, row in named_objects.iterrows():
+        candidates = [
+            str(row.get("name_identifier", "")).strip(),
+            str(row.get("main_id", "")).strip(),
+        ]
+
+        primary_id: str | None = None
+        for candidate in candidates:
+            resolved = _canonical_primary_id_from_simbad_identifier(candidate)
+            if resolved and (resolved.startswith("M") or resolved.startswith("NGC ")):
+                primary_id = resolved
+                break
+
+        if primary_id is None:
             continue
 
         if primary_id not in records:
             records[primary_id] = {
                 "primary_id": primary_id,
                 "main_id": str(row.get("main_id", "")).strip(),
-                "object_type": str(row.get("object_type", "")).strip(),
+                "object_type": str(row.get("otype", "")).strip(),
                 "aliases": "",
             }
 
         entry = records[primary_id]
         main_id = str(row.get("main_id", "")).strip()
+        name_identifier = str(row.get("name_identifier", "")).strip()
         entry["aliases"] = _merge_alias_values(
             str(entry.get("aliases", "")),
-            [identifier, main_id],
+            [name_identifier, main_id],
         )
         if not entry["main_id"] and main_id:
             entry["main_id"] = main_id
-        if not entry["object_type"] and str(row.get("object_type", "")).strip():
-            entry["object_type"] = str(row.get("object_type", "")).strip()
+        if not entry["object_type"] and str(row.get("otype", "")).strip():
+            entry["object_type"] = str(row.get("otype", "")).strip()
 
     if not records:
-        raise ValueError("SIMBAD M/NGC enrichment query did not yield mappable identifiers")
+        raise ValueError("SIMBAD named-object query did not yield mappable M/NGC identifiers")
 
     return pd.DataFrame.from_records(list(records.values()))
 
@@ -626,6 +627,7 @@ def load_unified_catalog(
     notes: list[str] = []
     source_parts: list[str] = []
     simbad_metadata: dict[str, Any] = {}
+    simbad_named_objects: pd.DataFrame | None = None
 
     try:
         frame = ingest_from_openngc()
@@ -638,26 +640,42 @@ def load_unified_catalog(
         notes.append(f"OpenNGC ingest failed: {_error_summary(error)}")
 
     try:
-        sh2_frame = ingest_sh2_from_simbad()
-        source_parts.append("SIMBAD SH2 (sim-tap)")
-        simbad_metadata["sh2_source"] = "simbad"
-        simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+        simbad_named_objects = fetch_simbad_named_objects()
+        source_parts.append("SIMBAD NAME objects (sim-tap)")
+        simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
     except Exception as error:
+        simbad_metadata["named_object_rows"] = 0
+        notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
+
+    if simbad_named_objects is not None:
+        try:
+            sh2_frame = ingest_sh2_from_simbad(simbad_named_objects)
+            simbad_metadata["sh2_source"] = "simbad"
+            simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+        except Exception as error:
+            sh2_frame = ingest_sh2_from_seed(seed_path)
+            simbad_metadata["sh2_source"] = "seed_fallback"
+            simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+            notes.append(f"SIMBAD SH2 ingest failed: {_error_summary(error)}")
+    else:
         sh2_frame = ingest_sh2_from_seed(seed_path)
         simbad_metadata["sh2_source"] = "seed_fallback"
         simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
-        notes.append(f"SIMBAD SH2 ingest failed: {_error_summary(error)}")
+        notes.append("SIMBAD SH2 ingest skipped: named-object source unavailable")
 
     frame = merge_catalogs(frame, sh2_frame)
 
-    try:
-        simbad_reference = build_simbad_m_ngc_reference()
-        frame, enriched_count = enrich_with_simbad_m_ngc(frame, simbad_reference)
-        source_parts.append("SIMBAD M/NGC enrichment (sim-tap)")
-        simbad_metadata["m_ngc_enriched_rows"] = int(enriched_count)
-    except Exception as error:
+    if simbad_named_objects is not None:
+        try:
+            simbad_reference = build_simbad_m_ngc_reference(simbad_named_objects)
+            frame, enriched_count = enrich_with_simbad_m_ngc(frame, simbad_reference)
+            simbad_metadata["m_ngc_enriched_rows"] = int(enriched_count)
+        except Exception as error:
+            simbad_metadata["m_ngc_enriched_rows"] = 0
+            notes.append(f"SIMBAD M/NGC enrichment failed: {_error_summary(error)}")
+    else:
         simbad_metadata["m_ngc_enriched_rows"] = 0
-        notes.append(f"SIMBAD M/NGC enrichment failed: {_error_summary(error)}")
+        notes.append("SIMBAD M/NGC enrichment skipped: named-object source unavailable")
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(cache_path, index=False)
