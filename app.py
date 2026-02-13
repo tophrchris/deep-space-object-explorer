@@ -20,7 +20,13 @@ from astral import LocationInfo
 from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
-from catalog_ingestion import load_unified_catalog
+from catalog_service import (
+    CATALOG_MODE_CURATED_PARQUET,
+    CATALOG_MODE_LEGACY,
+    get_object_by_id,
+    load_catalog_data,
+    search_catalog,
+)
 from geopy.geocoders import ArcGIS, Nominatim, Photon
 try:
     from streamlit_searchbox import st_searchbox
@@ -93,6 +99,12 @@ DEFAULT_LOCATION = {
 CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
 CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
+CURATED_CATALOG_PATH = Path("data/dso_catalog_curated.parquet")
+# Catalog rollout feature flag:
+# - "legacy": current loader (`catalog_ingestion.load_unified_catalog`)
+# - "curated_parquet": read directly from `CURATED_CATALOG_PATH` and fallback to legacy on validation/load errors
+CATALOG_LOADER_MODES = (CATALOG_MODE_LEGACY, CATALOG_MODE_CURATED_PARQUET)
+CATALOG_LOADER_MODE = CATALOG_MODE_LEGACY
 BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v1"
 ENABLE_COOKIE_BACKUP = True
 PREFS_BOOTSTRAP_MAX_RUNS = 6
@@ -414,28 +426,6 @@ def format_temperature(temp_celsius: float | None, unit: str) -> str:
     return f"{float(temp_celsius):.0f} C"
 
 
-def canonicalize_designation(query: str) -> str:
-    compact = normalize_text(query)
-
-    match = re.match(r"^(messier|m)(\d+)$", compact)
-    if match:
-        return f"M{int(match.group(2))}"
-
-    match = re.match(r"^(ngc)(\d+)$", compact)
-    if match:
-        return f"NGC {int(match.group(2))}"
-
-    match = re.match(r"^(ic)(\d+)$", compact)
-    if match:
-        return f"IC {int(match.group(2))}"
-
-    match = re.match(r"^(sh2|sharpless)(\d+)$", compact)
-    if match:
-        return f"Sh2-{int(match.group(2))}"
-
-    return query.strip()
-
-
 def az_to_wind16(az_deg: float) -> str:
     idx = int(((az_deg % 360.0) + 11.25) // 22.5) % 16
     return WIND16[idx]
@@ -444,57 +434,6 @@ def az_to_wind16(az_deg: float) -> str:
 def wind_bin_center(direction: str) -> float:
     idx = WIND16.index(direction)
     return idx * 22.5
-
-
-def build_search_index(df: pd.DataFrame) -> pd.DataFrame:
-    indexed = df.copy()
-    for col in ["common_name", "object_type", "constellation", "aliases"]:
-        if col in indexed:
-            indexed[col] = indexed[col].fillna("")
-
-    indexed["primary_id_norm"] = indexed["primary_id"].map(normalize_text)
-    indexed["aliases_norm"] = indexed["aliases"].map(normalize_text)
-    indexed["search_blob_norm"] = (
-        indexed["primary_id"].fillna("")
-        + " "
-        + indexed["common_name"].fillna("")
-        + " "
-        + indexed["aliases"].fillna("")
-        + " "
-        + indexed["catalog"].fillna("")
-    ).map(normalize_text)
-
-    return indexed
-
-
-def load_catalog(force_refresh: bool = False) -> tuple[pd.DataFrame, dict[str, Any]]:
-    frame, metadata = load_unified_catalog(
-        seed_path=CATALOG_SEED_PATH,
-        cache_path=CATALOG_CACHE_PATH,
-        metadata_path=CATALOG_META_PATH,
-        force_refresh=force_refresh,
-    )
-    return build_search_index(frame), metadata
-
-
-def search_catalog(df: pd.DataFrame, query: str) -> pd.DataFrame:
-    if not query.strip():
-        return df.copy()
-
-    canonical = canonicalize_designation(query)
-    query_norm = normalize_text(query)
-    canonical_norm = normalize_text(canonical)
-
-    exact_mask = (df["primary_id_norm"] == query_norm) | (df["primary_id_norm"] == canonical_norm)
-    alias_exact = df["aliases_norm"].str.contains(query_norm, regex=False) | df[
-        "aliases_norm"
-    ].str.contains(canonical_norm, regex=False)
-    partial_mask = df["search_blob_norm"].str.contains(query_norm, regex=False)
-
-    results = df[exact_mask | alias_exact | partial_mask].copy()
-    results["_rank"] = np.where(exact_mask.loc[results.index] | alias_exact.loc[results.index], 0, 1)
-    results = results.sort_values(by=["_rank", "catalog", "primary_id"], ascending=[True, True, True])
-    return results.drop(columns=["_rank"])
 
 
 def compute_altaz_now(targets: pd.DataFrame, lat: float, lon: float) -> pd.DataFrame:
@@ -2222,15 +2161,13 @@ def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
 
 def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Series | None:
     selected_id = st.session_state.get("selected_id")
-    if not selected_id:
-        return None
-
-    target = catalog[catalog["primary_id"] == selected_id]
-    if target.empty:
+    selected = get_object_by_id(catalog, str(selected_id) if selected_id else "")
+    if selected is None:
         return None
 
     location = prefs["location"]
-    enriched = compute_altaz_now(target.iloc[:1], lat=float(location["lat"]), lon=float(location["lon"]))
+    target = pd.DataFrame([selected])
+    enriched = compute_altaz_now(target, lat=float(location["lat"]), lon=float(location["lon"]))
     if enriched.empty:
         return None
     return enriched.iloc[0]
@@ -2324,6 +2261,10 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
 
     st.divider()
     st.subheader("Catalog")
+    requested_mode = str(catalog_meta.get("feature_mode_requested", CATALOG_LOADER_MODE))
+    active_mode = str(catalog_meta.get("feature_mode_active", catalog_meta.get("load_mode", "unknown")))
+    st.caption(f"Loader mode: requested `{requested_mode}` | active `{active_mode}`")
+    st.caption(f"Available loader modes: {', '.join(CATALOG_LOADER_MODES)}")
     st.caption(
         f"Rows: {int(catalog_meta.get('row_count', 0))} | "
         f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
@@ -2332,9 +2273,34 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     if isinstance(catalog_counts, dict) and catalog_counts:
         counts_line = " | ".join(f"{catalog_name}: {count}" for catalog_name, count in sorted(catalog_counts.items()))
         st.caption(counts_line)
+    catalog_filters = catalog_meta.get("filters", {})
+    if isinstance(catalog_filters, dict):
+        catalogs_count = len(catalog_filters.get("catalogs", []))
+        object_types_count = len(catalog_filters.get("object_types", []))
+        constellations_count = len(catalog_filters.get("constellations", []))
+        st.caption(
+            "Filter options: "
+            f"catalogs={catalogs_count} | object types={object_types_count} | constellations={constellations_count}"
+        )
     loaded_at = str(catalog_meta.get("loaded_at_utc", "")).strip()
     if loaded_at:
         st.caption(f"Loaded: {loaded_at}")
+    validation = catalog_meta.get("validation", {})
+    if isinstance(validation, dict):
+        row_count = int(validation.get("row_count", 0))
+        unique_ids = int(validation.get("unique_primary_id_count", 0))
+        duplicate_ids = int(validation.get("duplicate_primary_id_count", 0))
+        blank_ids = int(validation.get("blank_primary_id_count", 0))
+        st.caption(
+            "Validation: "
+            f"rows={row_count} | unique_ids={unique_ids} | duplicate_ids={duplicate_ids} | blank_ids={blank_ids}"
+        )
+        warnings = validation.get("warnings", [])
+        if isinstance(warnings, list):
+            for warning in warnings:
+                warning_text = str(warning).strip()
+                if warning_text:
+                    st.warning(warning_text)
     if st.button("Refresh catalog cache", use_container_width=True):
         st.session_state["force_catalog_refresh"] = True
         st.rerun()
@@ -2745,7 +2711,14 @@ def main() -> None:
     )
 
     force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
-    catalog, catalog_meta = load_catalog(force_refresh=force_catalog_refresh)
+    catalog, catalog_meta = load_catalog_data(
+        seed_path=CATALOG_SEED_PATH,
+        cache_path=CATALOG_CACHE_PATH,
+        metadata_path=CATALOG_META_PATH,
+        force_refresh=force_catalog_refresh,
+        mode=CATALOG_LOADER_MODE,
+        curated_path=CURATED_CATALOG_PATH,
+    )
     sanitize_saved_lists(catalog=catalog, prefs=prefs)
 
     def explorer_page() -> None:
