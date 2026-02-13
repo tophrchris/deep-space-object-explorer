@@ -2511,7 +2511,13 @@ def render_detail_panel(
                 ]
             )
             if not property_rows.empty:
-                st.dataframe(property_rows, hide_index=True, use_container_width=True, height=320)
+                table_height = max(72, min(320, 36 * (len(property_rows) + 1)))
+                st.dataframe(
+                    property_rows,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=table_height,
+                )
 
         location = prefs["location"]
         window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
