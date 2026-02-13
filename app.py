@@ -22,7 +22,13 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
 from geopy.geocoders import Nominatim
-from streamlit_js_eval import get_browser_language, get_geolocation, get_local_storage, set_local_storage
+from streamlit_js_eval import (
+    get_browser_language,
+    get_geolocation,
+    get_local_storage,
+    set_local_storage,
+    streamlit_js_eval,
+)
 from streamlit_autorefresh import st_autorefresh
 from timezonefinder import TimezoneFinder
 
@@ -67,6 +73,22 @@ TEMPERATURE_UNIT_OPTIONS = {
     "Celsius": "c",
 }
 FAHRENHEIT_COUNTRY_CODES = {"US", "BS", "BZ", "KY", "PW", "FM", "MH", "LR"}
+HOUR12_COUNTRY_CODES = {
+    "AU",
+    "CA",
+    "CO",
+    "EG",
+    "HN",
+    "IN",
+    "IE",
+    "MY",
+    "NZ",
+    "PH",
+    "PK",
+    "SA",
+    "SV",
+    "US",
+}
 EVENT_LABELS: list[tuple[str, str]] = [
     ("rise", "Rise"),
     ("set", "Set"),
@@ -233,6 +255,58 @@ def resolve_temperature_unit(preference: str, locale_value: str | None) -> str:
     if pref == "c":
         return "c"
     return infer_temperature_unit_from_locale(locale_value)
+
+
+def infer_12_hour_clock_from_locale(locale_value: str | None) -> bool:
+    if not locale_value:
+        return False
+
+    normalized = str(locale_value).replace("-", "_")
+    parts = [part for part in normalized.split("_") if part]
+    if len(parts) < 2:
+        return False
+
+    candidate = parts[-1].upper()
+    if len(candidate) == 2 and candidate.isalpha():
+        return candidate in HOUR12_COUNTRY_CODES
+    return False
+
+
+def resolve_12_hour_clock(locale_value: str | None, hour_cycle_value: str | None) -> bool:
+    cycle = str(hour_cycle_value or "").strip().lower()
+    if cycle in {"h11", "h12"}:
+        return True
+    if cycle in {"h23", "h24"}:
+        return False
+    return infer_12_hour_clock_from_locale(locale_value)
+
+
+def normalize_12_hour_label(value: str) -> str:
+    cleaned = str(value).strip()
+    if cleaned.startswith("0"):
+        cleaned = cleaned[1:]
+    return cleaned.replace("AM", "am").replace("PM", "pm")
+
+
+def format_display_time(value: pd.Timestamp | datetime, use_12_hour: bool, include_seconds: bool = False) -> str:
+    timestamp = pd.Timestamp(value)
+    if include_seconds:
+        fmt = "%I:%M:%S %p" if use_12_hour else "%H:%M:%S"
+    else:
+        fmt = "%I:%M %p" if use_12_hour else "%H:%M"
+    rendered = timestamp.strftime(fmt)
+    return normalize_12_hour_label(rendered) if use_12_hour else rendered
+
+
+def format_display_time_values(
+    values: pd.Series | pd.DatetimeIndex | list[pd.Timestamp | datetime], use_12_hour: bool
+) -> np.ndarray:
+    dt_index = pd.DatetimeIndex(pd.to_datetime(values))
+    fmt = "%I:%M %p" if use_12_hour else "%H:%M"
+    rendered = dt_index.strftime(fmt).tolist()
+    if use_12_hour:
+        rendered = [normalize_12_hour_label(value) for value in rendered]
+    return np.asarray(rendered, dtype=object)
 
 
 def format_temperature(temp_celsius: float | None, unit: str) -> str:
@@ -443,10 +517,10 @@ def extract_events(track: pd.DataFrame) -> dict[str, pd.Series | None]:
     return events
 
 
-def format_time(series: pd.Series | None) -> str:
+def format_time(series: pd.Series | None, use_12_hour: bool) -> str:
     if series is None:
         return "--"
-    return pd.Timestamp(series["time_local"]).strftime("%H:%M")
+    return format_display_time(pd.Timestamp(series["time_local"]), use_12_hour=use_12_hour)
 
 
 def compute_total_visible_time(track: pd.DataFrame) -> timedelta:
@@ -498,6 +572,7 @@ def build_sky_position_summary_rows(
     selected_track: pd.DataFrame,
     set_list_tracks: list[dict[str, Any]],
     pinned_ids: set[str],
+    use_12_hour: bool,
 ) -> list[dict[str, Any]]:
     def _build_row(
         primary_id: str,
@@ -508,15 +583,17 @@ def build_sky_position_summary_rows(
     ) -> dict[str, Any]:
         culmination = events.get("culmination")
         culmination_dir = str(culmination["wind16"]) if culmination is not None else "--"
+        culmination_alt = f"{float(culmination['alt']):.1f} deg" if culmination is not None else "--"
         return {
             "primary_id": primary_id,
             "line_color": color,
             "target": label,
-            "rise": format_time(events.get("rise")),
-            "first_visible": format_time(events.get("first_visible")),
-            "culmination": format_time(events.get("culmination")),
-            "last_visible": format_time(events.get("last_visible")),
-            "set": format_time(events.get("set")),
+            "rise": format_time(events.get("rise"), use_12_hour=use_12_hour),
+            "first_visible": format_time(events.get("first_visible"), use_12_hour=use_12_hour),
+            "culmination": format_time(events.get("culmination"), use_12_hour=use_12_hour),
+            "culmination_alt": culmination_alt,
+            "last_visible": format_time(events.get("last_visible"), use_12_hour=use_12_hour),
+            "set": format_time(events.get("set"), use_12_hour=use_12_hour),
             "visible_total": "--",
             "culmination_dir": culmination_dir,
             "is_pinned": is_pinned,
@@ -563,6 +640,7 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
             "last_visible",
             "set",
             "visible_total",
+            "culmination_alt",
             "culmination_dir",
             "set_list_state",
         ]
@@ -572,11 +650,12 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
             "target": "Target",
             "rise": "Rise",
             "first_visible": "First Visible",
-            "culmination": "Culmination",
+            "culmination": "Peak",
             "last_visible": "Last Visible",
             "set": "Set",
-            "visible_total": "Visible",
-            "culmination_dir": "Culm Dir",
+            "visible_total": "Duration",
+            "culmination_alt": "Max Alt",
+            "culmination_dir": "Direction",
             "set_list_state": "Set List",
         }
     )
@@ -603,11 +682,12 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
             "Target": st.column_config.TextColumn(width="large"),
             "Rise": st.column_config.TextColumn(width="small"),
             "First Visible": st.column_config.TextColumn(width="small"),
-            "Culmination": st.column_config.TextColumn(width="small"),
+            "Peak": st.column_config.TextColumn(width="small"),
+            "Max Alt": st.column_config.TextColumn(width="small"),
             "Last Visible": st.column_config.TextColumn(width="small"),
             "Set": st.column_config.TextColumn(width="small"),
-            "Visible": st.column_config.TextColumn(width="small"),
-            "Culm Dir": st.column_config.TextColumn(width="small"),
+            "Duration": st.column_config.TextColumn(width="small"),
+            "Direction": st.column_config.TextColumn(width="small"),
             "Set List": st.column_config.TextColumn(width="small"),
         },
     )
@@ -658,22 +738,17 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         persist_and_rerun(prefs)
 
 
-def format_hour_label(value: pd.Timestamp | datetime) -> str:
-    hour = int(pd.Timestamp(value).hour)
-    suffix = "am" if hour < 12 else "pm"
-    display = hour % 12
-    if display == 0:
-        display = 12
-    return f"{display}{suffix}"
+def format_hour_label(value: pd.Timestamp | datetime, use_12_hour: bool) -> str:
+    return format_display_time(value, use_12_hour=use_12_hour)
 
 
-def split_path_on_az_wrap(track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if track.empty:
         return np.array([], dtype=float), np.array([], dtype=float), np.empty((0, 3), dtype=object)
 
     az_values = track["az"].to_numpy(dtype=float)
     alt_values = track["alt"].to_numpy(dtype=float)
-    time_values = track["time_local"].dt.strftime("%H:%M").to_numpy(dtype=object)
+    time_values = format_display_time_values(track["time_local"], use_12_hour=use_12_hour)
     wind_values = track["wind16"].astype(str).to_numpy(dtype=object)
     min_values = track["min_alt_required"].to_numpy(dtype=float)
 
@@ -715,7 +790,7 @@ def sample_direction_indices(length: int, max_markers: int = 6) -> list[int]:
     return list(range(step, length - 1, step))
 
 
-def direction_markers_cartesian(track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def direction_markers_cartesian(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if track.empty:
         return (
             np.array([], dtype=float),
@@ -726,7 +801,7 @@ def direction_markers_cartesian(track: pd.DataFrame) -> tuple[np.ndarray, np.nda
 
     az_values = track["az"].to_numpy(dtype=float)
     alt_values = track["alt"].to_numpy(dtype=float)
-    time_values = track["time_local"].dt.strftime("%H:%M").to_numpy(dtype=object)
+    time_values = format_display_time_values(track["time_local"], use_12_hour=use_12_hour)
     indices = [idx for idx in sample_direction_indices(len(track)) if idx < len(track) - 1]
 
     x_values: list[float] = []
@@ -754,7 +829,9 @@ def direction_markers_cartesian(track: pd.DataFrame) -> tuple[np.ndarray, np.nda
     )
 
 
-def direction_markers_radial(track: pd.DataFrame, radial_values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def direction_markers_radial(
+    track: pd.DataFrame, radial_values: np.ndarray, use_12_hour: bool
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if track.empty:
         return (
             np.array([], dtype=float),
@@ -765,7 +842,7 @@ def direction_markers_radial(track: pd.DataFrame, radial_values: np.ndarray) -> 
 
     theta_values = track["az"].to_numpy(dtype=float)
     r_values = np.asarray(radial_values, dtype=float)
-    time_values = track["time_local"].dt.strftime("%H:%M").to_numpy(dtype=object)
+    time_values = format_display_time_values(track["time_local"], use_12_hour=use_12_hour)
     indices = [idx for idx in sample_direction_indices(len(track)) if idx < len(track) - 1]
 
     theta_markers: list[float] = []
@@ -826,6 +903,7 @@ def build_path_plot(
     obstructions: dict[str, float],
     selected_label: str,
     selected_color: str,
+    use_12_hour: bool,
     set_list_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
@@ -843,7 +921,7 @@ def build_path_plot(
         )
     )
 
-    path_x, path_y, path_custom = split_path_on_az_wrap(track)
+    path_x, path_y, path_custom = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
     fig.add_trace(
         go.Scatter(
             x=path_x,
@@ -856,7 +934,9 @@ def build_path_plot(
         )
     )
 
-    direction_x, direction_y, direction_angles, direction_labels = direction_markers_cartesian(track)
+    direction_x, direction_y, direction_angles, direction_labels = direction_markers_cartesian(
+        track, use_12_hour=use_12_hour
+    )
     if direction_x.size:
         fig.add_trace(
             go.Scatter(
@@ -882,7 +962,7 @@ def build_path_plot(
         event_y = [float(event["alt"]) for _, event in selected_events]
         event_text = [label for label, _ in selected_events]
         event_custom = np.asarray(
-            [[label, pd.Timestamp(event["time_local"]).strftime("%H:%M")] for label, event in selected_events],
+            [[label, format_display_time(pd.Timestamp(event["time_local"]), use_12_hour=use_12_hour)] for label, event in selected_events],
             dtype=object,
         )
         fig.add_trace(
@@ -905,7 +985,7 @@ def build_path_plot(
             overlay_track = target_track.get("track")
             if not isinstance(overlay_track, pd.DataFrame) or overlay_track.empty:
                 continue
-            path_x, path_y, path_custom = split_path_on_az_wrap(overlay_track)
+            path_x, path_y, path_custom = split_path_on_az_wrap(overlay_track, use_12_hour=use_12_hour)
             if path_x.size == 0:
                 continue
 
@@ -933,7 +1013,7 @@ def build_path_plot(
             )
 
             overlay_direction_x, overlay_direction_y, overlay_direction_angles, overlay_direction_labels = (
-                direction_markers_cartesian(overlay_track)
+                direction_markers_cartesian(overlay_track, use_12_hour=use_12_hour)
             )
             if overlay_direction_x.size:
                 fig.add_trace(
@@ -960,7 +1040,7 @@ def build_path_plot(
                 event_y = [float(event["alt"]) for _, event in overlay_events]
                 event_text = [label for label, _ in overlay_events]
                 event_custom = np.asarray(
-                    [[label, pd.Timestamp(event["time_local"]).strftime("%H:%M")] for label, event in overlay_events],
+                    [[label, format_display_time(pd.Timestamp(event["time_local"]), use_12_hour=use_12_hour)] for label, event in overlay_events],
                     dtype=object,
                 )
                 fig.add_trace(
@@ -998,6 +1078,7 @@ def build_path_plot_radial(
     dome_view: bool,
     selected_label: str,
     selected_color: str,
+    use_12_hour: bool,
     set_list_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
@@ -1048,7 +1129,12 @@ def build_path_plot_radial(
             name=selected_label,
             line={"width": 3, "color": selected_color},
             customdata=np.stack(
-                [track["time_local"].dt.strftime("%H:%M"), track["wind16"], track["min_alt_required"], track["alt"]],
+                [
+                    format_display_time_values(track["time_local"], use_12_hour=use_12_hour),
+                    track["wind16"],
+                    track["min_alt_required"],
+                    track["alt"],
+                ],
                 axis=-1,
             ),
             hovertemplate="Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Time %{customdata[0]}<br>Dir %{customdata[1]}<br>Obs %{customdata[2]:.0f} deg<extra></extra>",
@@ -1056,7 +1142,7 @@ def build_path_plot_radial(
     )
 
     selected_direction_theta, selected_direction_r, selected_direction_angles, selected_direction_labels = (
-        direction_markers_radial(track, np.asarray(track_r, dtype=float))
+        direction_markers_radial(track, np.asarray(track_r, dtype=float), use_12_hour=use_12_hour)
     )
     if selected_direction_theta.size:
         fig.add_trace(
@@ -1086,7 +1172,7 @@ def build_path_plot_radial(
         ]
         event_text = [label for label, _ in selected_events]
         event_custom = np.asarray(
-            [[label, pd.Timestamp(event["time_local"]).strftime("%H:%M")] for label, event in selected_events],
+            [[label, format_display_time(pd.Timestamp(event["time_local"]), use_12_hour=use_12_hour)] for label, event in selected_events],
             dtype=object,
         )
         fig.add_trace(
@@ -1117,7 +1203,7 @@ def build_path_plot_radial(
             overlay_custom = np.stack(
                 [
                     np.full(len(overlay_track), target_label, dtype=object),
-                    overlay_track["time_local"].dt.strftime("%H:%M"),
+                    format_display_time_values(overlay_track["time_local"], use_12_hour=use_12_hour),
                     overlay_track["wind16"].astype(str),
                     overlay_track["alt"],
                 ],
@@ -1137,7 +1223,9 @@ def build_path_plot_radial(
             )
 
             overlay_direction_theta, overlay_direction_r, overlay_direction_angles, overlay_direction_labels = (
-                direction_markers_radial(overlay_track, np.asarray(overlay_r, dtype=float))
+                direction_markers_radial(
+                    overlay_track, np.asarray(overlay_r, dtype=float), use_12_hour=use_12_hour
+                )
             )
             if overlay_direction_theta.size:
                 fig.add_trace(
@@ -1169,7 +1257,7 @@ def build_path_plot_radial(
                 ]
                 event_text = [label for label, _ in overlay_events]
                 event_custom = np.asarray(
-                    [[label, pd.Timestamp(event["time_local"]).strftime("%H:%M")] for label, event in overlay_events],
+                    [[label, format_display_time(pd.Timestamp(event["time_local"]), use_12_hour=use_12_hour)] for label, event in overlay_events],
                     dtype=object,
                 )
                 fig.add_trace(
@@ -1255,6 +1343,7 @@ def build_night_plot(
     temperature_by_hour: dict[str, float],
     temperature_unit: str,
     target_label: str | None = None,
+    use_12_hour: bool = False,
 ) -> go.Figure:
     if track.empty:
         return go.Figure()
@@ -1271,7 +1360,7 @@ def build_night_plot(
         rows.append(
             {
                 "hour": hour,
-                "hour_label": format_hour_label(hour),
+                "hour_label": format_hour_label(hour, use_12_hour=use_12_hour),
                 "max_alt": max(float(max_row["alt"]), 0.0),
                 "obstructed_alt": min(
                     max(float(max_row["alt"]), 0.0),
@@ -1295,7 +1384,7 @@ def build_night_plot(
     obstructed_hover = []
     clear_hover = []
     for _, row in frame.iterrows():
-        hour_str = pd.Timestamp(row["hour"]).strftime("%H:%M")
+        hour_str = format_display_time(pd.Timestamp(row["hour"]), use_12_hour=use_12_hour)
         max_alt = float(row["max_alt"])
         obstructed_alt = float(row["obstructed_alt"])
         clear_alt = float(row["clear_alt"])
@@ -1919,6 +2008,7 @@ def render_detail_panel(
     catalog: pd.DataFrame,
     prefs: dict[str, Any],
     temperature_unit: str,
+    use_12_hour: bool,
 ) -> None:
     with st.container(border=True):
         st.subheader("Detail")
@@ -2067,9 +2157,13 @@ def render_detail_panel(
         events = extract_events(track)
 
         st.caption(
-            f"Tonight ({tzinfo.key}): {window_start.strftime('%H:%M')} -> {window_end.strftime('%H:%M')} | "
-            f"Rise {format_time(events['rise'])} | First-visible {format_time(events['first_visible'])} | "
-            f"Culmination {format_time(events['culmination'])} | Last-visible {format_time(events['last_visible'])}"
+            f"Tonight ({tzinfo.key}): "
+            f"{format_display_time(window_start, use_12_hour=use_12_hour)} -> "
+            f"{format_display_time(window_end, use_12_hour=use_12_hour)} | "
+            f"Rise {format_time(events['rise'], use_12_hour=use_12_hour)} | "
+            f"First-visible {format_time(events['first_visible'], use_12_hour=use_12_hour)} | "
+            f"Culmination {format_time(events['culmination'], use_12_hour=use_12_hour)} | "
+            f"Last-visible {format_time(events['last_visible'], use_12_hour=use_12_hour)}"
         )
 
         path_style = st.segmented_control(
@@ -2087,6 +2181,7 @@ def render_detail_panel(
                 dome_view=dome_view,
                 selected_label=selected_label,
                 selected_color=selected_color,
+                use_12_hour=use_12_hour,
                 set_list_tracks=set_list_tracks,
             )
         else:
@@ -2096,6 +2191,7 @@ def render_detail_panel(
                 obstructions=prefs["obstructions"],
                 selected_label=selected_label,
                 selected_color=selected_color,
+                use_12_hour=use_12_hour,
                 set_list_tracks=set_list_tracks,
             )
 
@@ -2111,6 +2207,7 @@ def render_detail_panel(
             selected_track=track,
             set_list_tracks=set_list_tracks,
             pinned_ids=set(str(item) for item in prefs["set_list"]),
+            use_12_hour=use_12_hour,
         )
         render_sky_position_summary_table(summary_rows, prefs)
 
@@ -2127,6 +2224,7 @@ def render_detail_panel(
                 temperature_by_hour=temperatures,
                 temperature_unit=temperature_unit,
                 target_label=selected_label,
+                use_12_hour=use_12_hour,
             ),
             use_container_width=True,
         )
@@ -2153,6 +2251,18 @@ def main() -> None:
     if isinstance(browser_language_raw, str) and browser_language_raw.strip():
         st.session_state["browser_language"] = browser_language_raw.strip()
     browser_language = st.session_state.get("browser_language")
+    browser_hour_cycle_raw = streamlit_js_eval(
+        js_expressions=(
+            "new Intl.DateTimeFormat(window.navigator.language, "
+            "{hour: 'numeric', minute: '2-digit'}).resolvedOptions().hourCycle"
+        ),
+        key="browser_hour_cycle_pref",
+    )
+    if isinstance(browser_hour_cycle_raw, str) and browser_hour_cycle_raw.strip():
+        st.session_state["browser_hour_cycle"] = browser_hour_cycle_raw.strip()
+    browser_hour_cycle = st.session_state.get("browser_hour_cycle")
+    use_12_hour = resolve_12_hour_clock(browser_language, browser_hour_cycle)
+
     effective_temperature_unit = resolve_temperature_unit(
         str(prefs.get("temperature_unit", "auto")),
         browser_language,
@@ -2176,7 +2286,12 @@ def main() -> None:
     header_cols = st.columns([3, 1])
     header_cols[0].title("DSO Explorer")
     header_cols[1].markdown(
-        f"<p class='small-note'>Alt/Az auto-refresh 60s<br>Updated: {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>",
+        (
+            "<p class='small-note'>Alt/Az auto-refresh 60s<br>"
+            f"Updated: {now_utc.strftime('%Y-%m-%d')} "
+            f"{format_display_time(now_utc, use_12_hour=use_12_hour, include_seconds=True)} UTC"
+            "</p>"
+        ),
         unsafe_allow_html=True,
     )
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
@@ -2193,6 +2308,7 @@ def main() -> None:
                 catalog=catalog,
                 prefs=prefs,
                 temperature_unit=effective_temperature_unit,
+                use_12_hour=use_12_hour,
             )
     else:
         result_col, detail_col = st.columns([35, 65])
@@ -2206,6 +2322,7 @@ def main() -> None:
                 catalog=catalog,
                 prefs=prefs,
                 temperature_unit=effective_temperature_unit,
+                use_12_hour=use_12_hour,
             )
 
 
