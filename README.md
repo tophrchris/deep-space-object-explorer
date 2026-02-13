@@ -24,6 +24,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - `app.py`: Streamlit app entry point
 - `catalog_ingestion.py`: catalog ingest + normalization + cache metadata
 - `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
+- `catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
 - `TODO.md`: prioritized build backlog
 
 ## Local setup
@@ -65,6 +66,23 @@ Notes:
 - `runtime.txt` pins Python to 3.11 for cloud parity.
 - Preferences persist in browser `localStorage` (not shared across users).
 - For private repos, make sure Streamlit has GitHub access to this repository.
+
+## Release milestones
+
+- `v0.1.0` (Pre-release): complete
+  - Tag: `v0.1.0`
+  - Release: <https://github.com/tophrchris/deep-space-object-explorer/releases/tag/v0.1.0>
+  - Milestone: <https://github.com/tophrchris/deep-space-object-explorer/milestone/1>
+- `v0.2.0`: in progress
+  - Milestone: <https://github.com/tophrchris/deep-space-object-explorer/milestone/2>
+
+## v0.2.0 roadmap
+
+- Layout refactor and interaction flow cleanup (`#27`)
+- Location UX/robustness improvements (`#28`, `#17`, `#2`)
+- Additional catalog quality and enrichment follow-ups
+- Catalog issue drafts to file as GitHub issues: [`catalog_issue_backlog.md`](catalog_issue_backlog.md)
+- Next-pass UI/UX polish after core behavior stabilizes
 
 ## Notes
 
