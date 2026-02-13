@@ -468,7 +468,13 @@ def split_path_on_az_wrap(track: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, 
     )
 
 
-def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], obstructions: dict[str, float]) -> go.Figure:
+def build_path_plot(
+    track: pd.DataFrame,
+    events: dict[str, pd.Series | None],
+    obstructions: dict[str, float],
+    set_list_points: pd.DataFrame | None = None,
+    selected_id: str | None = None,
+) -> go.Figure:
     path_x, path_y, path_custom = split_path_on_az_wrap(track)
     fig = go.Figure()
     fig.add_trace(
@@ -517,6 +523,39 @@ def build_path_plot(track: pd.DataFrame, events: dict[str, pd.Series | None], ob
             )
         )
 
+    if set_list_points is not None and not set_list_points.empty:
+        points = set_list_points.copy()
+        points["common_name"] = points["common_name"].fillna("").astype(str)
+        points["wind16"] = points["wind16"].fillna("").astype(str)
+        points["is_selected"] = points["primary_id"].astype(str) == str(selected_id or "")
+        marker_colors = ["#f59e0b" if value else "#22c55e" for value in points["is_selected"].tolist()]
+        marker_sizes = [12 if value else 9 for value in points["is_selected"].tolist()]
+        names = points["common_name"].tolist()
+        hover_names = [name if name else "-" for name in names]
+        custom = np.stack(
+            [
+                points["primary_id"].astype(str),
+                np.asarray(hover_names, dtype=object),
+                points["wind16"].astype(str),
+            ],
+            axis=-1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=points["az_now"],
+                y=points["alt_now"],
+                mode="markers",
+                name="Set List (now)",
+                marker={
+                    "size": marker_sizes,
+                    "color": marker_colors,
+                    "line": {"width": 1, "color": "#0f172a"},
+                },
+                customdata=custom,
+                hovertemplate="ID %{customdata[0]}<br>Name %{customdata[1]}<br>Az %{x:.1f} deg<br>Alt %{y:.1f} deg<br>Dir %{customdata[2]}<extra></extra>",
+            )
+        )
+
     fig.update_layout(
         title="Sky Position",
         height=330,
@@ -541,6 +580,8 @@ def build_path_plot_radial(
     events: dict[str, pd.Series | None],
     obstructions: dict[str, float],
     dome_view: bool,
+    set_list_points: pd.DataFrame | None = None,
+    selected_id: str | None = None,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -616,6 +657,45 @@ def build_path_plot_radial(
                 marker={"size": 9},
                 showlegend=False,
                 hovertemplate=f"{event_name.replace('_', ' ').title()} at {pd.Timestamp(event['time_local']).strftime('%H:%M')}<extra></extra>",
+            )
+        )
+
+    if set_list_points is not None and not set_list_points.empty:
+        points = set_list_points.copy()
+        points["common_name"] = points["common_name"].fillna("").astype(str)
+        points["wind16"] = points["wind16"].fillna("").astype(str)
+        points["is_selected"] = points["primary_id"].astype(str) == str(selected_id or "")
+        marker_colors = ["#f59e0b" if value else "#22c55e" for value in points["is_selected"].tolist()]
+        marker_sizes = [12 if value else 9 for value in points["is_selected"].tolist()]
+        names = points["common_name"].tolist()
+        hover_names = [name if name else "-" for name in names]
+        custom = np.stack(
+            [
+                points["primary_id"].astype(str),
+                np.asarray(hover_names, dtype=object),
+                points["wind16"].astype(str),
+                points["alt_now"],
+            ],
+            axis=-1,
+        )
+        point_r = (
+            (90.0 - points["alt_now"].clip(lower=0.0, upper=90.0))
+            if dome_view
+            else points["alt_now"].clip(lower=0.0, upper=90.0)
+        )
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=points["az_now"],
+                r=point_r,
+                mode="markers",
+                name="Set List (now)",
+                marker={
+                    "size": marker_sizes,
+                    "color": marker_colors,
+                    "line": {"width": 1, "color": "#0f172a"},
+                },
+                customdata=custom,
+                hovertemplate="ID %{customdata[0]}<br>Name %{customdata[1]}<br>Az %{theta:.1f} deg<br>Alt %{customdata[3]:.1f} deg<br>Dir %{customdata[2]}<extra></extra>",
             )
         )
 
@@ -1342,7 +1422,12 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_
             save_preferences(prefs)
 
 
-def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], temperature_unit: str) -> None:
+def render_detail_panel(
+    selected: pd.Series | None,
+    catalog: pd.DataFrame,
+    prefs: dict[str, Any],
+    temperature_unit: str,
+) -> None:
     with st.container(border=True):
         st.subheader("Detail")
 
@@ -1417,6 +1502,11 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], tempe
 
         location = prefs["location"]
         window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
+        set_list_points = compute_altaz_now(
+            subset_by_id_list(catalog, prefs["set_list"]),
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+        )
         track = compute_track(
             ra_deg=float(selected["ra_deg"]),
             dec_deg=float(selected["dec_deg"]),
@@ -1447,9 +1537,17 @@ def render_detail_panel(selected: pd.Series | None, prefs: dict[str, Any], tempe
                 events=events,
                 obstructions=prefs["obstructions"],
                 dome_view=dome_view,
+                set_list_points=set_list_points,
+                selected_id=target_id,
             )
         else:
-            path_figure = build_path_plot(track=track, events=events, obstructions=prefs["obstructions"])
+            path_figure = build_path_plot(
+                track=track,
+                events=events,
+                obstructions=prefs["obstructions"],
+                set_list_points=set_list_points,
+                selected_id=target_id,
+            )
 
         st.plotly_chart(
             path_figure,
@@ -1527,6 +1625,7 @@ def main() -> None:
             st.markdown("### Detail bottom sheet")
             render_detail_panel(
                 selected=selected_row,
+                catalog=catalog,
                 prefs=prefs,
                 temperature_unit=effective_temperature_unit,
             )
@@ -1539,6 +1638,7 @@ def main() -> None:
         with detail_col:
             render_detail_panel(
                 selected=selected_row,
+                catalog=catalog,
                 prefs=prefs,
                 temperature_unit=effective_temperature_unit,
             )
