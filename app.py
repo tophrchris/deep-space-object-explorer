@@ -110,6 +110,7 @@ PATH_LINE_COLORS = [
 ]
 OBSTRUCTION_FILL_COLOR = "rgba(226, 232, 240, 0.40)"
 OBSTRUCTION_LINE_COLOR = "rgba(148, 163, 184, 0.95)"
+CARDINAL_GRIDLINE_COLOR = "rgba(100, 116, 139, 0.45)"
 
 
 def default_preferences() -> dict[str, Any]:
@@ -925,6 +926,20 @@ def build_path_plot(
     set_list_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
+
+    for azimuth in (90.0, 180.0, 270.0):
+        fig.add_shape(
+            type="line",
+            x0=azimuth,
+            y0=0.0,
+            x1=azimuth,
+            y1=90.0,
+            xref="x",
+            yref="y",
+            line={"color": CARDINAL_GRIDLINE_COLOR, "width": 1, "dash": "dot"},
+            layer="below",
+        )
+
     obstruction_x, obstruction_y = obstruction_step_profile(obstructions)
     fig.add_trace(
         go.Scatter(
@@ -1138,6 +1153,18 @@ def build_path_plot_radial(
             hoverinfo="skip",
         )
     )
+
+    for azimuth in (90.0, 180.0, 270.0):
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[azimuth, azimuth],
+                r=[0.0, 90.0],
+                mode="lines",
+                line={"color": CARDINAL_GRIDLINE_COLOR, "width": 1, "dash": "dot"},
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
 
     fig.add_trace(
         go.Scatterpolar(
