@@ -232,9 +232,12 @@ def _ensure_search_index(catalog: pd.DataFrame) -> pd.DataFrame:
 
 def _build_search_index(frame: pd.DataFrame) -> pd.DataFrame:
     indexed = frame.copy()
-    for column in ["common_name", "object_type", "constellation", "aliases", "catalog", "description"]:
+    for column in ["common_name", "object_type", "constellation", "aliases", "catalog", "description", "emission_lines"]:
         if column in indexed.columns:
             indexed[column] = indexed[column].fillna("")
+
+    object_type_text = indexed["object_type"].fillna("") if "object_type" in indexed.columns else ""
+    emission_lines_text = indexed["emission_lines"].fillna("") if "emission_lines" in indexed.columns else ""
 
     indexed["primary_id_norm"] = indexed["primary_id"].map(normalize_text)
     indexed["aliases_norm"] = indexed["aliases"].map(normalize_text)
@@ -248,6 +251,10 @@ def _build_search_index(frame: pd.DataFrame) -> pd.DataFrame:
         + indexed["catalog"].fillna("")
         + " "
         + indexed["description"].fillna("")
+        + " "
+        + object_type_text
+        + " "
+        + emission_lines_text
     ).map(normalize_text)
 
     return indexed
