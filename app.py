@@ -21,7 +21,7 @@ from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from catalog_ingestion import load_unified_catalog
-from geopy.geocoders import Nominatim
+from geopy.geocoders import ArcGIS, Nominatim, Photon
 try:
     from streamlit_searchbox import st_searchbox
 except Exception:
@@ -1525,24 +1525,78 @@ def resolve_manual_location(query: str) -> dict[str, Any] | None:
     if not cleaned:
         return None
 
-    geocoder = Nominatim(user_agent="dso-explorer-prototype")
-    attempts = [cleaned]
-    if cleaned.isdigit() and len(cleaned) == 5:
-        attempts = [f"{cleaned}, USA", cleaned]
-
-    for candidate in attempts:
+    def _valid_lat_lon(lat_value: Any, lon_value: Any) -> tuple[float, float] | None:
         try:
-            match = geocoder.geocode(candidate, exactly_one=True, timeout=10)
-            if match:
-                return {
-                    "lat": float(match.latitude),
-                    "lon": float(match.longitude),
-                    "label": match.address.split(",")[0],
-                    "source": "manual",
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }
+            lat = float(lat_value)
+            lon = float(lon_value)
+        except (TypeError, ValueError):
+            return None
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        return lat, lon
+
+    def _payload(lat: float, lon: float, label: str) -> dict[str, Any]:
+        clean_label = str(label or "").strip() or f"{lat:.4f}, {lon:.4f}"
+        return {
+            "lat": lat,
+            "lon": lon,
+            "label": clean_label,
+            "source": "manual",
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    coord_match = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", cleaned)
+    if coord_match:
+        coords = _valid_lat_lon(coord_match.group(1), coord_match.group(2))
+        if coords is not None:
+            lat, lon = coords
+            return _payload(lat, lon, reverse_geocode_label(lat, lon))
+
+    zip_match = re.match(r"^\s*(\d{5})(?:-\d{4})?\s*$", cleaned)
+    if zip_match:
+        zip_code = zip_match.group(1)
+        try:
+            response = requests.get(f"https://api.zippopotam.us/us/{zip_code}", timeout=8)
+            if response.ok:
+                payload = response.json()
+                places = payload.get("places") or []
+                if places:
+                    first = places[0]
+                    coords = _valid_lat_lon(first.get("latitude"), first.get("longitude"))
+                    if coords is not None:
+                        lat, lon = coords
+                        place_name = str(first.get("place name") or "").strip()
+                        state = str(first.get("state abbreviation") or first.get("state") or "").strip()
+                        label_parts = [part for part in [place_name, state] if part]
+                        return _payload(lat, lon, ", ".join(label_parts) if label_parts else f"ZIP {zip_code}")
         except Exception:
-            continue
+            pass
+
+    attempts = [cleaned]
+    if "," in cleaned:
+        attempts.append(re.sub(r"\s+", " ", cleaned.replace(",", " ")).strip())
+    attempts = list(dict.fromkeys([candidate for candidate in attempts if candidate]))
+
+    provider_factories: list[tuple[str, Any]] = [
+        ("nominatim", lambda: Nominatim(user_agent="dso-explorer-prototype")),
+        ("arcgis", lambda: ArcGIS(timeout=10)),
+        ("photon", lambda: Photon(user_agent="dso-explorer-prototype")),
+    ]
+    for candidate in attempts:
+        for _, provider_factory in provider_factories:
+            try:
+                geocoder = provider_factory()
+                match = geocoder.geocode(candidate, exactly_one=True, timeout=10)
+                if not match:
+                    continue
+                coords = _valid_lat_lon(getattr(match, "latitude", None), getattr(match, "longitude", None))
+                if coords is None:
+                    continue
+                lat, lon = coords
+                raw_label = str(getattr(match, "address", "") or "").split(",")[0].strip()
+                return _payload(lat, lon, raw_label or candidate)
+            except Exception:
+                continue
 
     return None
 
@@ -1633,30 +1687,75 @@ def apply_browser_geolocation_payload(prefs: dict[str, Any], payload: Any) -> No
 
 @st.cache_data(show_spinner=False, ttl=15 * 60)
 def approximate_location_from_ip() -> dict[str, Any] | None:
-    try:
-        response = requests.get("https://ipapi.co/json/", timeout=8)
-        response.raise_for_status()
-        payload = response.json()
-
-        lat = payload.get("latitude")
-        lon = payload.get("longitude")
-        city = payload.get("city")
-        region = payload.get("region")
-        if lat is None or lon is None:
+    def _valid_lat_lon(lat_value: Any, lon_value: Any) -> tuple[float, float] | None:
+        try:
+            lat = float(lat_value)
+            lon = float(lon_value)
+        except (TypeError, ValueError):
             return None
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        return lat, lon
 
-        label_parts = [part for part in [city, region] if part]
+    def _location_payload(lat: float, lon: float, city: Any, region: Any, country: Any) -> dict[str, Any]:
+        city_str = str(city or "").strip()
+        region_str = str(region or "").strip()
+        country_str = str(country or "").strip()
+        label_parts = [part for part in [city_str, region_str, country_str] if part]
         label = ", ".join(label_parts) if label_parts else "IP-based estimate"
-
         return {
-            "lat": float(lat),
-            "lon": float(lon),
+            "lat": lat,
+            "lon": lon,
             "label": label,
             "source": "ip",
             "resolved_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    try:
+        response = requests.get("https://ipapi.co/json/", timeout=8)
+        if response.ok:
+            payload = response.json()
+            if not bool(payload.get("error")):
+                coords = _valid_lat_lon(payload.get("latitude"), payload.get("longitude"))
+                if coords is not None:
+                    lat, lon = coords
+                    return _location_payload(
+                        lat,
+                        lon,
+                        payload.get("city"),
+                        payload.get("region"),
+                        payload.get("country_name") or payload.get("country"),
+                    )
     except Exception:
-        return None
+        pass
+
+    try:
+        response = requests.get("https://ipwho.is/", timeout=8)
+        if response.ok:
+            payload = response.json()
+            if bool(payload.get("success", True)):
+                coords = _valid_lat_lon(payload.get("latitude"), payload.get("longitude"))
+                if coords is not None:
+                    lat, lon = coords
+                    return _location_payload(lat, lon, payload.get("city"), payload.get("region"), payload.get("country"))
+    except Exception:
+        pass
+
+    try:
+        response = requests.get("https://ipinfo.io/json", timeout=8)
+        if response.ok:
+            payload = response.json()
+            loc = str(payload.get("loc") or "").strip()
+            if "," in loc:
+                lat_raw, lon_raw = loc.split(",", 1)
+                coords = _valid_lat_lon(lat_raw, lon_raw)
+                if coords is not None:
+                    lat, lon = coords
+                    return _location_payload(lat, lon, payload.get("city"), payload.get("region"), payload.get("country"))
+    except Exception:
+        pass
+
+    return None
 
 
 @st.cache_data(show_spinner=False, ttl=24 * 60 * 60)
@@ -1805,11 +1904,6 @@ def object_type_search_rank(object_type_value: str | None) -> int:
     return 2
 
 
-def clear_targets_search_selection() -> None:
-    st.session_state.pop("targets_searchbox_component", None)
-    st.session_state["targets_searchbox_cleared"] = True
-
-
 def searchbox_target_options(
     search_term: str,
     *,
@@ -1864,38 +1958,28 @@ def render_searchbox_results(
 
     current_selected = str(st.session_state.get("selected_id") or "").strip()
 
-    search_col, clear_col = st.columns([6, 1])
-    with clear_col:
-        st.button(
-            "Clear",
-            key="targets_searchbox_clear",
-            use_container_width=True,
-            disabled=not isinstance(st.session_state.get("targets_searchbox_component"), dict),
-            on_click=clear_targets_search_selection,
-        )
-    with search_col:
-        if st_searchbox is None:
-            st.warning("`streamlit-searchbox` is unavailable; install dependencies to enable searchbox UI.")
-            return None
+    if st_searchbox is None:
+        st.warning("`streamlit-searchbox` is unavailable; install dependencies to enable searchbox UI.")
+        return None
 
-        picked = st_searchbox(
-            search_function=lambda search_term: searchbox_target_options(
-                search_term,
-                catalog=catalog,
-                lat=lat,
-                lon=lon,
-                favorite_ids=favorite_ids,
-                max_options=10,
-            ),
-            label="Search",
-            placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
-            key="targets_searchbox_component",
-            help="Type to filter suggestions, then use arrow keys + Enter to select.",
-            clear_on_submit=True,
-            edit_after_submit="option",
-            rerun_on_update=True,
-            debounce=150,
-        )
+    picked = st_searchbox(
+        search_function=lambda search_term: searchbox_target_options(
+            search_term,
+            catalog=catalog,
+            lat=lat,
+            lon=lon,
+            favorite_ids=favorite_ids,
+            max_options=10,
+        ),
+        label="Search",
+        placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
+        key="targets_searchbox_component",
+        help="Type to filter suggestions, then use arrow keys + Enter to select.",
+        clear_on_submit=True,
+        edit_after_submit="option",
+        rerun_on_update=True,
+        debounce=150,
+    )
 
     picked_value = str(picked).strip() if picked is not None else ""
     if picked_value:
@@ -1907,17 +1991,13 @@ def render_searchbox_results(
     search_term = str(search_state.get("search", "")).strip() if isinstance(search_state, dict) else ""
     options_js = search_state.get("options_js", []) if isinstance(search_state, dict) else []
     options_count = len(options_js) if isinstance(options_js, list) else 0
-    was_cleared = bool(st.session_state.pop("targets_searchbox_cleared", False))
 
     if search_term and options_count == 0:
         st.caption("No targets matched that search.")
         return None
 
     if current_selected:
-        if was_cleared:
-            st.caption(f"Search cleared. Detail remains on selected target: {current_selected}")
-        else:
-            st.caption(f"No search selection. Detail remains on selected target: {current_selected}")
+        st.caption(f"No search selection. Detail remains on selected target: {current_selected}")
         return None
 
     if search_term:
@@ -2094,15 +2174,25 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_
         location = prefs["location"]
         st.markdown(f"**{location['label']}**")
         st.caption(f"Lat {location['lat']:.4f}, Lon {location['lon']:.4f} ({location['source']})")
+        st.map(
+            pd.DataFrame({"lat": [float(location["lat"])], "lon": [float(location["lon"])]}),
+            zoom=8,
+            height=250,
+            use_container_width=True,
+        )
 
         manual_location = st.text_input("Manual ZIP / place", key="manual_location")
         if st.button("Resolve location", use_container_width=True):
-            resolved = resolve_manual_location(manual_location)
-            if resolved:
-                prefs["location"] = resolved
-                persist_and_rerun(prefs)
+            if not manual_location.strip():
+                st.warning("Enter a ZIP, place, or coordinates (lat, lon).")
             else:
-                st.warning("Couldn't find that location - keeping previous location.")
+                resolved = resolve_manual_location(manual_location)
+                if resolved:
+                    prefs["location"] = resolved
+                    st.session_state["location_notice"] = f"Location resolved: {resolved['label']}."
+                    persist_and_rerun(prefs)
+                else:
+                    st.warning("Couldn't find that location - keeping previous location.")
 
         if st.button("Use browser location (permission)", use_container_width=True):
             st.session_state["request_browser_geo"] = True
@@ -2122,6 +2212,7 @@ def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_
             resolved = approximate_location_from_ip()
             if resolved:
                 prefs["location"] = resolved
+                st.session_state["location_notice"] = f"Approximate location applied: {resolved['label']}."
                 persist_and_rerun(prefs)
             else:
                 st.warning("Location unavailable - keeping previous location.")
