@@ -68,7 +68,7 @@ Notes:
 
 ## Notes
 
-- Catalog ingest loads full OpenNGC data and augments it with SIMBAD (full SH2 ingest + M/NGC enrichment).
+- Catalog ingest loads full OpenNGC data and augments it with SIMBAD (`NAME` objects are retained, with unmatched rows kept as `SIMBAD` catalog entries).
 - If live ingest fails, the app falls back to the local seed dataset.
 - Use the sidebar `Refresh catalog cache` button to force a re-ingest.
 - Weather and image lookups fail gracefully without breaking plots.
