@@ -390,7 +390,7 @@ def ingest_sh2_from_simbad() -> pd.DataFrame:
     if not records:
         raise ValueError("SIMBAD SH2 query could not map any rows to Sh2 identifiers")
 
-    frame = pd.DataFrame.from_records(records.values())
+    frame = pd.DataFrame.from_records(list(records.values()))
     return _normalize_frame(frame)
 
 
@@ -451,7 +451,7 @@ def build_simbad_m_ngc_reference() -> pd.DataFrame:
     if not records:
         raise ValueError("SIMBAD M/NGC enrichment query did not yield mappable identifiers")
 
-    return pd.DataFrame.from_records(records.values())
+    return pd.DataFrame.from_records(list(records.values()))
 
 
 def enrich_with_simbad_m_ngc(frame: pd.DataFrame, simbad_reference: pd.DataFrame) -> tuple[pd.DataFrame, int]:
