@@ -2236,164 +2236,169 @@ def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Ser
     return enriched.iloc[0]
 
 
-def render_sidebar(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
-    with st.sidebar:
-        st.header("Controls")
+def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
+    st.title("Settings")
+    st.caption("Manage location, display preferences, catalog cache, obstructions, and settings backup.")
 
-        persistence_notice = st.session_state.get("prefs_persistence_notice", "")
-        if persistence_notice:
-            st.warning(persistence_notice)
+    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+    if persistence_notice:
+        st.warning(persistence_notice)
 
-        cookie_backup_notice = get_cookie_backup_notice()
-        if cookie_backup_notice:
-            st.caption(cookie_backup_notice)
+    cookie_backup_notice = get_cookie_backup_notice()
+    if cookie_backup_notice:
+        st.caption(cookie_backup_notice)
 
-        location_notice = st.session_state.pop("location_notice", "")
-        if location_notice:
-            st.info(location_notice)
+    location_notice = st.session_state.pop("location_notice", "")
+    if location_notice:
+        st.info(location_notice)
 
-        st.subheader("Location")
-        location = prefs["location"]
-        st.markdown(f"**{location['label']}**")
-        st.caption(f"Lat {location['lat']:.4f}, Lon {location['lon']:.4f} ({location['source']})")
-        st.map(
-            pd.DataFrame({"lat": [float(location["lat"])], "lon": [float(location["lon"])]}),
-            zoom=8,
-            height=250,
-            use_container_width=True,
-        )
+    st.subheader("Location")
+    location = prefs["location"]
+    st.markdown(f"**{location['label']}**")
+    st.caption(f"Lat {location['lat']:.4f}, Lon {location['lon']:.4f} ({location['source']})")
+    st.map(
+        pd.DataFrame({"lat": [float(location["lat"])], "lon": [float(location["lon"])]}),
+        zoom=8,
+        height=300,
+        use_container_width=True,
+    )
 
-        manual_location = st.text_input("Manual ZIP / place", key="manual_location")
-        if st.button("Resolve location", use_container_width=True):
-            if not manual_location.strip():
-                st.warning("Enter a ZIP, place, or coordinates (lat, lon).")
-            else:
-                resolved = resolve_manual_location(manual_location)
-                if resolved:
-                    prefs["location"] = resolved
-                    st.session_state["location_notice"] = f"Location resolved: {resolved['label']}."
-                    persist_and_rerun(prefs)
-                else:
-                    st.warning("Couldn't find that location - keeping previous location.")
-
-        if st.button("Use browser location (permission)", use_container_width=True):
-            st.session_state["request_browser_geo"] = True
-            st.session_state["browser_geo_request_id"] = int(st.session_state.get("browser_geo_request_id", 0)) + 1
-
-        if st.session_state.get("request_browser_geo"):
-            request_id = int(st.session_state.get("browser_geo_request_id", 1))
-            geolocation_payload = get_geolocation(component_key=f"browser_geo_request_{request_id}")
-            if geolocation_payload is None:
-                st.caption("Requesting browser geolocation permission...")
-            else:
-                apply_browser_geolocation_payload(prefs, geolocation_payload)
-                st.session_state["request_browser_geo"] = False
-                st.rerun()
-
-        if st.button("Use my location (IP fallback)", use_container_width=True):
-            resolved = approximate_location_from_ip()
+    manual_location = st.text_input("Manual ZIP / place", key="manual_location")
+    if st.button("Resolve location", use_container_width=True):
+        if not manual_location.strip():
+            st.warning("Enter a ZIP, place, or coordinates (lat, lon).")
+        else:
+            resolved = resolve_manual_location(manual_location)
             if resolved:
                 prefs["location"] = resolved
-                st.session_state["location_notice"] = f"Approximate location applied: {resolved['label']}."
+                st.session_state["location_notice"] = f"Location resolved: {resolved['label']}."
                 persist_and_rerun(prefs)
             else:
-                st.warning("Location unavailable - keeping previous location.")
+                st.warning("Couldn't find that location - keeping previous location.")
 
-        st.subheader("Display")
-        labels = list(TEMPERATURE_UNIT_OPTIONS.keys())
-        reverse_options = {value: label for label, value in TEMPERATURE_UNIT_OPTIONS.items()}
-        current_pref = str(prefs.get("temperature_unit", "auto")).lower()
-        if current_pref not in reverse_options:
-            current_pref = "auto"
-        selected_label = st.selectbox(
-            "Temperature units",
-            options=labels,
-            index=labels.index(reverse_options[current_pref]),
-            key="temperature_unit_preference",
-        )
-        selected_pref = TEMPERATURE_UNIT_OPTIONS[selected_label]
-        if selected_pref != current_pref:
-            prefs["temperature_unit"] = selected_pref
-            persist_and_rerun(prefs)
+    location_cols = st.columns(2)
+    if location_cols[0].button("Use browser location (permission)", use_container_width=True):
+        st.session_state["request_browser_geo"] = True
+        st.session_state["browser_geo_request_id"] = int(st.session_state.get("browser_geo_request_id", 0)) + 1
 
-        effective_unit = resolve_temperature_unit(selected_pref, browser_locale)
-        source_note = "browser locale" if selected_pref == "auto" else "manual setting"
-        st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
-
-        st.subheader("Settings Backup")
-        export_payload = build_settings_export_payload(prefs)
-        export_text = json.dumps(export_payload, indent=2)
-        export_filename = f"dso-explorer-settings-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
-        st.download_button(
-            "Export settings JSON",
-            data=export_text,
-            file_name=export_filename,
-            mime="application/json",
-            use_container_width=True,
-        )
-
-        uploaded_settings = st.file_uploader(
-            "Import settings JSON",
-            type=["json"],
-            key="settings_import_file",
-            help="Imports location, obstructions, favorites, set list, and display preferences.",
-        )
-        if st.button("Import settings", use_container_width=True, key="settings_import_apply"):
-            if uploaded_settings is None:
-                st.warning("Choose a JSON file first.")
-            else:
-                raw_bytes = uploaded_settings.getvalue()
-                try:
-                    raw_text = raw_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    st.warning("Could not read that file as UTF-8 JSON.")
-                else:
-                    imported_prefs = parse_settings_import_payload(raw_text)
-                    if imported_prefs is None:
-                        st.warning("Invalid settings file format.")
-                    else:
-                        st.session_state["location_notice"] = "Settings imported."
-                        persist_and_rerun(imported_prefs)
-
-        st.subheader("Catalog Ingestion")
-        st.caption(
-            f"Rows: {int(catalog_meta.get('row_count', 0))} | "
-            f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
-        )
-        catalog_counts = catalog_meta.get("catalog_counts", {})
-        if isinstance(catalog_counts, dict) and catalog_counts:
-            counts_line = " | ".join(f"{catalog_name}: {count}" for catalog_name, count in sorted(catalog_counts.items()))
-            st.caption(counts_line)
-        loaded_at = str(catalog_meta.get("loaded_at_utc", "")).strip()
-        if loaded_at:
-            st.caption(f"Loaded: {loaded_at}")
-        if st.button("Refresh catalog cache", use_container_width=True):
-            st.session_state["force_catalog_refresh"] = True
+    if st.session_state.get("request_browser_geo"):
+        request_id = int(st.session_state.get("browser_geo_request_id", 1))
+        geolocation_payload = get_geolocation(component_key=f"browser_geo_request_{request_id}")
+        if geolocation_payload is None:
+            st.caption("Requesting browser geolocation permission...")
+        else:
+            apply_browser_geolocation_payload(prefs, geolocation_payload)
+            st.session_state["request_browser_geo"] = False
             st.rerun()
 
-        st.subheader("Obstructions (16-bin)")
-        obstruction_frame = pd.DataFrame(
-            {
-                "Direction": WIND16,
-                "Min Altitude (deg)": [prefs["obstructions"].get(direction, 20.0) for direction in WIND16],
-            }
-        )
-        edited = st.data_editor(
-            obstruction_frame,
-            hide_index=True,
-            use_container_width=True,
-            num_rows="fixed",
-            disabled=["Direction"],
-            key="obstruction_editor",
-        )
+    if location_cols[1].button("Use my location (IP fallback)", use_container_width=True):
+        resolved = approximate_location_from_ip()
+        if resolved:
+            prefs["location"] = resolved
+            st.session_state["location_notice"] = f"Approximate location applied: {resolved['label']}."
+            persist_and_rerun(prefs)
+        else:
+            st.warning("Location unavailable - keeping previous location.")
 
-        edited_values = edited["Min Altitude (deg)"].tolist()
-        next_obstructions = {
-            direction: float(max(0.0, min(90.0, edited_values[idx]))) for idx, direction in enumerate(WIND16)
+    st.divider()
+    st.subheader("Display")
+    labels = list(TEMPERATURE_UNIT_OPTIONS.keys())
+    reverse_options = {value: label for label, value in TEMPERATURE_UNIT_OPTIONS.items()}
+    current_pref = str(prefs.get("temperature_unit", "auto")).lower()
+    if current_pref not in reverse_options:
+        current_pref = "auto"
+    selected_label = st.selectbox(
+        "Temperature units",
+        options=labels,
+        index=labels.index(reverse_options[current_pref]),
+        key="temperature_unit_preference",
+    )
+    selected_pref = TEMPERATURE_UNIT_OPTIONS[selected_label]
+    if selected_pref != current_pref:
+        prefs["temperature_unit"] = selected_pref
+        persist_and_rerun(prefs)
+
+    effective_unit = resolve_temperature_unit(selected_pref, browser_locale)
+    source_note = "browser locale" if selected_pref == "auto" else "manual setting"
+    st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
+
+    st.divider()
+    st.subheader("Catalog")
+    st.caption(
+        f"Rows: {int(catalog_meta.get('row_count', 0))} | "
+        f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
+    )
+    catalog_counts = catalog_meta.get("catalog_counts", {})
+    if isinstance(catalog_counts, dict) and catalog_counts:
+        counts_line = " | ".join(f"{catalog_name}: {count}" for catalog_name, count in sorted(catalog_counts.items()))
+        st.caption(counts_line)
+    loaded_at = str(catalog_meta.get("loaded_at_utc", "")).strip()
+    if loaded_at:
+        st.caption(f"Loaded: {loaded_at}")
+    if st.button("Refresh catalog cache", use_container_width=True):
+        st.session_state["force_catalog_refresh"] = True
+        st.rerun()
+
+    st.divider()
+    st.subheader("Obstructions")
+    obstruction_frame = pd.DataFrame(
+        {
+            "Direction": WIND16,
+            "Min Altitude (deg)": [prefs["obstructions"].get(direction, 20.0) for direction in WIND16],
         }
-        if next_obstructions != prefs["obstructions"]:
-            prefs["obstructions"] = next_obstructions
-            save_preferences(prefs)
+    )
+    edited = st.data_editor(
+        obstruction_frame,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        disabled=["Direction"],
+        key="obstruction_editor",
+    )
+
+    edited_values = edited["Min Altitude (deg)"].tolist()
+    next_obstructions = {
+        direction: float(max(0.0, min(90.0, edited_values[idx]))) for idx, direction in enumerate(WIND16)
+    }
+    if next_obstructions != prefs["obstructions"]:
+        prefs["obstructions"] = next_obstructions
+        save_preferences(prefs)
+
+    st.divider()
+    st.subheader("Settings Backup / Restore")
+    export_payload = build_settings_export_payload(prefs)
+    export_text = json.dumps(export_payload, indent=2)
+    export_filename = f"dso-explorer-settings-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+    st.download_button(
+        "Export settings JSON",
+        data=export_text,
+        file_name=export_filename,
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    uploaded_settings = st.file_uploader(
+        "Import settings JSON",
+        type=["json"],
+        key="settings_import_file",
+        help="Imports location, obstructions, favorites, set list, and display preferences.",
+    )
+    if st.button("Import settings", use_container_width=True, key="settings_import_apply"):
+        if uploaded_settings is None:
+            st.warning("Choose a JSON file first.")
+        else:
+            raw_bytes = uploaded_settings.getvalue()
+            try:
+                raw_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                st.warning("Could not read that file as UTF-8 JSON.")
+            else:
+                imported_prefs = parse_settings_import_payload(raw_text)
+                if imported_prefs is None:
+                    st.warning("Invalid settings file format.")
+                else:
+                    st.session_state["location_notice"] = "Settings imported."
+                    persist_and_rerun(imported_prefs)
 
 
 def render_detail_panel(
@@ -2627,6 +2632,65 @@ def render_detail_panel(
         )
 
 
+def render_explorer_page(
+    catalog: pd.DataFrame,
+    catalog_meta: dict[str, Any],
+    prefs: dict[str, Any],
+    temperature_unit: str,
+    use_12_hour: bool,
+) -> None:
+    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+    if persistence_notice:
+        st.warning(persistence_notice)
+
+    cookie_backup_notice = get_cookie_backup_notice()
+    if cookie_backup_notice:
+        st.caption(cookie_backup_notice)
+
+    now_utc = datetime.now(timezone.utc)
+    st.markdown(
+        """
+        <style>
+            .small-note {font-size: 0.9rem; color: #666;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    header_cols = st.columns([3, 1])
+    header_cols[0].title("DSO Explorer")
+    header_cols[1].markdown(
+        (
+            "<p class='small-note'>Alt/Az auto-refresh 60s<br>"
+            f"Updated: {now_utc.strftime('%Y-%m-%d')} "
+            f"{format_display_time(now_utc, use_12_hour=use_12_hour, include_seconds=True)} UTC"
+            "</p>"
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    location = prefs["location"]
+    favorite_ids = [str(item) for item in prefs["favorites"]]
+    with st.container():
+        st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
+        render_searchbox_results(
+            catalog,
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+            favorite_ids=favorite_ids,
+        )
+
+    selected_row = resolve_selected_row(catalog, prefs)
+    if selected_row is not None or bool(prefs["set_list"]):
+        render_detail_panel(
+            selected=selected_row,
+            catalog=catalog,
+            prefs=prefs,
+            temperature_unit=temperature_unit,
+            use_12_hour=use_12_hour,
+        )
+
+
 def main() -> None:
     st_autorefresh(interval=60_000, key="altaz_refresh")
     set_cookie_backup_runtime_enabled(ENABLE_COOKIE_BACKUP)
@@ -2683,50 +2747,38 @@ def main() -> None:
     force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
     catalog, catalog_meta = load_catalog(force_refresh=force_catalog_refresh)
     sanitize_saved_lists(catalog=catalog, prefs=prefs)
-    render_sidebar(catalog_meta=catalog_meta, prefs=prefs, browser_locale=browser_language)
 
-    now_utc = datetime.now(timezone.utc)
-    st.markdown(
-        """
-        <style>
-            .small-note {font-size: 0.9rem; color: #666;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    header_cols = st.columns([3, 1])
-    header_cols[0].title("DSO Explorer")
-    header_cols[1].markdown(
-        (
-            "<p class='small-note'>Alt/Az auto-refresh 60s<br>"
-            f"Updated: {now_utc.strftime('%Y-%m-%d')} "
-            f"{format_display_time(now_utc, use_12_hour=use_12_hour, include_seconds=True)} UTC"
-            "</p>"
-        ),
-        unsafe_allow_html=True,
-    )
-    st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
-    location = prefs["location"]
-    favorite_ids = [str(item) for item in prefs["favorites"]]
-    with st.container():
-        st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
-        render_searchbox_results(
-            catalog,
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
-            favorite_ids=favorite_ids,
-        )
-
-    selected_row = resolve_selected_row(catalog, prefs)
-    if selected_row is not None or bool(prefs["set_list"]):
-        render_detail_panel(
-            selected=selected_row,
+    def explorer_page() -> None:
+        render_explorer_page(
             catalog=catalog,
+            catalog_meta=catalog_meta,
             prefs=prefs,
             temperature_unit=effective_temperature_unit,
             use_12_hour=use_12_hour,
         )
+
+    def settings_page() -> None:
+        render_settings_page(
+            catalog_meta=catalog_meta,
+            prefs=prefs,
+            browser_locale=browser_language,
+        )
+
+    if hasattr(st, "navigation") and hasattr(st, "Page"):
+        navigation = st.navigation(
+            [
+                st.Page(explorer_page, title="Explorer", icon="✨", default=True),
+                st.Page(settings_page, title="Settings", icon="⚙️"),
+            ]
+        )
+        navigation.run()
+        return
+
+    selected_page = st.sidebar.radio("Page", ["Explorer", "Settings"], key="app_page_selector")
+    if selected_page == "Settings":
+        settings_page()
+        return
+    explorer_page()
 
 
 if __name__ == "__main__":
