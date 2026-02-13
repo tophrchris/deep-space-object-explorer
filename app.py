@@ -1344,7 +1344,7 @@ def build_path_plot_radial(
 
     fig.update_layout(
         title="Sky Position",
-        height=330,
+        height=660,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
         polar={
@@ -1910,26 +1910,32 @@ def searchbox_target_options(
     catalog: pd.DataFrame,
     lat: float,
     lon: float,
-    favorite_ids: set[str] | None = None,
+    favorite_ids: list[str] | set[str] | None = None,
     max_options: int = 10,
 ) -> list[tuple[str, str]]:
     query = str(search_term or "").strip()
     if not query:
         return []
 
-    favorite_set = {str(value) for value in (favorite_ids or set())}
-    matches = search_catalog(catalog, query).copy()
+    favorite_list = [str(value) for value in (favorite_ids or [])]
+    favorite_set = set(favorite_list)
+    query_norm = normalize_text(query)
+    if query_norm in {"favorite", "favorites"}:
+        matches = subset_by_id_list(catalog, favorite_list).copy()
+    else:
+        matches = search_catalog(catalog, query).copy()
     if matches.empty:
         return []
 
-    matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
-    matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
-    matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
-    matches = matches.sort_values(
-        by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
-        ascending=[True, True, True, True],
-        kind="stable",
-    ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
+    if query_norm not in {"favorite", "favorites"}:
+        matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
+        matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
+        matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
+        matches = matches.sort_values(
+            by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
+            ascending=[True, True, True, True],
+            kind="stable",
+        ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
     matches = matches.head(max_options)
 
     enriched = compute_altaz_now(matches, lat=lat, lon=lon)
@@ -1950,7 +1956,7 @@ def render_searchbox_results(
     *,
     lat: float,
     lon: float,
-    favorite_ids: set[str] | None = None,
+    favorite_ids: list[str] | set[str] | None = None,
 ) -> str | None:
     if catalog.empty:
         st.info("No targets matched that search.")
@@ -2611,7 +2617,7 @@ def main() -> None:
     )
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
     location = prefs["location"]
-    favorite_ids = {str(item) for item in prefs["favorites"]}
+    favorite_ids = [str(item) for item in prefs["favorites"]]
     with st.container():
         st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
         render_searchbox_results(
