@@ -1250,7 +1250,12 @@ def fetch_hourly_temperatures(
         return {}
 
 
-def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float], temperature_unit: str) -> go.Figure:
+def build_night_plot(
+    track: pd.DataFrame,
+    temperature_by_hour: dict[str, float],
+    temperature_unit: str,
+    target_label: str | None = None,
+) -> go.Figure:
     if track.empty:
         return go.Figure()
 
@@ -1333,8 +1338,13 @@ def build_night_plot(track: pd.DataFrame, temperature_by_hour: dict[str, float],
             hoverinfo="skip",
         )
     )
+    title = "Hourly Forecast"
+    cleaned_label = str(target_label or "").strip()
+    if cleaned_label:
+        title = f"Hourly Forecast - {cleaned_label}"
+
     fig.update_layout(
-        title="Hourly forecast",
+        title=title,
         height=300,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         barmode="stack",
@@ -2112,7 +2122,12 @@ def render_detail_panel(
             end_local_iso=window_end.isoformat(),
         )
         st.plotly_chart(
-            build_night_plot(track=track, temperature_by_hour=temperatures, temperature_unit=temperature_unit),
+            build_night_plot(
+                track=track,
+                temperature_by_hour=temperatures,
+                temperature_unit=temperature_unit,
+                target_label=selected_label,
+            ),
             use_container_width=True,
         )
 
