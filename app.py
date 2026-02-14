@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import colorsys
 import copy
 import hashlib
 import html
@@ -152,14 +151,14 @@ WEATHER_ALERT_RAIN_INTERVAL_SECONDS = 5 * 60
 WEATHER_ALERT_RAIN_DURATION_SECONDS = 30
 WEATHER_ALERT_RAIN_BUCKET_STATE_KEY = "weather_alert_rain_last_bucket"
 OBJECT_TYPE_GROUP_COLOR_DEFAULT = "#94A3B8"
-OBJECT_TYPE_GROUP_COLOR_THEMES: dict[str, dict[str, str]] = {
+OBJECT_TYPE_GROUP_COLOR_RANGE_THEMES: dict[str, dict[str, tuple[str, str]]] = {
     "default": {
-        "Galaxies": "#8B5CF6",      # purple
-        "Clusters": "#16A34A",      # green
-        "Bright Nebula": "#DC2626", # red
-        "Dark Nebula": "#2563EB",   # blue
-        "Stars": "#EAB308",         # yellow
-        "other": "#94A3B8",         # grey
+        "Galaxies": ("#8B5CF6", "#EC4899"),      # purple -> pink
+        "Clusters": ("#16A34A", "#EAB308"),      # green -> yellow
+        "Bright Nebula": ("#DC2626", "#F97316"), # red -> orange
+        "Dark Nebula": ("#2563EB", "#F97316"),   # blue -> orange
+        "Stars": ("#EAB308", "#16A34A"),         # yellow -> green
+        "other": ("#94A3B8", "#94A3B8"),         # grey
     }
 }
 # Approximate cloud-cover legend gradient inspired by the provided scale:
@@ -244,16 +243,43 @@ PATH_LINE_WIDTH_OVERLAY_DEFAULT = 2.2
 PATH_LINE_WIDTH_SELECTION_MULTIPLIER = 3.0
 
 
-def resolve_object_type_group_colors(theme_name: str | None = None) -> dict[str, str]:
+def resolve_object_type_group_color_ranges(theme_name: str | None = None) -> dict[str, tuple[str, str]]:
     selected_theme = str(theme_name or "").strip().lower() or "default"
-    theme_colors = OBJECT_TYPE_GROUP_COLOR_THEMES.get(selected_theme) or OBJECT_TYPE_GROUP_COLOR_THEMES["default"]
+    theme_colors = (
+        OBJECT_TYPE_GROUP_COLOR_RANGE_THEMES.get(selected_theme)
+        or OBJECT_TYPE_GROUP_COLOR_RANGE_THEMES["default"]
+    )
     return dict(theme_colors)
 
 
-def object_type_group_color(group_label: str | None, theme_name: str | None = None) -> str:
+def _blend_hex_colors(start_hex: str, end_hex: str, t: float) -> str:
+    clamped_t = max(0.0, min(1.0, float(t)))
+    try:
+        start_r, start_g, start_b = _hex_to_rgb(start_hex)
+    except Exception:
+        start_r, start_g, start_b = _hex_to_rgb(OBJECT_TYPE_GROUP_COLOR_DEFAULT)
+    try:
+        end_r, end_g, end_b = _hex_to_rgb(end_hex)
+    except Exception:
+        end_r, end_g, end_b = (start_r, start_g, start_b)
+
+    red = int(round(start_r + (end_r - start_r) * clamped_t))
+    green = int(round(start_g + (end_g - start_g) * clamped_t))
+    blue = int(round(start_b + (end_b - start_b) * clamped_t))
+    return _rgb_to_hex((red, green, blue))
+
+
+def object_type_group_color(
+    group_label: str | None,
+    *,
+    step_fraction: float = 0.0,
+    theme_name: str | None = None,
+) -> str:
     group = str(group_label or "").strip()
-    colors = resolve_object_type_group_colors(theme_name)
-    return colors.get(group) or colors.get("other") or OBJECT_TYPE_GROUP_COLOR_DEFAULT
+    ranges = resolve_object_type_group_color_ranges(theme_name)
+    start_end = ranges.get(group) or ranges.get("other") or (OBJECT_TYPE_GROUP_COLOR_DEFAULT, OBJECT_TYPE_GROUP_COLOR_DEFAULT)
+    start_color, end_color = start_end
+    return _blend_hex_colors(start_color, end_color, step_fraction)
 
 
 def target_line_color(primary_id: str) -> str:
@@ -1100,21 +1126,6 @@ def _interpolate_color_stops(value: float, color_stops: list[tuple[float, str]])
     return _rgb_to_hex((red, green, blue))
 
 
-def _adjust_hex_saturation(value: str, saturation_factor: float) -> str:
-    factor = max(0.0, float(saturation_factor))
-    try:
-        red, green, blue = _hex_to_rgb(value)
-    except Exception:
-        red, green, blue = _hex_to_rgb(OBJECT_TYPE_GROUP_COLOR_DEFAULT)
-
-    h, s, v = colorsys.rgb_to_hsv(red / 255.0, green / 255.0, blue / 255.0)
-    # Apply absolute saturation-step reduction (10 points per step) so adjacent
-    # same-group lines are visibly distinct even when base colors are already muted.
-    adjusted_s = max(0.0, min(1.0, s - max(0.0, 1.0 - factor)))
-    new_r, new_g, new_b = colorsys.hsv_to_rgb(h, adjusted_s, v)
-    return _rgb_to_hex((int(round(new_r * 255)), int(round(new_g * 255)), int(round(new_b * 255))))
-
-
 def _interpolate_cloud_cover_color(cloud_cover_percent: float) -> str:
     return _interpolate_color_stops(cloud_cover_percent, CLOUD_COVER_COLOR_STOPS)
 
@@ -1287,6 +1298,10 @@ def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_u
 
     # Render one rain emoji per night using explicit priority:
     # snow > rain > showers > alarm > caution.
+    # A caution-only night is intentionally excluded from animation.
+    if seen == {"⚠️"}:
+        return []
+
     for candidate in WEATHER_ALERT_RAIN_PRIORITY:
         if candidate in seen:
             return [candidate]
@@ -2853,13 +2868,41 @@ def catalog_search_rank(catalog_value: str | None) -> int:
     return 4
 
 
-def object_type_search_rank(object_type_value: str | None) -> int:
-    norm = normalize_text(object_type_value)
-    if "galaxy" in norm:
+def object_type_group_search_rank(object_type_group_value: str | None) -> int:
+    norm = normalize_text(object_type_group_value)
+    if norm in {"galaxy", "galaxies"}:
         return 0
-    if "nebula" in norm or "hii" in norm:
+    if norm == "brightnebula":
         return 1
-    return 2
+    if norm == "darknebula":
+        return 2
+    if norm == "clusters":
+        return 3
+    if norm == "stars":
+        return 4
+    if norm == "other":
+        return 5
+    return 6
+
+
+def compute_abs_minutes_to_culmination(targets: pd.DataFrame, lon: float) -> pd.Series:
+    if targets.empty or "ra_deg" not in targets.columns:
+        return pd.Series(np.inf, index=targets.index, dtype=float)
+
+    try:
+        now_utc = Time(datetime.now(timezone.utc))
+        lst_deg = float(now_utc.sidereal_time("apparent", longitude=float(lon) * u.deg).degree) % 360.0
+    except Exception:
+        return pd.Series(np.inf, index=targets.index, dtype=float)
+
+    ra_values = pd.to_numeric(targets["ra_deg"], errors="coerce").to_numpy(dtype=float)
+    abs_minutes = np.full(len(targets), np.inf, dtype=float)
+    valid = np.isfinite(ra_values)
+    if np.any(valid):
+        hour_angle_deg = ((lst_deg - ra_values[valid] + 540.0) % 360.0) - 180.0
+        abs_minutes[valid] = np.abs(hour_angle_deg) * 4.0
+
+    return pd.Series(abs_minutes, index=targets.index, dtype=float)
 
 
 def searchbox_target_options(
@@ -2869,7 +2912,7 @@ def searchbox_target_options(
     lat: float,
     lon: float,
     favorite_ids: list[str] | set[str] | None = None,
-    max_options: int = 10,
+    max_options: int = 20,
 ) -> list[tuple[str, str]]:
     query = str(search_term or "").strip()
     if not query:
@@ -2882,23 +2925,55 @@ def searchbox_target_options(
         matches = subset_by_id_list(catalog, favorite_list).copy()
     else:
         matches = search_catalog(catalog, query).copy()
+        if "object_type_group" in catalog.columns and query_norm:
+            group_norm = catalog["object_type_group"].fillna("").astype(str).map(normalize_text)
+            group_matches = catalog[group_norm.str.contains(query_norm, regex=False)].copy()
+            if not group_matches.empty:
+                if matches.empty:
+                    matches = group_matches
+                else:
+                    matches = (
+                        pd.concat([matches, group_matches], ignore_index=True)
+                        .drop_duplicates(subset=["primary_id"], keep="first")
+                        .reset_index(drop=True)
+                    )
     if matches.empty:
         return []
 
+    matches = compute_altaz_now(matches, lat=lat, lon=lon)
     if query_norm not in {"favorite", "favorites"}:
         matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
+        matches["_horizon_rank"] = np.where(pd.to_numeric(matches["alt_now"], errors="coerce").fillna(-9999.0) >= 0.0, 0, 1)
         matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
-        matches["_type_rank"] = matches["object_type"].map(object_type_search_rank)
+        matches["_type_group_rank"] = matches["object_type_group"].map(object_type_group_search_rank)
+        matches["_altitude_sort"] = pd.to_numeric(matches["alt_now"], errors="coerce").fillna(-9999.0)
+        matches["_culm_abs_minutes"] = compute_abs_minutes_to_culmination(matches, lon=lon)
         matches = matches.sort_values(
-            by=["_favorite_rank", "_catalog_rank", "_type_rank", "primary_id"],
-            ascending=[True, True, True, True],
+            by=[
+                "_favorite_rank",
+                "_horizon_rank",
+                "_catalog_rank",
+                "_type_group_rank",
+                "_altitude_sort",
+                "_culm_abs_minutes",
+                "primary_id",
+            ],
+            ascending=[True, True, True, True, False, True, True],
             kind="stable",
-        ).drop(columns=["_favorite_rank", "_catalog_rank", "_type_rank"])
+        ).drop(
+            columns=[
+                "_favorite_rank",
+                "_horizon_rank",
+                "_catalog_rank",
+                "_type_group_rank",
+                "_altitude_sort",
+                "_culm_abs_minutes",
+            ]
+        )
     matches = matches.head(max_options)
 
-    enriched = compute_altaz_now(matches, lat=lat, lon=lon)
     options: list[tuple[str, str]] = []
-    for _, row in enriched.iterrows():
+    for _, row in matches.iterrows():
         primary_id = str(row.get("primary_id") or "")
         options.append(
             (
@@ -2933,7 +3008,7 @@ def render_searchbox_results(
             lat=lat,
             lon=lon,
             favorite_ids=favorite_ids,
-            max_options=10,
+            max_options=20,
         ),
         label="Search",
         placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
@@ -3538,18 +3613,7 @@ def render_detail_panel(
     window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
     selected_common_name = str(selected.get("common_name") or "").strip()
     selected_label = f"{target_id} - {selected_common_name}" if selected_common_name else target_id
-    group_sequence_counts: dict[str, int] = {}
-
-    def _next_group_plot_color(group_label: str | None) -> str:
-        group_key = str(group_label or "").strip() or "other"
-        occurrence = group_sequence_counts.get(group_key, 0)
-        group_sequence_counts[group_key] = occurrence + 1
-        base_color = object_type_group_color(group_key)
-        saturation_factor = max(0.0, 1.0 - (0.10 * occurrence))
-        return _adjust_hex_saturation(base_color, saturation_factor)
-
     selected_group = str(selected.get("object_type_group") or "").strip() or "other"
-    selected_color = _next_group_plot_color(selected_group)
     summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
     selected_line_width = (
         (PATH_LINE_WIDTH_PRIMARY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
@@ -3598,7 +3662,6 @@ def render_detail_panel(
                 "label": set_list_label,
                 "object_type_group": set_list_group,
                 "emission_lines_display": set_list_emission_details,
-                "color": _next_group_plot_color(set_list_group),
                 "line_width": (
                     (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
                     if summary_highlight_id == set_list_target_id
@@ -3608,6 +3671,27 @@ def render_detail_panel(
                 "events": extract_events(set_list_track),
             }
         )
+
+    # Evenly distribute same-group targets across each group's start->end gradient.
+    group_total_counts: dict[str, int] = {selected_group: 1}
+    for target_track in set_list_tracks:
+        group_key = str(target_track.get("object_type_group") or "").strip() or "other"
+        group_total_counts[group_key] = group_total_counts.get(group_key, 0) + 1
+
+    group_seen_counts: dict[str, int] = {}
+
+    def _next_group_plot_color(group_label: str | None) -> str:
+        group_key = str(group_label or "").strip() or "other"
+        index_in_group = group_seen_counts.get(group_key, 0)
+        group_seen_counts[group_key] = index_in_group + 1
+        total_in_group = max(1, int(group_total_counts.get(group_key, 1)))
+        step_fraction = 0.0 if total_in_group <= 1 else (float(index_in_group) / float(total_in_group - 1))
+        return object_type_group_color(group_key, step_fraction=step_fraction)
+
+    selected_color = _next_group_plot_color(selected_group)
+    for target_track in set_list_tracks:
+        group_key = str(target_track.get("object_type_group") or "").strip() or "other"
+        target_track["color"] = _next_group_plot_color(group_key)
 
     try:
         selected_ra = float(selected["ra_deg"])
