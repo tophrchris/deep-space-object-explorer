@@ -59,6 +59,7 @@ from prefs_cookie_backup import (
     set_cookie_backup_runtime_enabled,
     write_preferences_cookie_backup,
 )
+from target_tips.ui import render_target_tips_panel
 from timezonefinder import TimezoneFinder
 from weather_service import (
     EXTENDED_FORECAST_HOURLY_FIELDS,
@@ -3807,13 +3808,31 @@ def render_detail_panel(
         )
         local_now = datetime.now(tzinfo)
         show_remaining_column = window_start <= local_now <= window_end
-        render_sky_position_summary_table(
-            summary_rows,
-            prefs,
-            use_12_hour=use_12_hour,
-            show_remaining=show_remaining_column,
-            now_local=pd.Timestamp(local_now),
-        )
+        summary_col, tips_col = st.columns([3, 1], gap="medium")
+        with summary_col:
+            render_sky_position_summary_table(
+                summary_rows,
+                prefs,
+                use_12_hour=use_12_hour,
+                show_remaining=show_remaining_column,
+                now_local=pd.Timestamp(local_now),
+            )
+        with tips_col:
+            with st.container(border=True):
+                render_target_tips_panel(
+                    target_id,
+                    selected_label,
+                    selected,
+                    track,
+                    summary_rows,
+                    nightly_weather_alert_emojis,
+                    hourly_weather_rows,
+                    temperature_unit=temperature_unit,
+                    use_12_hour=use_12_hour,
+                    local_now=local_now,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
     temperatures: dict[str, float] = {}
     cloud_cover_by_hour: dict[str, float] = {}
     weather_by_hour: dict[str, dict[str, Any]] = {}
