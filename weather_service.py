@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -142,6 +143,29 @@ def fetch_hourly_weather(
     end_local = pd.Timestamp(end_local_iso)
 
     try:
+        tzinfo = ZoneInfo(tz_name)
+    except Exception:
+        tzinfo = ZoneInfo("UTC")
+
+    # Ensure the API response includes both sides of overnight windows:
+    # - `past_days` captures prior-day sunset hours after midnight
+    # - `forecast_days` captures next-morning hours before sunrise
+    if start_local.tzinfo is None:
+        start_local_in_tz = start_local.tz_localize(tzinfo)
+    else:
+        start_local_in_tz = start_local.tz_convert(tzinfo)
+    if end_local.tzinfo is None:
+        end_local_in_tz = end_local.tz_localize(tzinfo)
+    else:
+        end_local_in_tz = end_local.tz_convert(tzinfo)
+
+    today_local = datetime.now(tzinfo).date()
+    start_date = start_local_in_tz.date()
+    end_date = end_local_in_tz.date()
+    past_days = max(0, (today_local - start_date).days)
+    forecast_days = max(1, (end_date - today_local).days + 1)
+
+    try:
         response = requests.get(
             OPEN_METEO_FORECAST_URL,
             params={
@@ -149,6 +173,8 @@ def fetch_hourly_weather(
                 "longitude": lon,
                 "hourly": ",".join(fields),
                 "timezone": tz_name,
+                "past_days": past_days,
+                "forecast_days": forecast_days,
             },
             timeout=OPEN_METEO_TIMEOUT_SECONDS,
         )

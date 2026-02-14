@@ -211,6 +211,15 @@ PATH_LINE_WIDTH_OVERLAY_DEFAULT = 2.2
 PATH_LINE_WIDTH_SELECTION_MULTIPLIER = 3.0
 
 
+def target_line_color(primary_id: str) -> str:
+    cleaned = str(primary_id or "").strip().upper()
+    if not cleaned:
+        return PATH_LINE_COLORS[0]
+    digest = hashlib.md5(cleaned.encode("utf-8")).digest()
+    palette_index = int.from_bytes(digest[:4], byteorder="big", signed=False) % len(PATH_LINE_COLORS)
+    return PATH_LINE_COLORS[palette_index]
+
+
 def default_preferences() -> dict[str, Any]:
     return {
         "favorites": [],
@@ -618,6 +627,56 @@ def compute_total_visible_time(track: pd.DataFrame) -> timedelta:
     return total.to_pytimedelta()
 
 
+def compute_remaining_visible_time(track: pd.DataFrame, now: pd.Timestamp | datetime | None = None) -> timedelta:
+    if track.empty or "visible" not in track:
+        return timedelta(0)
+
+    visible_mask = track["visible"].fillna(False).astype(bool).to_numpy()
+    if not visible_mask.any():
+        return timedelta(0)
+
+    times = pd.to_datetime(track["time_local"])
+    if times.empty:
+        return timedelta(0)
+
+    diffs = times.diff().dropna()
+    positive_diffs = diffs[diffs > pd.Timedelta(0)]
+    step = positive_diffs.median() if not positive_diffs.empty else pd.Timedelta(minutes=10)
+
+    first_time = pd.Timestamp(times.iloc[0])
+    if now is None:
+        now_ts = pd.Timestamp.now(tz=first_time.tzinfo) if first_time.tzinfo is not None else pd.Timestamp.now()
+    else:
+        now_ts = pd.Timestamp(now)
+        if first_time.tzinfo is not None and now_ts.tzinfo is None:
+            now_ts = now_ts.tz_localize(first_time.tzinfo)
+        elif first_time.tzinfo is None and now_ts.tzinfo is not None:
+            now_ts = now_ts.tz_localize(None)
+        elif first_time.tzinfo is not None and now_ts.tzinfo is not None:
+            now_ts = now_ts.tz_convert(first_time.tzinfo)
+
+    total = pd.Timedelta(0)
+    idx = 0
+    while idx < len(visible_mask):
+        if not visible_mask[idx]:
+            idx += 1
+            continue
+        start_idx = idx
+        while idx + 1 < len(visible_mask) and visible_mask[idx + 1]:
+            idx += 1
+        end_idx = idx
+        interval_start = pd.Timestamp(times.iloc[start_idx])
+        interval_end = pd.Timestamp(times.iloc[end_idx]) + step
+        effective_start = max(interval_start, now_ts)
+        if interval_end > effective_start:
+            total += interval_end - effective_start
+        idx += 1
+
+    if total < pd.Timedelta(0):
+        return timedelta(0)
+    return total.to_pytimedelta()
+
+
 def format_duration_hm(duration: timedelta) -> str:
     total_minutes = max(0, int(round(duration.total_seconds() / 60.0)))
     hours, minutes = divmod(total_minutes, 60)
@@ -636,6 +695,8 @@ def build_sky_position_summary_rows(
     selected_track: pd.DataFrame,
     set_list_tracks: list[dict[str, Any]],
     pinned_ids: set[str],
+    now_local: pd.Timestamp | datetime | None = None,
+    row_order_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     def _build_row(
         primary_id: str,
@@ -658,12 +719,14 @@ def build_sky_position_summary_rows(
             "last_visible": event_time_value(events.get("last_visible")),
             "set": event_time_value(events.get("set")),
             "visible_total": "--",
+            "visible_remaining": "--",
             "culmination_dir": culmination_dir,
             "is_pinned": is_pinned,
         }
 
     selected_row = _build_row(selected_id, selected_label, selected_color, selected_events, selected_id in pinned_ids)
     selected_row["visible_total"] = format_duration_hm(compute_total_visible_time(selected_track))
+    selected_row["visible_remaining"] = format_duration_hm(compute_remaining_visible_time(selected_track, now=now_local))
     rows = [selected_row]
     for target_track in set_list_tracks:
         primary_id = str(target_track.get("primary_id", ""))
@@ -677,16 +740,31 @@ def build_sky_position_summary_rows(
         overlay_track = target_track.get("track")
         if isinstance(overlay_track, pd.DataFrame):
             target_row["visible_total"] = format_duration_hm(compute_total_visible_time(overlay_track))
+            target_row["visible_remaining"] = format_duration_hm(
+                compute_remaining_visible_time(overlay_track, now=now_local)
+            )
         rows.append(target_row)
+
+    if row_order_ids:
+        order_map = {str(primary_id): idx for idx, primary_id in enumerate(row_order_ids)}
+        default_rank = len(order_map)
+        rows = sorted(rows, key=lambda row: order_map.get(str(row.get("primary_id", "")), default_rank))
     return rows
 
 
-def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[str, Any], use_12_hour: bool) -> None:
+def render_sky_position_summary_table(
+    rows: list[dict[str, Any]],
+    prefs: dict[str, Any],
+    use_12_hour: bool,
+    *,
+    show_remaining: bool = False,
+    now_local: pd.Timestamp | datetime | None = None,
+) -> None:
     if not rows:
         st.session_state["sky_summary_highlight_primary_id"] = ""
         return
 
-    st.markdown("#### Sky Position Summary")
+    st.markdown("#### Targets")
     summary_df = pd.DataFrame(rows)
     if summary_df.empty:
         st.session_state["sky_summary_highlight_primary_id"] = ""
@@ -694,20 +772,54 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
 
     summary_df["line_swatch"] = "■"
     summary_df["set_list_action"] = summary_df["is_pinned"].map(lambda value: "Un pin" if bool(value) else "Pin")
+    summary_df["visible_remaining_display"] = "--"
+    if show_remaining:
+        for row_index, row in summary_df.iterrows():
+            first_visible = row.get("first_visible")
+            total_duration = str(row.get("visible_total") or "").strip()
+            remaining = str(row.get("visible_remaining") or "").strip()
+            if (
+                (not total_duration or total_duration == "--")
+                or (not remaining or remaining == "--")
+                or pd.isna(first_visible)
+            ):
+                continue
+            try:
+                first_visible_ts = pd.Timestamp(first_visible)
+                if now_local is None:
+                    now_ts = (
+                        pd.Timestamp.now(tz=first_visible_ts.tzinfo)
+                        if first_visible_ts.tzinfo is not None
+                        else pd.Timestamp.now()
+                    )
+                else:
+                    now_ts = pd.Timestamp(now_local)
+                    if first_visible_ts.tzinfo is not None and now_ts.tzinfo is None:
+                        now_ts = now_ts.tz_localize(first_visible_ts.tzinfo)
+                    elif first_visible_ts.tzinfo is None and now_ts.tzinfo is not None:
+                        now_ts = now_ts.tz_localize(None)
+                    elif first_visible_ts.tzinfo is not None and now_ts.tzinfo is not None:
+                        now_ts = now_ts.tz_convert(first_visible_ts.tzinfo)
 
-    display = summary_df[
-        [
-            "line_swatch",
-            "target",
-            "first_visible",
-            "culmination",
-            "last_visible",
-            "visible_total",
-            "culmination_alt",
-            "culmination_dir",
-            "set_list_action",
-        ]
-    ].rename(
+                if now_ts > first_visible_ts:
+                    summary_df.at[row_index, "visible_remaining_display"] = remaining
+                else:
+                    summary_df.at[row_index, "visible_remaining_display"] = total_duration
+            except Exception:
+                continue
+    display_columns = [
+        "line_swatch",
+        "target",
+        "first_visible",
+        "culmination",
+        "last_visible",
+        "visible_total",
+    ]
+    if show_remaining:
+        display_columns.append("visible_remaining_display")
+    display_columns.extend(["culmination_alt", "culmination_dir", "set_list_action"])
+
+    display = summary_df[display_columns].rename(
         columns={
             "line_swatch": "Line",
             "target": "Target",
@@ -715,6 +827,7 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
             "culmination": "Peak",
             "last_visible": "Last Visible",
             "visible_total": "Duration",
+            "visible_remaining_display": "Remaining",
             "culmination_alt": "Max Alt",
             "culmination_dir": "Direction",
             "set_list_action": "Set List",
@@ -724,12 +837,44 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
     def _style_summary_row(row: pd.Series) -> list[str]:
         styles = ["" for _ in row]
         color = str(summary_df.loc[row.name, "line_color"]).strip()
+        row_primary_id = str(summary_df.loc[row.name, "primary_id"]).strip()
+        selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
+        if row_primary_id and selected_detail_id and row_primary_id == selected_detail_id:
+            selected_bg = _muted_rgba_from_hex(color, alpha=0.16)
+            for idx in range(len(styles)):
+                styles[idx] = f"background-color: {selected_bg};"
         if color:
             line_idx = row.index.get_loc("Line")
-            styles[line_idx] = f"color: {color}; font-weight: 700;"
+            base_style = styles[line_idx]
+            if base_style and not base_style.endswith(";"):
+                base_style = f"{base_style};"
+            styles[line_idx] = f"{base_style} color: {color}; font-weight: 700;"
         return styles
 
     styled = display.style.apply(_style_summary_row, axis=1)
+
+    column_config: dict[str, Any] = {
+        "Line": st.column_config.TextColumn(width="small"),
+        "Target": st.column_config.TextColumn(width="large"),
+        "First Visible": st.column_config.DatetimeColumn(
+            width="small",
+            format=("h:mm a" if use_12_hour else "HH:mm"),
+        ),
+        "Peak": st.column_config.DatetimeColumn(
+            width="small",
+            format=("h:mm a" if use_12_hour else "HH:mm"),
+        ),
+        "Max Alt": st.column_config.TextColumn(width="small"),
+        "Last Visible": st.column_config.DatetimeColumn(
+            width="small",
+            format=("h:mm a" if use_12_hour else "HH:mm"),
+        ),
+        "Duration": st.column_config.TextColumn(width="small"),
+        "Direction": st.column_config.TextColumn(width="small"),
+        "Set List": st.column_config.TextColumn(width="small"),
+    }
+    if show_remaining:
+        column_config["Remaining"] = st.column_config.TextColumn(width="small")
 
     table_event = st.dataframe(
         styled,
@@ -738,26 +883,7 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         on_select="rerun",
         selection_mode="single-cell",
         key="sky_summary_table",
-        column_config={
-            "Line": st.column_config.TextColumn(width="small"),
-            "Target": st.column_config.TextColumn(width="large"),
-            "First Visible": st.column_config.DatetimeColumn(
-                width="small",
-                format=("h:mm a" if use_12_hour else "HH:mm"),
-            ),
-            "Peak": st.column_config.DatetimeColumn(
-                width="small",
-                format=("h:mm a" if use_12_hour else "HH:mm"),
-            ),
-            "Max Alt": st.column_config.TextColumn(width="small"),
-            "Last Visible": st.column_config.DatetimeColumn(
-                width="small",
-                format=("h:mm a" if use_12_hour else "HH:mm"),
-            ),
-            "Duration": st.column_config.TextColumn(width="small"),
-            "Direction": st.column_config.TextColumn(width="small"),
-            "Set List": st.column_config.TextColumn(width="small"),
-        },
+        column_config=column_config,
     )
 
     selected_rows: list[int] = []
@@ -826,11 +952,17 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         selected_primary_id = str(summary_df.iloc[selected_index].get("primary_id", ""))
 
     current_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", ""))
-    highlight_changed = selected_primary_id != current_highlight_id
-    if highlight_changed:
+    if selected_primary_id and selected_primary_id != current_highlight_id:
         st.session_state["sky_summary_highlight_primary_id"] = selected_primary_id
 
     set_list_col_index = int(display.columns.get_loc("Set List"))
+
+    if selected_primary_id:
+        current_selected = str(st.session_state.get("selected_id") or "").strip()
+        if selected_primary_id != current_selected:
+            st.session_state["selected_id"] = selected_primary_id
+            if selected_column_index != set_list_col_index:
+                st.rerun()
 
     if selected_index is not None and selected_column_index == set_list_col_index:
         action_token = f"{selected_index}:{selected_column_index}"
@@ -850,17 +982,6 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
                 persist_and_rerun(prefs)
     else:
         st.session_state["sky_summary_set_list_action_token"] = ""
-
-    if selected_index is not None and selected_column_index != set_list_col_index:
-        selected_row = summary_df.iloc[selected_index]
-        selected_for_detail = str(selected_row.get("primary_id", ""))
-        current_selected = str(st.session_state.get("selected_id") or "").strip()
-        if selected_for_detail and selected_for_detail != current_selected:
-            st.session_state["selected_id"] = selected_for_detail
-            st.rerun()
-
-    if highlight_changed:
-        st.rerun()
 
     st.caption("Click a target cell to select detail. Click Pin/Un pin in Set List to update your set list.")
 
@@ -882,6 +1003,15 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
 def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     red, green, blue = rgb
     return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def _muted_rgba_from_hex(value: str, alpha: float = 0.14) -> str:
+    try:
+        red, green, blue = _hex_to_rgb(value)
+    except Exception:
+        red, green, blue = (59, 130, 246)
+    clamped_alpha = max(0.0, min(1.0, float(alpha)))
+    return f"rgba({red}, {green}, {blue}, {clamped_alpha:.3f})"
 
 
 def _interpolate_color_stops(value: float, color_stops: list[tuple[float, str]]) -> str:
@@ -1708,7 +1838,7 @@ def build_path_plot(
                 )
 
     fig.update_layout(
-        title="Sky Position",
+        title="Target Paths",
         height=330,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
@@ -2015,7 +2145,7 @@ def build_path_plot_radial(
                 )
 
     fig.update_layout(
-        title="Sky Position",
+        title="Target Paths",
         height=660,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
@@ -2728,9 +2858,14 @@ def render_searchbox_results(
 
     picked_value = str(picked).strip() if picked is not None else ""
     if picked_value:
-        st.session_state["selected_id"] = picked_value
+        last_applied_pick = str(st.session_state.get("targets_searchbox_last_applied_pick", "")).strip()
+        if picked_value != last_applied_pick:
+            st.session_state["selected_id"] = picked_value
+            st.session_state["targets_searchbox_last_applied_pick"] = picked_value
         st.caption(f"Selected: {picked_value}")
         return picked_value
+    else:
+        st.session_state["targets_searchbox_last_applied_pick"] = ""
 
     search_state = st.session_state.get("targets_searchbox_component")
     search_term = str(search_state.get("search", "")).strip() if isinstance(search_state, dict) else ""
@@ -3124,22 +3259,47 @@ def render_detail_panel(
             return ""
         return f"{numeric:.6g}"
 
-    with st.container(border=True):
-        if selected is None:
+    if selected is None:
+        with st.container(border=True):
             st.info("Select a target from results to view detail and plots.")
             st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_path_plot")
             st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_night_plot")
-            return
+        return
 
-        target_id = str(selected["primary_id"])
-        is_favorite = target_id in prefs["favorites"]
-        in_set_list = target_id in prefs["set_list"]
+    target_id = str(selected["primary_id"])
+    is_favorite = target_id in prefs["favorites"]
+    in_set_list = target_id in prefs["set_list"]
 
-        title = target_id
-        if selected.get("common_name"):
-            title = f"{target_id} - {selected['common_name']}"
+    title = target_id
+    if selected.get("common_name"):
+        title = f"{target_id} - {selected['common_name']}"
+
+    catalog_image_url = clean_text(selected.get("image_url"))
+    image_source_url = clean_text(selected.get("image_attribution_url"))
+    image_license = clean_text(selected.get("license_label"))
+    info_url = clean_text(selected.get("info_url")) or image_source_url
+    if not image_source_url:
+        image_source_url = info_url
+
+    image_url = catalog_image_url
+    if not image_url:
+        search_phrase = selected.get("common_name") or selected.get("primary_id")
+        image_data = fetch_free_use_image(str(search_phrase))
+        if image_data and image_data.get("image_url"):
+            image_url = clean_text(image_data.get("image_url"))
+            image_source_url = clean_text(image_data.get("source_url")) or image_source_url
+            image_license = clean_text(image_data.get("license_label")) or image_license
+
+    dist_value = format_numeric(selected.get("dist_value"))
+    dist_unit = clean_text(selected.get("dist_unit"))
+    redshift = format_numeric(selected.get("redshift"))
+    morphology = clean_text(selected.get("morphology"))
+    emission_details = clean_text(selected.get("emission_lines"))
+    emission_details_display = re.sub(r"[\[\]]", "", emission_details)
+    description = clean_text(selected.get("description"))
+
+    with st.container(border=True):
         st.markdown(f"### {title}")
-
         st.caption(f"Catalog: {selected['catalog']} | Type: {selected.get('object_type') or '-'}")
 
         if detail_stack_vertical:
@@ -3153,29 +3313,6 @@ def render_detail_panel(
             description_container = detail_cols[1]
             property_container = detail_cols[2]
             forecast_container = detail_cols[3]
-        catalog_image_url = clean_text(selected.get("image_url"))
-        image_source_url = clean_text(selected.get("image_attribution_url"))
-        image_license = clean_text(selected.get("license_label"))
-        info_url = clean_text(selected.get("info_url")) or image_source_url
-        if not image_source_url:
-            image_source_url = info_url
-
-        image_url = catalog_image_url
-        if not image_url:
-            search_phrase = selected.get("common_name") or selected.get("primary_id")
-            image_data = fetch_free_use_image(str(search_phrase))
-            if image_data and image_data.get("image_url"):
-                image_url = clean_text(image_data.get("image_url"))
-                image_source_url = clean_text(image_data.get("source_url")) or image_source_url
-                image_license = clean_text(image_data.get("license_label")) or image_license
-
-        dist_value = format_numeric(selected.get("dist_value"))
-        dist_unit = clean_text(selected.get("dist_unit"))
-        redshift = format_numeric(selected.get("redshift"))
-        morphology = clean_text(selected.get("morphology"))
-        emission_details = clean_text(selected.get("emission_lines"))
-        emission_details_display = re.sub(r"[\[\]]", "", emission_details)
-        description = clean_text(selected.get("description"))
 
         with image_container:
             if image_url:
@@ -3257,93 +3394,91 @@ def render_detail_panel(
             forecast_placeholder = st.empty()
             forecast_legend_placeholder = st.empty()
 
-        location = prefs["location"]
-        window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
-        selected_common_name = str(selected.get("common_name") or "").strip()
-        selected_label = f"{target_id} - {selected_common_name}" if selected_common_name else target_id
-        selected_color = PATH_LINE_COLORS[0]
-        summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
-        selected_line_width = (
-            (PATH_LINE_WIDTH_PRIMARY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
-            if summary_highlight_id == target_id
-            else PATH_LINE_WIDTH_PRIMARY_DEFAULT
-        )
+    location = prefs["location"]
+    window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
+    selected_common_name = str(selected.get("common_name") or "").strip()
+    selected_label = f"{target_id} - {selected_common_name}" if selected_common_name else target_id
+    selected_color = target_line_color(target_id)
+    summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+    selected_line_width = (
+        (PATH_LINE_WIDTH_PRIMARY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
+        if summary_highlight_id == target_id
+        else PATH_LINE_WIDTH_PRIMARY_DEFAULT
+    )
 
-        set_list_tracks: list[dict[str, Any]] = []
-        set_list_targets = subset_by_id_list(catalog, prefs["set_list"])
-        color_cursor = 1
-        for _, set_list_target in set_list_targets.iterrows():
-            set_list_target_id = str(set_list_target["primary_id"])
-            if set_list_target_id == target_id:
-                continue
-
-            try:
-                set_list_ra = float(set_list_target["ra_deg"])
-                set_list_dec = float(set_list_target["dec_deg"])
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(set_list_ra) or not np.isfinite(set_list_dec):
-                continue
-
-            try:
-                set_list_track = compute_track(
-                    ra_deg=set_list_ra,
-                    dec_deg=set_list_dec,
-                    lat=float(location["lat"]),
-                    lon=float(location["lon"]),
-                    start_local=window_start,
-                    end_local=window_end,
-                    obstructions=prefs["obstructions"],
-                )
-            except Exception:
-                continue
-            if set_list_track.empty:
-                continue
-
-            set_list_common_name = str(set_list_target.get("common_name") or "").strip()
-            set_list_label = (
-                f"{set_list_target_id} - {set_list_common_name}" if set_list_common_name else set_list_target_id
-            )
-            set_list_emission_details = re.sub(r"[\[\]]", "", clean_text(set_list_target.get("emission_lines")))
-            set_list_tracks.append(
-                {
-                    "primary_id": set_list_target_id,
-                    "common_name": set_list_common_name,
-                    "label": set_list_label,
-                    "emission_lines_display": set_list_emission_details,
-                    "color": PATH_LINE_COLORS[color_cursor % len(PATH_LINE_COLORS)],
-                    "line_width": (
-                        (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
-                        if summary_highlight_id == set_list_target_id
-                        else PATH_LINE_WIDTH_OVERLAY_DEFAULT
-                    ),
-                    "track": set_list_track,
-                    "events": extract_events(set_list_track),
-                }
-            )
-            color_cursor += 1
+    set_list_tracks: list[dict[str, Any]] = []
+    set_list_targets = subset_by_id_list(catalog, prefs["set_list"])
+    for _, set_list_target in set_list_targets.iterrows():
+        set_list_target_id = str(set_list_target["primary_id"])
+        if set_list_target_id == target_id:
+            continue
 
         try:
-            selected_ra = float(selected["ra_deg"])
-            selected_dec = float(selected["dec_deg"])
+            set_list_ra = float(set_list_target["ra_deg"])
+            set_list_dec = float(set_list_target["dec_deg"])
         except (TypeError, ValueError):
-            st.warning("Selected target is missing valid coordinates, so path/forecast plots are unavailable.")
-            return
-        if not np.isfinite(selected_ra) or not np.isfinite(selected_dec):
-            st.warning("Selected target has non-finite coordinates, so path/forecast plots are unavailable.")
-            return
+            continue
+        if not np.isfinite(set_list_ra) or not np.isfinite(set_list_dec):
+            continue
 
-        track = compute_track(
-            ra_deg=selected_ra,
-            dec_deg=selected_dec,
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
-            start_local=window_start,
-            end_local=window_end,
-            obstructions=prefs["obstructions"],
+        try:
+            set_list_track = compute_track(
+                ra_deg=set_list_ra,
+                dec_deg=set_list_dec,
+                lat=float(location["lat"]),
+                lon=float(location["lon"]),
+                start_local=window_start,
+                end_local=window_end,
+                obstructions=prefs["obstructions"],
+            )
+        except Exception:
+            continue
+        if set_list_track.empty:
+            continue
+
+        set_list_common_name = str(set_list_target.get("common_name") or "").strip()
+        set_list_label = f"{set_list_target_id} - {set_list_common_name}" if set_list_common_name else set_list_target_id
+        set_list_emission_details = re.sub(r"[\[\]]", "", clean_text(set_list_target.get("emission_lines")))
+        set_list_tracks.append(
+            {
+                "primary_id": set_list_target_id,
+                "common_name": set_list_common_name,
+                "label": set_list_label,
+                "emission_lines_display": set_list_emission_details,
+                "color": target_line_color(set_list_target_id),
+                "line_width": (
+                    (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
+                    if summary_highlight_id == set_list_target_id
+                    else PATH_LINE_WIDTH_OVERLAY_DEFAULT
+                ),
+                "track": set_list_track,
+                "events": extract_events(set_list_track),
+            }
         )
-        events = extract_events(track)
 
+    try:
+        selected_ra = float(selected["ra_deg"])
+        selected_dec = float(selected["dec_deg"])
+    except (TypeError, ValueError):
+        st.warning("Selected target is missing valid coordinates, so path/forecast plots are unavailable.")
+        return
+    if not np.isfinite(selected_ra) or not np.isfinite(selected_dec):
+        st.warning("Selected target has non-finite coordinates, so path/forecast plots are unavailable.")
+        return
+
+    track = compute_track(
+        ra_deg=selected_ra,
+        dec_deg=selected_dec,
+        lat=float(location["lat"]),
+        lon=float(location["lon"]),
+        start_local=window_start,
+        end_local=window_end,
+        obstructions=prefs["obstructions"],
+    )
+    events = extract_events(track)
+
+    with st.container(border=True):
+        st.markdown("### Night Sky Preview")
         st.caption(
             f"Tonight ({tzinfo.key}): "
             f"{format_display_time(window_start, use_12_hour=use_12_hour)} -> "
@@ -3355,7 +3490,7 @@ def render_detail_panel(
         )
 
         path_style = st.segmented_control(
-            "Sky Position Style",
+            "Target Paths Style",
             options=["Line", "Radial"],
             default="Line",
             key="path_style_preference",
@@ -3400,50 +3535,64 @@ def render_detail_panel(
             selected_track=track,
             set_list_tracks=set_list_tracks,
             pinned_ids=set(str(item) for item in prefs["set_list"]),
-        )
-        render_sky_position_summary_table(summary_rows, prefs, use_12_hour=use_12_hour)
-
-        hourly_weather_rows = fetch_hourly_weather(
-            lat=float(location["lat"]),
-            lon=float(location["lon"]),
-            tz_name=tzinfo.key,
-            start_local_iso=window_start.isoformat(),
-            end_local_iso=window_end.isoformat(),
-            hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
-        )
-        temperatures: dict[str, float] = {}
-        cloud_cover_by_hour: dict[str, float] = {}
-        weather_by_hour: dict[str, dict[str, Any]] = {}
-        for weather_row in hourly_weather_rows:
-            time_iso = str(weather_row.get("time_iso", "")).strip()
-            if not time_iso:
-                continue
-            try:
-                hour_key = pd.Timestamp(time_iso).floor("h").isoformat()
-            except Exception:
-                hour_key = time_iso
-            temperature_value = weather_row.get("temperature_2m")
-            if temperature_value is not None and not pd.isna(temperature_value):
-                temperatures[hour_key] = float(temperature_value)
-            cloud_cover_value = weather_row.get("cloud_cover")
-            if cloud_cover_value is not None and not pd.isna(cloud_cover_value):
-                cloud_cover_by_hour[hour_key] = float(cloud_cover_value)
-            weather_by_hour[hour_key] = weather_row
-
-        forecast_placeholder.plotly_chart(
-            build_night_plot(
-                track=track,
-                temperature_by_hour=temperatures,
-                cloud_cover_by_hour=cloud_cover_by_hour,
-                weather_by_hour=weather_by_hour,
-                temperature_unit=temperature_unit,
-                target_label=selected_label,
-                use_12_hour=use_12_hour,
+            now_local=pd.Timestamp(datetime.now(tzinfo)),
+            row_order_ids=(
+                [target_id] + [str(item) for item in prefs["set_list"] if str(item) != target_id]
+                if target_id not in set(str(item) for item in prefs["set_list"])
+                else [str(item) for item in prefs["set_list"]]
             ),
-            use_container_width=True,
-            key="detail_night_plot",
         )
-        forecast_legend_placeholder.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
+        local_now = datetime.now(tzinfo)
+        show_remaining_column = window_start <= local_now <= window_end
+        render_sky_position_summary_table(
+            summary_rows,
+            prefs,
+            use_12_hour=use_12_hour,
+            show_remaining=show_remaining_column,
+            now_local=pd.Timestamp(local_now),
+        )
+
+    hourly_weather_rows = fetch_hourly_weather(
+        lat=float(location["lat"]),
+        lon=float(location["lon"]),
+        tz_name=tzinfo.key,
+        start_local_iso=window_start.isoformat(),
+        end_local_iso=window_end.isoformat(),
+        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+    )
+    temperatures: dict[str, float] = {}
+    cloud_cover_by_hour: dict[str, float] = {}
+    weather_by_hour: dict[str, dict[str, Any]] = {}
+    for weather_row in hourly_weather_rows:
+        time_iso = str(weather_row.get("time_iso", "")).strip()
+        if not time_iso:
+            continue
+        try:
+            hour_key = pd.Timestamp(time_iso).floor("h").isoformat()
+        except Exception:
+            hour_key = time_iso
+        temperature_value = weather_row.get("temperature_2m")
+        if temperature_value is not None and not pd.isna(temperature_value):
+            temperatures[hour_key] = float(temperature_value)
+        cloud_cover_value = weather_row.get("cloud_cover")
+        if cloud_cover_value is not None and not pd.isna(cloud_cover_value):
+            cloud_cover_by_hour[hour_key] = float(cloud_cover_value)
+        weather_by_hour[hour_key] = weather_row
+
+    forecast_placeholder.plotly_chart(
+        build_night_plot(
+            track=track,
+            temperature_by_hour=temperatures,
+            cloud_cover_by_hour=cloud_cover_by_hour,
+            weather_by_hour=weather_by_hour,
+            temperature_unit=temperature_unit,
+            target_label=selected_label,
+            use_12_hour=use_12_hour,
+        ),
+        use_container_width=True,
+        key="detail_night_plot",
+    )
+    forecast_legend_placeholder.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
 
 
 def render_explorer_page(
