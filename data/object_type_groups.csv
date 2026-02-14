@@ -1,0 +1,38 @@
+group_label,source_object_type,canonical_object_type
+Galaxies,Galaxy,Galaxy
+Galaxies,GrG,galaxy group
+Galaxies,GroupG,galaxy group
+Galaxies,CiG,cluster of galaxies
+Galaxies,ClG,cluster of galaxies
+Galaxies,AGN,Active Galactic Nucleus
+Galaxies,Seyfert1,Seyfert1
+Galaxies,Seyfer2,Seyfert2
+Galaxies,Seyfert2,Seyfert2
+Clusters,Globular_cluster,Globular_cluster
+Clusters,Open_cluster,Open_cluster
+Clusters,Cluster,Cluster
+Clusters,CI*,CI*
+Clusters,cluster*,cluster*
+Clusters,OpenCluster,OpenCluster
+Clusters,GlobCluster,GlobCluster
+Bright Nebula,Planetary_nebula,Planetary_nebula
+Bright Nebula,Planetary_neb,Planetary_neb
+Bright Nebula,Planetary_neb_candidate,Planetary_neb_candidate
+Bright Nebula,emission_nebula,emission_nebula
+Bright Nebula,nebula,nebula
+Bright Nebula,Supernova,Supernova
+Bright Nebula,Supernova_remnant,Supernova_remnant
+Bright Nebula,Supernova_candidate,Supernova_candidate
+Bright Nebula,SNRemnant,SNRemnant
+Bright Nebula,SNR,SNR
+Bright Nebula,HII,HII
+Bright Nebula,HIshell,HIshell
+Bright Nebula,OH/IR*,OH/IR*
+Dark Nebula,reflection_nebula,reflection_nebula
+Dark Nebula,GalNeb,GalNeb
+Dark Nebula,RefNeb,RefNeb
+Dark Nebula,DarkNeb,DarkNeb
+Stars,Asterism,Asterism
+Stars,Double star,Double star
+Stars,Star,Star
+Stars,Nova,Nova

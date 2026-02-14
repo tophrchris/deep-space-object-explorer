@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import colorsys
 import copy
 import hashlib
 import html
@@ -150,6 +151,17 @@ WEATHER_ALERT_RAIN_PRIORITY = ["❄️", "⛈️", "☔", "🚨", "⚠️"]
 WEATHER_ALERT_RAIN_INTERVAL_SECONDS = 5 * 60
 WEATHER_ALERT_RAIN_DURATION_SECONDS = 30
 WEATHER_ALERT_RAIN_BUCKET_STATE_KEY = "weather_alert_rain_last_bucket"
+OBJECT_TYPE_GROUP_COLOR_DEFAULT = "#94A3B8"
+OBJECT_TYPE_GROUP_COLOR_THEMES: dict[str, dict[str, str]] = {
+    "default": {
+        "Galaxies": "#8B5CF6",      # purple
+        "Clusters": "#16A34A",      # green
+        "Bright Nebula": "#DC2626", # red
+        "Dark Nebula": "#2563EB",   # blue
+        "Stars": "#EAB308",         # yellow
+        "other": "#94A3B8",         # grey
+    }
+}
 # Approximate cloud-cover legend gradient inspired by the provided scale:
 # Overcast/90% -> light gray, 70-50% -> cyan/blue, 30-0% -> deeper blue.
 CLOUD_COVER_COLOR_STOPS: list[tuple[float, str]] = [
@@ -230,6 +242,18 @@ PATH_HIGHLIGHT_WIDTH_MULTIPLIER = 5.0
 PATH_LINE_WIDTH_PRIMARY_DEFAULT = 3.0
 PATH_LINE_WIDTH_OVERLAY_DEFAULT = 2.2
 PATH_LINE_WIDTH_SELECTION_MULTIPLIER = 3.0
+
+
+def resolve_object_type_group_colors(theme_name: str | None = None) -> dict[str, str]:
+    selected_theme = str(theme_name or "").strip().lower() or "default"
+    theme_colors = OBJECT_TYPE_GROUP_COLOR_THEMES.get(selected_theme) or OBJECT_TYPE_GROUP_COLOR_THEMES["default"]
+    return dict(theme_colors)
+
+
+def object_type_group_color(group_label: str | None, theme_name: str | None = None) -> str:
+    group = str(group_label or "").strip()
+    colors = resolve_object_type_group_colors(theme_name)
+    return colors.get(group) or colors.get("other") or OBJECT_TYPE_GROUP_COLOR_DEFAULT
 
 
 def target_line_color(primary_id: str) -> str:
@@ -711,6 +735,7 @@ def format_duration_hm(duration: timedelta) -> str:
 def build_sky_position_summary_rows(
     selected_id: str,
     selected_label: str,
+    selected_type_group: str,
     selected_color: str,
     selected_events: dict[str, pd.Series | None],
     selected_track: pd.DataFrame,
@@ -722,6 +747,7 @@ def build_sky_position_summary_rows(
     def _build_row(
         primary_id: str,
         label: str,
+        type_group: str,
         color: str,
         events: dict[str, pd.Series | None],
         is_pinned: bool,
@@ -733,6 +759,7 @@ def build_sky_position_summary_rows(
             "primary_id": primary_id,
             "line_color": color,
             "target": label,
+            "object_type_group": type_group or "other",
             "rise": event_time_value(events.get("rise")),
             "first_visible": event_time_value(events.get("first_visible")),
             "culmination": event_time_value(events.get("culmination")),
@@ -745,7 +772,14 @@ def build_sky_position_summary_rows(
             "is_pinned": is_pinned,
         }
 
-    selected_row = _build_row(selected_id, selected_label, selected_color, selected_events, selected_id in pinned_ids)
+    selected_row = _build_row(
+        selected_id,
+        selected_label,
+        selected_type_group,
+        selected_color,
+        selected_events,
+        selected_id in pinned_ids,
+    )
     selected_row["visible_total"] = format_duration_hm(compute_total_visible_time(selected_track))
     selected_row["visible_remaining"] = format_duration_hm(compute_remaining_visible_time(selected_track, now=now_local))
     rows = [selected_row]
@@ -754,6 +788,7 @@ def build_sky_position_summary_rows(
         target_row = _build_row(
             primary_id,
             str(target_track.get("label", "Set List target")),
+            str(target_track.get("object_type_group", "other")),
             str(target_track.get("color", "#22c55e")),
             target_track.get("events", {}),
             primary_id in pinned_ids,
@@ -831,6 +866,7 @@ def render_sky_position_summary_table(
     display_columns = [
         "line_swatch",
         "target",
+        "object_type_group",
         "first_visible",
         "culmination",
         "last_visible",
@@ -844,6 +880,7 @@ def render_sky_position_summary_table(
         columns={
             "line_swatch": "Line",
             "target": "Target",
+            "object_type_group": "Type",
             "first_visible": "First Visible",
             "culmination": "Peak",
             "last_visible": "Last Visible",
@@ -877,6 +914,7 @@ def render_sky_position_summary_table(
     column_config: dict[str, Any] = {
         "Line": st.column_config.TextColumn(width="small"),
         "Target": st.column_config.TextColumn(width="large"),
+        "Type": st.column_config.TextColumn(width="small"),
         "First Visible": st.column_config.DatetimeColumn(
             width="small",
             format=("h:mm a" if use_12_hour else "HH:mm"),
@@ -1060,6 +1098,21 @@ def _interpolate_color_stops(value: float, color_stops: list[tuple[float, str]])
     green = int(round(l_g + (u_g - l_g) * t))
     blue = int(round(l_b + (u_b - l_b) * t))
     return _rgb_to_hex((red, green, blue))
+
+
+def _adjust_hex_saturation(value: str, saturation_factor: float) -> str:
+    factor = max(0.0, float(saturation_factor))
+    try:
+        red, green, blue = _hex_to_rgb(value)
+    except Exception:
+        red, green, blue = _hex_to_rgb(OBJECT_TYPE_GROUP_COLOR_DEFAULT)
+
+    h, s, v = colorsys.rgb_to_hsv(red / 255.0, green / 255.0, blue / 255.0)
+    # Apply absolute saturation-step reduction (10 points per step) so adjacent
+    # same-group lines are visibly distinct even when base colors are already muted.
+    adjusted_s = max(0.0, min(1.0, s - max(0.0, 1.0 - factor)))
+    new_r, new_g, new_b = colorsys.hsv_to_rgb(h, adjusted_s, v)
+    return _rgb_to_hex((int(round(new_r * 255)), int(round(new_g * 255)), int(round(new_b * 255))))
 
 
 def _interpolate_cloud_cover_color(cloud_cover_percent: float) -> str:
@@ -3485,7 +3538,18 @@ def render_detail_panel(
     window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
     selected_common_name = str(selected.get("common_name") or "").strip()
     selected_label = f"{target_id} - {selected_common_name}" if selected_common_name else target_id
-    selected_color = target_line_color(target_id)
+    group_sequence_counts: dict[str, int] = {}
+
+    def _next_group_plot_color(group_label: str | None) -> str:
+        group_key = str(group_label or "").strip() or "other"
+        occurrence = group_sequence_counts.get(group_key, 0)
+        group_sequence_counts[group_key] = occurrence + 1
+        base_color = object_type_group_color(group_key)
+        saturation_factor = max(0.0, 1.0 - (0.10 * occurrence))
+        return _adjust_hex_saturation(base_color, saturation_factor)
+
+    selected_group = str(selected.get("object_type_group") or "").strip() or "other"
+    selected_color = _next_group_plot_color(selected_group)
     summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
     selected_line_width = (
         (PATH_LINE_WIDTH_PRIMARY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
@@ -3526,13 +3590,15 @@ def render_detail_panel(
         set_list_common_name = str(set_list_target.get("common_name") or "").strip()
         set_list_label = f"{set_list_target_id} - {set_list_common_name}" if set_list_common_name else set_list_target_id
         set_list_emission_details = re.sub(r"[\[\]]", "", clean_text(set_list_target.get("emission_lines")))
+        set_list_group = str(set_list_target.get("object_type_group") or "").strip() or "other"
         set_list_tracks.append(
             {
                 "primary_id": set_list_target_id,
                 "common_name": set_list_common_name,
                 "label": set_list_label,
+                "object_type_group": set_list_group,
                 "emission_lines_display": set_list_emission_details,
-                "color": target_line_color(set_list_target_id),
+                "color": _next_group_plot_color(set_list_group),
                 "line_width": (
                     (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
                     if summary_highlight_id == set_list_target_id
@@ -3642,6 +3708,7 @@ def render_detail_panel(
         summary_rows = build_sky_position_summary_rows(
             selected_id=target_id,
             selected_label=selected_label,
+            selected_type_group=selected_group,
             selected_color=selected_color,
             selected_events=events,
             selected_track=track,
