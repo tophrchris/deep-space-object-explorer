@@ -40,7 +40,7 @@ ENRICHED_OPTIONAL_COLUMNS = [
 ]
 
 CATALOG_CACHE_MAX_AGE_HOURS = 24
-INGESTION_VERSION = 5
+INGESTION_VERSION = 6
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
 SIMBAD_TAP_SYNC_ENDPOINTS = [
@@ -957,15 +957,15 @@ def load_unified_catalog(
             source_parts.append(str(seed_path))
             notes.append(f"OpenNGC ingest failed: {_error_summary(error)}")
 
-        try:
-            simbad_named_objects = fetch_simbad_named_objects()
-            source_parts.append("SIMBAD NAME objects (sim-tap)")
-            simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
-        except Exception as error:
-            simbad_metadata["named_object_rows"] = 0
-            notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
+    try:
+        simbad_named_objects = fetch_simbad_named_objects()
+        source_parts.append("SIMBAD NAME objects (sim-tap)")
+        simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
+    except Exception as error:
+        simbad_metadata["named_object_rows"] = 0
+        notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
 
-    if not prefer_enriched and simbad_named_objects is not None:
+    if simbad_named_objects is not None:
         try:
             simbad_named_frame = ingest_all_from_simbad_named_objects(simbad_named_objects)
             simbad_metadata["named_catalog_rows"] = int(len(simbad_named_frame))
@@ -978,19 +978,26 @@ def load_unified_catalog(
             if simbad_sh2_count > 0:
                 simbad_metadata["sh2_source"] = "simbad"
                 simbad_metadata["sh2_row_count"] = simbad_sh2_count
-            else:
+            elif not prefer_enriched:
                 sh2_frame = ingest_sh2_from_seed(seed_path)
                 frame = merge_catalogs(frame, sh2_frame)
                 simbad_metadata["sh2_source"] = "seed_fallback"
                 simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
                 notes.append("SIMBAD SH2 ingest fallback: no SH2 rows mapped from named-object source")
+            elif "sh2_source" not in simbad_metadata:
+                simbad_metadata["sh2_source"] = "enriched_csv"
+                simbad_metadata["sh2_row_count"] = int((frame["catalog"] == "SH2").sum())
         except Exception as error:
-            sh2_frame = ingest_sh2_from_seed(seed_path)
-            frame = merge_catalogs(frame, sh2_frame)
             simbad_metadata["named_catalog_rows"] = 0
             simbad_metadata["named_new_rows_added"] = 0
-            simbad_metadata["sh2_source"] = "seed_fallback"
-            simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+            if not prefer_enriched:
+                sh2_frame = ingest_sh2_from_seed(seed_path)
+                frame = merge_catalogs(frame, sh2_frame)
+                simbad_metadata["sh2_source"] = "seed_fallback"
+                simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+            elif "sh2_source" not in simbad_metadata:
+                simbad_metadata["sh2_source"] = "enriched_csv"
+                simbad_metadata["sh2_row_count"] = int((frame["catalog"] == "SH2").sum())
             notes.append(f"SIMBAD full ingest failed: {_error_summary(error)}")
     elif not prefer_enriched:
         sh2_frame = ingest_sh2_from_seed(seed_path)
@@ -1001,7 +1008,7 @@ def load_unified_catalog(
         simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
         notes.append("SIMBAD SH2 ingest skipped: named-object source unavailable")
 
-    if not prefer_enriched and simbad_named_objects is not None:
+    if simbad_named_objects is not None:
         try:
             simbad_reference = build_simbad_m_ngc_reference(simbad_named_objects)
             frame, enriched_count = enrich_with_simbad_m_ngc(frame, simbad_reference)
