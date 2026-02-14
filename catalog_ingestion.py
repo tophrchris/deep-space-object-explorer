@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,6 @@ ENRICHED_OPTIONAL_COLUMNS = [
     "emission_lines",
 ]
 
-CATALOG_CACHE_MAX_AGE_HOURS = 24
 INGESTION_VERSION = 9
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
@@ -342,38 +341,6 @@ def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = normalized.sort_values(by=["catalog", "primary_id"], ascending=[True, True]).reset_index(drop=True)
 
     return normalized
-
-
-def _cache_is_fresh(cache_path: Path, max_age_hours: int) -> bool:
-    if not cache_path.exists():
-        return False
-
-    modified_at = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=timezone.utc)
-    age = datetime.now(timezone.utc) - modified_at
-    return age <= timedelta(hours=max_age_hours)
-
-
-def _cache_requires_rebuild(metadata: dict[str, Any]) -> bool:
-    version_raw = metadata.get("ingestion_version", 0)
-    row_count_raw = metadata.get("row_count", 0)
-
-    try:
-        version = int(version_raw)
-    except (TypeError, ValueError):
-        version = 0
-
-    try:
-        row_count = int(row_count_raw)
-    except (TypeError, ValueError):
-        row_count = 0
-
-    if version < INGESTION_VERSION:
-        return True
-
-    if row_count < 1000:
-        return True
-
-    return False
 
 
 def _read_metadata(metadata_path: Path) -> dict[str, Any]:
@@ -1103,20 +1070,9 @@ def load_unified_catalog(
     metadata_path: Path,
     enriched_path: Path | None = None,
     force_refresh: bool = False,
-    max_cache_age_hours: int = CATALOG_CACHE_MAX_AGE_HOURS,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     metadata = _read_metadata(metadata_path)
-    prefer_enriched = enriched_path is not None and enriched_path.exists()
-
-    can_use_cache = (
-        not force_refresh
-        and _cache_is_fresh(cache_path, max_cache_age_hours)
-        and not _cache_requires_rebuild(metadata)
-        and (
-            not prefer_enriched
-            or str(metadata.get("load_mode", "")) in {"enriched_csv", "enriched_csv_plus_cache"}
-        )
-    )
+    can_use_cache = (not force_refresh) and cache_path.exists()
 
     if can_use_cache:
         try:
@@ -1125,6 +1081,7 @@ def load_unified_catalog(
             metadata.setdefault("load_mode", "cache")
             metadata.setdefault("row_count", len(frame))
             metadata.setdefault("catalog_counts", frame["catalog"].value_counts().to_dict())
+            metadata.setdefault("cache_refresh_policy", "on_demand")
             return frame, metadata
         except Exception:
             pass
@@ -1133,6 +1090,7 @@ def load_unified_catalog(
     source_parts: list[str] = []
     simbad_metadata: dict[str, Any] = {}
     simbad_named_objects: pd.DataFrame | None = None
+    prefer_enriched = enriched_path is not None and enriched_path.exists()
 
     if prefer_enriched:
         try:
@@ -1257,7 +1215,7 @@ def load_unified_catalog(
         "loaded_at_utc": datetime.now(timezone.utc).isoformat(),
         "row_count": int(len(frame)),
         "catalog_counts": {str(key): int(value) for key, value in frame["catalog"].value_counts().to_dict().items()},
-        "cache_max_age_hours": int(max_cache_age_hours),
+        "cache_refresh_policy": "on_demand",
         "simbad": simbad_metadata,
     }
 
