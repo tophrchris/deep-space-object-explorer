@@ -17,8 +17,6 @@ venv/
 
 # Local persisted prototype state
 .state/preferences.json
-data/dso_catalog_cache.parquet
-data/dso_catalog_cache_meta.json
 
 # OS/editor
 .DS_Store

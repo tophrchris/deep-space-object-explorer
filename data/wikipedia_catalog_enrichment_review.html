@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wikipedia Enrichment Review</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: #d1d5db;
+      --accent: #0f766e;
+      --good: #166534;
+      --warn: #9a3412;
+      --reject: #7f1d1d;
+      --shadow: 0 6px 22px rgba(17,24,39,0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top right, #e6f4f1 0%, var(--bg) 40%);
+    }
+    .wrap {
+      max-width: none;
+      margin: 0 auto;
+      padding: 20px 18px 28px;
+    }
+    .hero {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 1.35rem;
+      letter-spacing: 0.01em;
+    }
+    .meta {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .stats {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .stat-btn {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: #f8fafc;
+      font-size: 0.85rem;
+      cursor: pointer;
+      text-align: left;
+      color: var(--text);
+    }
+    .stat-btn.active {
+      border-color: #0f766e;
+      box-shadow: inset 0 0 0 1px #0f766e;
+      background: #ecfeff;
+    }
+    .controls {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 12px;
+      display: grid;
+      grid-template-columns: 1.5fr 0.85fr 0.9fr 0.9fr 0.95fr 1fr 0.7fr auto auto;
+      gap: 8px;
+      margin-bottom: 14px;
+      align-items: center;
+    }
+    .controls input,
+    .controls select,
+    .controls button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #fff;
+      font-size: 0.9rem;
+    }
+    .controls button {
+      background: #f8fafc;
+      cursor: pointer;
+    }
+    .controls .check {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.88rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .bulk-controls {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 10px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .selection-summary {
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin-right: 4px;
+    }
+    .bulk-controls button {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #f8fafc;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .bulk-controls button:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 390px;
+    }
+    .img-wrap {
+      width: 100%;
+      height: 190px;
+      background: #eef2f7;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .body {
+      padding: 10px 12px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .title {
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.2;
+    }
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.35;
+    }
+    .status {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 0.74rem;
+      padding: 3px 8px;
+      width: fit-content;
+      background: #f8fafc;
+    }
+    .status.matched {
+      border-color: #86efac;
+      background: #f0fdf4;
+      color: var(--good);
+    }
+    .status.no_match {
+      border-color: #fdba74;
+      background: #fff7ed;
+      color: var(--warn);
+    }
+    .status.rejected {
+      border-color: #fca5a5;
+      background: #fef2f2;
+      color: var(--reject);
+    }
+    .desc {
+      margin: 0;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: auto;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 0.73rem;
+      color: #334155;
+    }
+    .link {
+      text-decoration: none;
+      color: var(--accent);
+      font-size: 0.82rem;
+    }
+    .action-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 2px;
+    }
+    .action-btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 9px;
+      padding: 5px 8px;
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    .action-btn.reject-btn {
+      border-color: #fecaca;
+      color: var(--reject);
+      background: #fff7f7;
+    }
+    .action-btn.reject-btn.active {
+      border-color: #ef4444;
+      color: #fff;
+      background: #b91c1c;
+    }
+    .select-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 9px;
+      padding: 5px 8px;
+      user-select: none;
+      cursor: pointer;
+    }
+    .select-item input {
+      margin: 0;
+    }
+    .pager {
+      margin: 14px 0 2px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+    }
+    .pager button {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    .pager button:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 24px 0;
+    }
+    .empty.error {
+      color: var(--reject);
+      background: #fff5f5;
+      border: 1px solid #fecaca;
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    @media (max-width: 1100px) {
+      .controls {
+        grid-template-columns: 1fr 1fr 1fr 1fr;
+      }
+    }
+    @media (max-width: 680px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Wikipedia Catalog Enrichment Review</h1>
+      <p class="meta" id="metaLine"></p>
+      <div class="stats" id="topStats"></div>
+    </section>
+
+    <section class="controls">
+      <input id="search" type="search" placeholder="Search title, primary ID, description, designations..." />
+      <select id="statusFilter">
+        <option value="all">All statuses</option>
+        <option value="matched">Matched only</option>
+        <option value="no_match">No match only</option>
+        <option value="rejected">Rejected only</option>
+      </select>
+      <select id="catalogFilter">
+        <option value="all">All catalogs</option>
+      </select>
+      <select id="groupFilter">
+        <option value="all">All object groups</option>
+      </select>
+      <select id="descFilter">
+        <option value="all">All descriptions</option>
+        <option value="with">With description</option>
+        <option value="without">No description only</option>
+      </select>
+      <select id="sortBy">
+        <option value="score_desc">Sort: score high to low</option>
+        <option value="score_asc">Sort: score low to high</option>
+        <option value="title_asc">Sort: title A-Z</option>
+        <option value="primary_asc">Sort: primary ID A-Z</option>
+      </select>
+      <label class="check"><input id="imagesOnly" type="checkbox" /> Image only</label>
+      <select id="pageSize">
+        <option value="24">24 / page</option>
+        <option value="48" selected>48 / page</option>
+        <option value="96">96 / page</option>
+        <option value="200">200 / page</option>
+      </select>
+      <button id="exportRejectedBtn" type="button">Export rejected</button>
+      <button id="clearRejectedBtn" type="button">Clear rejected</button>
+    </section>
+
+    <section class="bulk-controls">
+      <span class="selection-summary" id="selectionSummary">0 selected</span>
+      <button id="selectPageBtn" type="button">Select all on page</button>
+      <button id="clearSelectedBtn" type="button">Clear selected</button>
+      <button id="rejectSelectedBtn" type="button">Reject selected</button>
+      <button id="unrejectSelectedBtn" type="button">Unreject selected</button>
+    </section>
+
+    <div class="empty" id="resultSummary"></div>
+    <section class="cards" id="cards"></section>
+    <div class="pager">
+      <button id="prevBtn">Prev</button>
+      <span id="pageLabel"></span>
+      <button id="nextBtn">Next</button>
+    </div>
+  </div>
+
+  <script>
+    const jsonPath = "wikipedia_catalog_enrichment.json";
+    const builtAt = "2026-02-14T23:29:50+00:00";
+    const REJECT_KEY = "wikipedia_enrichment_rejected_primary_ids_v1";
+
+    let payload = {};
+    let targets = [];
+    let generatedAt = "";
+    let selection = {};
+    let stats = {};
+
+    let currentPage = 1;
+    let metricFilter = "all";
+    let currentPageRows = [];
+
+    const searchEl = document.getElementById("search");
+    const statusEl = document.getElementById("statusFilter");
+    const catalogEl = document.getElementById("catalogFilter");
+    const groupEl = document.getElementById("groupFilter");
+    const descFilterEl = document.getElementById("descFilter");
+    const sortEl = document.getElementById("sortBy");
+    const imageOnlyEl = document.getElementById("imagesOnly");
+    const pageSizeEl = document.getElementById("pageSize");
+    const cardsEl = document.getElementById("cards");
+    const resultSummaryEl = document.getElementById("resultSummary");
+    const pageLabelEl = document.getElementById("pageLabel");
+    const prevBtnEl = document.getElementById("prevBtn");
+    const nextBtnEl = document.getElementById("nextBtn");
+    const topStatsEl = document.getElementById("topStats");
+    const exportRejectedBtnEl = document.getElementById("exportRejectedBtn");
+    const clearRejectedBtnEl = document.getElementById("clearRejectedBtn");
+    const selectionSummaryEl = document.getElementById("selectionSummary");
+    const selectPageBtnEl = document.getElementById("selectPageBtn");
+    const clearSelectedBtnEl = document.getElementById("clearSelectedBtn");
+    const rejectSelectedBtnEl = document.getElementById("rejectSelectedBtn");
+    const unrejectSelectedBtnEl = document.getElementById("unrejectSelectedBtn");
+
+    const rejectedIds = loadRejectedSet();
+    const selectedIds = new Set();
+
+    function norm(v) {
+      return String(v || "").toLowerCase();
+    }
+
+    function primaryIdOf(row) {
+      return String((row && row.primary_id) || "").trim();
+    }
+
+    function loadRejectedSet() {
+      try {
+        const raw = localStorage.getItem(REJECT_KEY);
+        if (!raw) return new Set();
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return new Set();
+        return new Set(parsed.map((item) => String(item || "").trim()).filter(Boolean));
+      } catch (_err) {
+        return new Set();
+      }
+    }
+
+    function saveRejectedSet() {
+      try {
+        localStorage.setItem(REJECT_KEY, JSON.stringify(Array.from(rejectedIds).sort()));
+      } catch (_err) {
+        // noop
+      }
+    }
+
+    function isRejectedRow(row) {
+      const pid = primaryIdOf(row);
+      return Boolean(pid) && rejectedIds.has(pid);
+    }
+
+    function effectiveStatus(row) {
+      if (isRejectedRow(row)) return "rejected";
+      return norm(row.status) || "unknown";
+    }
+
+    function hasImage(row) {
+      return String(row.image_url || "").trim() !== "";
+    }
+
+    function hasDesignations(row) {
+      return Array.isArray(row.designations) && row.designations.length > 0;
+    }
+
+    function hasDescription(row) {
+      const text = String(row.description || "").trim();
+      if (!text) return false;
+      const lowered = norm(text);
+      return lowered !== "no description available." && lowered !== "no description available";
+    }
+
+    function topText() {
+      const selCatalogs = (selection.catalogs || []).join(", ");
+      const selGroups = (selection.object_type_groups || []).join(", ");
+      return `Source JSON: ${jsonPath} | Generated: ${generatedAt || "-"} | HTML built: ${builtAt} | Catalogs: ${selCatalogs || "-"} | Groups: ${selGroups || "-"}`;
+    }
+
+    function computeCounts() {
+      let matched = 0;
+      let noMatch = 0;
+      let rejected = 0;
+      let withImage = 0;
+      let withDesignations = 0;
+
+      for (const row of targets) {
+        const s = effectiveStatus(row);
+        if (s === "matched") matched += 1;
+        else if (s === "no_match") noMatch += 1;
+        else if (s === "rejected") rejected += 1;
+
+        if (hasImage(row)) withImage += 1;
+        if (hasDesignations(row)) withDesignations += 1;
+      }
+
+      return {
+        total: targets.length,
+        matched,
+        no_match: noMatch,
+        rejected,
+        with_image: withImage,
+        with_designations: withDesignations,
+      };
+    }
+
+    function renderStats() {
+      document.getElementById("metaLine").textContent = topText();
+      const counts = computeCounts();
+      const items = [
+        { key: "all", label: "All", value: counts.total },
+        { key: "matched", label: "Matched", value: counts.matched },
+        { key: "no_match", label: "No Match", value: counts.no_match },
+        { key: "rejected", label: "Rejected", value: counts.rejected },
+        { key: "with_image", label: "With Image", value: counts.with_image },
+        { key: "with_designations", label: "With Designations", value: counts.with_designations },
+      ];
+      topStatsEl.innerHTML = items
+        .map((item) => `
+          <button type="button" class="stat-btn ${metricFilter === item.key ? "active" : ""}" data-metric="${item.key}">
+            <strong>${item.label}:</strong> ${item.value}
+          </button>
+        `)
+        .join("");
+    }
+
+    function populateSelect(selectEl, values, allLabel) {
+      const current = selectEl.value || "all";
+      const options = [`<option value="all">${allLabel}</option>`]
+        .concat(values.map((v) => `<option value="${v}">${v}</option>`));
+      selectEl.innerHTML = options.join("");
+      if (values.includes(current)) selectEl.value = current;
+      else selectEl.value = "all";
+    }
+
+    function populateDropdowns() {
+      const catalogs = Array.from(
+        new Set(targets.map((row) => String(row.catalog || "").trim()).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b));
+
+      const groups = Array.from(
+        new Set(targets.map((row) => String(row.object_type_group || "").trim()).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b));
+
+      populateSelect(catalogEl, catalogs, "All catalogs");
+      populateSelect(groupEl, groups, "All object groups");
+    }
+
+    function pagePrimaryIds() {
+      return currentPageRows.map(primaryIdOf).filter(Boolean);
+    }
+
+    function selectedOnPageCount() {
+      return pagePrimaryIds().filter((id) => selectedIds.has(id)).length;
+    }
+
+    function allPageItemsSelected() {
+      const ids = pagePrimaryIds();
+      return ids.length > 0 && ids.every((id) => selectedIds.has(id));
+    }
+
+    function updateSelectionControls() {
+      const pageIds = pagePrimaryIds();
+      const selectedOnPage = selectedOnPageCount();
+      selectionSummaryEl.textContent = `${selectedIds.size} selected (${selectedOnPage} on page)`;
+
+      selectPageBtnEl.disabled = pageIds.length === 0;
+      selectPageBtnEl.textContent = allPageItemsSelected() ? "Unselect page" : "Select all on page";
+      clearSelectedBtnEl.disabled = selectedIds.size === 0;
+      rejectSelectedBtnEl.disabled = selectedIds.size === 0;
+      unrejectSelectedBtnEl.disabled = selectedIds.size === 0;
+    }
+
+    function togglePageSelection() {
+      const ids = pagePrimaryIds();
+      if (!ids.length) return;
+      const allSelected = ids.every((id) => selectedIds.has(id));
+      if (allSelected) {
+        ids.forEach((id) => selectedIds.delete(id));
+      } else {
+        ids.forEach((id) => selectedIds.add(id));
+      }
+      render();
+    }
+
+    function applyBulkReject(shouldReject) {
+      if (!selectedIds.size) return;
+      let changed = 0;
+      for (const id of selectedIds) {
+        if (shouldReject) {
+          if (!rejectedIds.has(id)) {
+            rejectedIds.add(id);
+            changed += 1;
+          }
+        } else if (rejectedIds.has(id)) {
+          rejectedIds.delete(id);
+          changed += 1;
+        }
+      }
+      if (!changed) return;
+      saveRejectedSet();
+      currentPage = 1;
+      renderStats();
+      render();
+    }
+
+    function passesMetricFilter(row) {
+      if (metricFilter === "all") return true;
+      if (metricFilter === "matched") return effectiveStatus(row) === "matched";
+      if (metricFilter === "no_match") return effectiveStatus(row) === "no_match";
+      if (metricFilter === "rejected") return effectiveStatus(row) === "rejected";
+      if (metricFilter === "with_image") return hasImage(row);
+      if (metricFilter === "with_designations") return hasDesignations(row);
+      return true;
+    }
+
+    function filtered() {
+      const q = norm(searchEl.value).trim();
+      const status = statusEl.value;
+      const selectedCatalog = catalogEl.value;
+      const selectedGroup = groupEl.value;
+      const descMode = descFilterEl.value;
+      const imageOnly = imageOnlyEl.checked;
+
+      let rows = targets.filter((row) => {
+        if (status !== "all" && effectiveStatus(row) !== status) return false;
+        if (!passesMetricFilter(row)) return false;
+
+        const catalogValue = String(row.catalog || "").trim();
+        if (selectedCatalog !== "all" && catalogValue !== selectedCatalog) return false;
+
+        const groupValue = String(row.object_type_group || "").trim();
+        if (selectedGroup !== "all" && groupValue !== selectedGroup) return false;
+
+        if (descMode === "with" && !hasDescription(row)) return false;
+        if (descMode === "without" && hasDescription(row)) return false;
+
+        if (imageOnly && !hasImage(row)) return false;
+
+        if (!q) return true;
+        const fields = [
+          row.primary_id,
+          row.wikipedia_title,
+          row.common_name,
+          row.description,
+          row.object_type_group,
+          row.catalog,
+          Array.isArray(row.designations) ? row.designations.join(" ") : "",
+        ].map(norm);
+        return fields.some((field) => field.includes(q));
+      });
+
+      if (sortEl.value === "score_desc") {
+        rows.sort((a, b) => Number(b.match_score || 0) - Number(a.match_score || 0));
+      } else if (sortEl.value === "score_asc") {
+        rows.sort((a, b) => Number(a.match_score || 0) - Number(b.match_score || 0));
+      } else if (sortEl.value === "title_asc") {
+        rows.sort((a, b) => String(a.wikipedia_title || a.primary_id || "").localeCompare(String(b.wikipedia_title || b.primary_id || "")));
+      } else if (sortEl.value === "primary_asc") {
+        rows.sort((a, b) => String(a.primary_id || "").localeCompare(String(b.primary_id || "")));
+      }
+
+      return rows;
+    }
+
+    function card(row) {
+      const title = row.wikipedia_title || row.primary_id || "Unknown";
+      const reviewStatus = effectiveStatus(row);
+      const statusClass = reviewStatus === "matched" ? "matched" : (reviewStatus === "rejected" ? "rejected" : "no_match");
+      const statusLabel = reviewStatus === "rejected" ? "Rejected" : (row.status || "unknown");
+      const desc = hasDescription(row) ? String(row.description || "").trim() : "No description available.";
+      const image = String(row.image_url || "").trim();
+      const wiki = String(row.wikipedia_url || "").trim();
+      const designations = Array.isArray(row.designations) ? row.designations.slice(0, 6) : [];
+      const primaryId = primaryIdOf(row);
+      const pidEncoded = encodeURIComponent(primaryId);
+      const rejected = reviewStatus === "rejected";
+      const isSelected = Boolean(primaryId) && selectedIds.has(primaryId);
+
+      const imgHtml = image
+        ? `<img loading="lazy" src="${image}" alt="${title}" />`
+        : `<span>No image</span>`;
+
+      const chips = [
+        `catalog: ${row.catalog || "-"}`,
+        `group: ${row.object_type_group || "-"}`,
+        `score: ${row.match_score ?? "-"}`,
+        `sentences: ${row.description_sentence_count ?? 0}`,
+      ];
+      if (rejected) chips.push("review: rejected");
+      const chipHtml = chips.map((x) => `<span class="chip">${x}</span>`).join("");
+
+      const designationHtml = designations.length
+        ? `<div class="meta-row">${designations.map((d) => `<span class="chip">${d}</span>`).join("")}</div>`
+        : "";
+
+      const linkHtml = wiki ? `<a class="link" target="_blank" rel="noopener noreferrer" href="${wiki}">Open Wikipedia page</a>` : "";
+      const subtitle = `${row.primary_id || "-"} • ${row.common_name || "No common name"}`;
+      const rejectBtnHtml = primaryId
+        ? `<button type="button" class="action-btn reject-btn ${rejected ? "active" : ""}" data-reject-id="${pidEncoded}">${rejected ? "Unreject" : "Reject"}</button>`
+        : "";
+      const selectHtml = primaryId
+        ? `<label class="select-item"><input type="checkbox" data-select-id="${pidEncoded}" ${isSelected ? "checked" : ""} /> Select</label>`
+        : "";
+
+      return `
+        <article class="card">
+          <div class="img-wrap">${imgHtml}</div>
+          <div class="body">
+            <h3 class="title">${title}</h3>
+            <p class="subtitle">${subtitle}</p>
+            <span class="status ${statusClass}">${statusLabel}</span>
+            <p class="desc">${desc}</p>
+            <div class="action-row">${rejectBtnHtml}${selectHtml}</div>
+            ${linkHtml}
+            <div class="meta-row">${chipHtml}</div>
+            ${designationHtml}
+          </div>
+        </article>
+      `;
+    }
+
+    function render() {
+      resultSummaryEl.classList.remove("error");
+      const rows = filtered();
+      const pageSize = Number(pageSizeEl.value || 48);
+      const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+      if (currentPage > totalPages) currentPage = totalPages;
+      if (currentPage < 1) currentPage = 1;
+
+      const start = (currentPage - 1) * pageSize;
+      const end = start + pageSize;
+      const pageRows = rows.slice(start, end);
+      currentPageRows = pageRows;
+
+      const metricText = metricFilter === "all" ? "all metrics" : `metric=${metricFilter}`;
+      resultSummaryEl.textContent = `Showing ${pageRows.length} of ${rows.length} filtered targets (${targets.length} total, ${metricText}, ${rejectedIds.size} rejected locally, ${selectedIds.size} selected).`;
+      pageLabelEl.textContent = `Page ${currentPage} / ${totalPages}`;
+      prevBtnEl.disabled = currentPage <= 1;
+      nextBtnEl.disabled = currentPage >= totalPages;
+
+      if (!pageRows.length) {
+        cardsEl.innerHTML = "";
+        resultSummaryEl.textContent = "No targets match this filter.";
+        updateSelectionControls();
+        return;
+      }
+      cardsEl.innerHTML = pageRows.map(card).join("");
+      updateSelectionControls();
+    }
+
+    function downloadJson(filename, obj) {
+      const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function showLoadError(message) {
+      cardsEl.innerHTML = "";
+      currentPageRows = [];
+      pageLabelEl.textContent = "";
+      prevBtnEl.disabled = true;
+      nextBtnEl.disabled = true;
+      resultSummaryEl.classList.add("error");
+      resultSummaryEl.textContent = message;
+      updateSelectionControls();
+    }
+
+    async function loadPayload() {
+      resultSummaryEl.classList.remove("error");
+      resultSummaryEl.textContent = `Loading enrichment data from ${jsonPath} ...`;
+      try {
+        const response = await fetch(jsonPath, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const loaded = await response.json();
+        if (!loaded || typeof loaded !== "object") throw new Error("JSON payload is not an object");
+
+        payload = loaded;
+        targets = Array.isArray(payload.targets) ? payload.targets : [];
+        generatedAt = payload.generated_at_utc || "";
+        selection = payload.selection || {};
+        stats = payload.stats || {};
+
+        const validIds = new Set(targets.map(primaryIdOf).filter(Boolean));
+        for (const id of Array.from(selectedIds)) {
+          if (!validIds.has(id)) selectedIds.delete(id);
+        }
+
+        populateDropdowns();
+        renderStats();
+        render();
+      } catch (error) {
+        console.error(error);
+        const hint = window.location.protocol === "file:"
+          ? " If you opened this via file://, start a local server (python -m http.server 8000) and open http://127.0.0.1:8000/data/wikipedia_catalog_enrichment_review.html."
+          : "";
+        showLoadError(`Failed to load enrichment JSON at ${jsonPath}. ${error.message || error}.${hint}`);
+      }
+    }
+
+    [searchEl, statusEl, catalogEl, groupEl, descFilterEl, sortEl, imageOnlyEl, pageSizeEl].forEach((el) => {
+      el.addEventListener("input", () => {
+        currentPage = 1;
+        render();
+      });
+      el.addEventListener("change", () => {
+        currentPage = 1;
+        render();
+      });
+    });
+
+    topStatsEl.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-metric]");
+      if (!button) return;
+      const next = String(button.getAttribute("data-metric") || "all");
+      metricFilter = metricFilter === next ? "all" : next;
+      currentPage = 1;
+      renderStats();
+      render();
+    });
+
+    cardsEl.addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-reject-id]");
+      if (!btn) return;
+      const encoded = btn.getAttribute("data-reject-id") || "";
+      const primaryId = decodeURIComponent(encoded);
+      if (!primaryId) return;
+      if (rejectedIds.has(primaryId)) rejectedIds.delete(primaryId);
+      else rejectedIds.add(primaryId);
+      saveRejectedSet();
+      currentPage = 1;
+      renderStats();
+      render();
+    });
+
+    cardsEl.addEventListener("change", (event) => {
+      const input = event.target.closest("input[type='checkbox'][data-select-id]");
+      if (!input) return;
+      const encoded = input.getAttribute("data-select-id") || "";
+      const primaryId = decodeURIComponent(encoded);
+      if (!primaryId) return;
+      if (input.checked) selectedIds.add(primaryId);
+      else selectedIds.delete(primaryId);
+      render();
+    });
+
+    selectPageBtnEl.addEventListener("click", () => {
+      togglePageSelection();
+    });
+
+    clearSelectedBtnEl.addEventListener("click", () => {
+      if (!selectedIds.size) return;
+      selectedIds.clear();
+      render();
+    });
+
+    rejectSelectedBtnEl.addEventListener("click", () => {
+      applyBulkReject(true);
+    });
+
+    unrejectSelectedBtnEl.addEventListener("click", () => {
+      applyBulkReject(false);
+    });
+
+    exportRejectedBtnEl.addEventListener("click", () => {
+      const ids = Array.from(rejectedIds).sort();
+      const rejectedTargets = targets.filter((row) => ids.includes(String(row.primary_id || "").trim()));
+      const exportPayload = {
+        exported_at_utc: new Date().toISOString(),
+        source_json: jsonPath,
+        rejected_count: ids.length,
+        rejected_primary_ids: ids,
+        rejected_targets: rejectedTargets,
+      };
+      downloadJson("wikipedia_catalog_rejected_targets.json", exportPayload);
+    });
+
+    clearRejectedBtnEl.addEventListener("click", () => {
+      if (!rejectedIds.size) return;
+      if (!window.confirm(`Clear ${rejectedIds.size} rejected targets?`)) return;
+      rejectedIds.clear();
+      saveRejectedSet();
+      currentPage = 1;
+      renderStats();
+      render();
+    });
+
+    prevBtnEl.addEventListener("click", () => {
+      currentPage -= 1;
+      render();
+    });
+    nextBtnEl.addEventListener("click", () => {
+      currentPage += 1;
+      render();
+    });
+
+    updateSelectionControls();
+    loadPayload();
+  </script>
+</body>
+</html>
