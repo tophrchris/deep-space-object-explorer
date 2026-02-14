@@ -60,6 +60,7 @@ def list_catalog_filters(catalog: pd.DataFrame) -> dict[str, list[str]]:
     return {
         "catalogs": _sorted_unique("catalog"),
         "object_types": _sorted_unique("object_type"),
+        "object_type_groups": _sorted_unique("object_type_group"),
         "constellations": _sorted_unique("constellation"),
     }
 
@@ -256,11 +257,21 @@ def _ensure_search_index(catalog: pd.DataFrame) -> pd.DataFrame:
 
 def _build_search_index(frame: pd.DataFrame) -> pd.DataFrame:
     indexed = frame.copy()
-    for column in ["common_name", "object_type", "constellation", "aliases", "catalog", "description", "emission_lines"]:
+    for column in [
+        "common_name",
+        "object_type",
+        "object_type_group",
+        "constellation",
+        "aliases",
+        "catalog",
+        "description",
+        "emission_lines",
+    ]:
         if column in indexed.columns:
             indexed[column] = indexed[column].fillna("")
 
     object_type_text = indexed["object_type"].fillna("") if "object_type" in indexed.columns else ""
+    object_type_group_text = indexed["object_type_group"].fillna("") if "object_type_group" in indexed.columns else ""
     emission_lines_text = indexed["emission_lines"].fillna("") if "emission_lines" in indexed.columns else ""
 
     indexed["primary_id_norm"] = indexed["primary_id"].map(normalize_text)
@@ -277,6 +288,8 @@ def _build_search_index(frame: pd.DataFrame) -> pd.DataFrame:
         + indexed["description"].fillna("")
         + " "
         + object_type_text
+        + " "
+        + object_type_group_text
         + " "
         + emission_lines_text
     ).map(normalize_text)

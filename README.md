@@ -94,6 +94,13 @@ Notes:
 - more instructional content
 - "about this app" page with contact info
 
+- have multiple set lists
+- ability to give a nickname to an object
+
+- for each wind4, for each hour, find the best target of each type (emission? galaxy? cluster?) in terms of number of minutes in the sweet zone (unobstructed, not too high/low based on mount)
+
+- object type based colors for paths
+
 ## Notes
 
 - Catalog ingest loads full OpenNGC data and augments it with SIMBAD (`NAME` objects are retained, with unmatched rows kept as `SIMBAD` catalog entries).

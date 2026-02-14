@@ -24,6 +24,7 @@ REQUIRED_COLUMNS = [
 OPTIONAL_COLUMNS = [
     "constellation",
     "aliases",
+    "object_type_group",
     "image_url",
     "image_attribution_url",
     "license_label",
@@ -40,9 +41,13 @@ ENRICHED_OPTIONAL_COLUMNS = [
 ]
 
 CATALOG_CACHE_MAX_AGE_HOURS = 24
-INGESTION_VERSION = 5
+INGESTION_VERSION = 9
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
+SIMBAD_OTYPE_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "simbad_otype_mapping.csv"
+OBJECT_TYPE_GROUP_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "object_type_groups.csv"
+OBJECT_TYPE_GROUP_DEFAULT = "other"
+SIMBAD_OTYPE_DESCRIPTION_PREFIX = "SIMBAD object type: "
 SIMBAD_TAP_SYNC_ENDPOINTS = [
     "https://simbad.cds.unistra.fr/simbad/sim-tap/sync",
     "https://simbad.u-strasbg.fr/simbad/sim-tap/sync",
@@ -93,6 +98,186 @@ OPENNGC_TYPE_MAP = {
 }
 
 
+def _load_simbad_otype_mapping(
+    mapping_path: Path = SIMBAD_OTYPE_MAPPING_PATH,
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+    if not mapping_path.exists():
+        return {}, {}
+
+    try:
+        source = pd.read_csv(mapping_path, keep_default_na=False)
+    except Exception:
+        return {}, {}
+
+    required_columns = {"otype", "label", "description"}
+    if not required_columns.issubset(source.columns):
+        return {}, {}
+
+    exact: dict[str, tuple[str, str]] = {}
+    lower: dict[str, tuple[str, str]] = {}
+    for _, row in source.iterrows():
+        otype = str(row.get("otype", "")).strip()
+        if not otype:
+            continue
+        label = str(row.get("label", "")).strip() or otype
+        description = str(row.get("description", "")).strip()
+        exact[otype] = (label, description)
+        lower[otype.lower()] = (label, description)
+    return exact, lower
+
+
+SIMBAD_OTYPE_MAP_EXACT, SIMBAD_OTYPE_MAP_LOWER = _load_simbad_otype_mapping()
+
+
+def _normalize_object_type_key(raw_value: Any) -> str:
+    text = str(raw_value or "").strip().lower()
+    if not text or text == "nan":
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _load_object_type_group_mapping(
+    mapping_path: Path = OBJECT_TYPE_GROUP_MAPPING_PATH,
+) -> tuple[dict[str, str], dict[str, str]]:
+    if not mapping_path.exists():
+        return {}, {}
+
+    try:
+        source = pd.read_csv(mapping_path, keep_default_na=False)
+    except Exception:
+        return {}, {}
+
+    required_columns = {"group_label", "source_object_type", "canonical_object_type"}
+    if not required_columns.issubset(source.columns):
+        return {}, {}
+
+    rename_map: dict[str, str] = {}
+    group_map: dict[str, str] = {}
+
+    for _, row in source.iterrows():
+        group_label = str(row.get("group_label", "")).strip()
+        source_type = str(row.get("source_object_type", "")).strip()
+        canonical_type = str(row.get("canonical_object_type", "")).strip() or source_type
+        if not group_label or not source_type:
+            continue
+
+        source_key = _normalize_object_type_key(source_type)
+        canonical_key = _normalize_object_type_key(canonical_type)
+        if not source_key:
+            continue
+
+        if source_key not in rename_map:
+            rename_map[source_key] = canonical_type
+        if source_key not in group_map:
+            group_map[source_key] = group_label
+        if canonical_key and canonical_key not in group_map:
+            group_map[canonical_key] = group_label
+
+    return rename_map, group_map
+
+
+OBJECT_TYPE_RENAME_MAP, OBJECT_TYPE_GROUP_MAP = _load_object_type_group_mapping()
+
+
+def _resolve_object_type_grouping(raw_object_type: Any) -> tuple[str, str]:
+    raw_text = str(raw_object_type or "").strip()
+    if not raw_text or raw_text.lower() == "nan":
+        return "", OBJECT_TYPE_GROUP_DEFAULT
+
+    object_type_key = _normalize_object_type_key(raw_text)
+    canonical = OBJECT_TYPE_RENAME_MAP.get(object_type_key, raw_text)
+    canonical_key = _normalize_object_type_key(canonical)
+    group = (
+        OBJECT_TYPE_GROUP_MAP.get(canonical_key)
+        or OBJECT_TYPE_GROUP_MAP.get(object_type_key)
+        or OBJECT_TYPE_GROUP_DEFAULT
+    )
+    return canonical, group
+
+
+def _resolve_simbad_object_type(raw_otype: Any) -> tuple[str, str, bool]:
+    otype = str(raw_otype or "").strip()
+    if not otype or otype.lower() == "nan":
+        return "", "", False
+
+    mapped = SIMBAD_OTYPE_MAP_EXACT.get(otype)
+    if mapped is None:
+        mapped = SIMBAD_OTYPE_MAP_LOWER.get(otype.lower())
+    if mapped is None:
+        return otype, "", False
+
+    label, description = mapped
+    return (label or otype), description, True
+
+
+def _append_simbad_type_description(existing_description: Any, type_description: str) -> str:
+    base = str(existing_description or "").strip()
+    detail = str(type_description or "").strip()
+    if not detail:
+        return base
+
+    suffix = f"{SIMBAD_OTYPE_DESCRIPTION_PREFIX}{detail}."
+    lowered_base = base.lower()
+    lowered_suffix = suffix.lower()
+    if lowered_suffix in lowered_base or detail.lower() in lowered_base:
+        return base
+    if not base:
+        return suffix
+    return f"{base} {suffix}"
+
+
+def apply_simbad_object_type_labels(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    if frame.empty:
+        return _normalize_frame(frame), 0
+
+    updated = frame.copy()
+    changes = 0
+    for idx, row in updated.iterrows():
+        object_type_raw = str(row.get("object_type", "")).strip()
+        label, type_description, matched = _resolve_simbad_object_type(object_type_raw)
+        if not matched:
+            continue
+
+        changed = False
+        if label and label != object_type_raw:
+            updated.at[idx, "object_type"] = label
+            changed = True
+
+        existing_description = str(row.get("description", "")).strip()
+        appended_description = _append_simbad_type_description(existing_description, type_description)
+        if appended_description != existing_description:
+            updated.at[idx, "description"] = appended_description
+            changed = True
+
+        if changed:
+            changes += 1
+
+    return _normalize_frame(updated), int(changes)
+
+
+def apply_object_type_groups(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+    if frame.empty:
+        return _normalize_frame(frame), 0, 0
+
+    updated = frame.copy()
+    rename_updates = 0
+    group_updates = 0
+    for idx, row in updated.iterrows():
+        raw_object_type = str(row.get("object_type", "")).strip()
+        existing_group = str(row.get("object_type_group", "")).strip()
+        canonical_type, object_type_group = _resolve_object_type_grouping(raw_object_type)
+
+        if canonical_type and canonical_type != raw_object_type:
+            updated.at[idx, "object_type"] = canonical_type
+            rename_updates += 1
+
+        if object_type_group != existing_group:
+            updated.at[idx, "object_type_group"] = object_type_group
+            group_updates += 1
+
+    return _normalize_frame(updated), int(rename_updates), int(group_updates)
+
+
 def _merge_alias_values(existing: str, additions: list[str]) -> str:
     merged: list[str] = []
     seen: set[str] = set()
@@ -137,6 +322,7 @@ def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     normalized["catalog"] = normalized["catalog"].fillna("").astype(str).str.upper().str.strip()
     normalized["common_name"] = normalized["common_name"].fillna("").astype(str).str.strip()
     normalized["object_type"] = normalized["object_type"].fillna("").astype(str).str.strip()
+    normalized["object_type_group"] = normalized["object_type_group"].fillna("").astype(str).str.strip()
     normalized["constellation"] = normalized["constellation"].fillna("").astype(str).str.strip()
     normalized["aliases"] = normalized["aliases"].fillna("").astype(str).str.strip()
     normalized["description"] = normalized["description"].fillna("").astype(str).str.strip()
@@ -489,13 +675,14 @@ def ingest_all_from_simbad_named_objects(named_objects: pd.DataFrame) -> pd.Data
         if not oid:
             continue
 
+        object_type_label, object_type_description, _ = _resolve_simbad_object_type(row.get("otype", ""))
         if oid not in records_by_oid:
             records_by_oid[oid] = {
                 "_oid": oid,
                 "primary_id": f"SIMBAD OID {oid}",
                 "catalog": "SIMBAD",
                 "common_name": "",
-                "object_type": str(row.get("otype", "")).strip(),
+                "object_type": object_type_label,
                 "ra_deg": row.get("ra", ""),
                 "dec_deg": row.get("dec", ""),
                 "constellation": "",
@@ -503,6 +690,7 @@ def ingest_all_from_simbad_named_objects(named_objects: pd.DataFrame) -> pd.Data
                 "image_url": "",
                 "image_attribution_url": "",
                 "license_label": "",
+                "description": _append_simbad_type_description("", object_type_description),
             }
 
         entry = records_by_oid[oid]
@@ -540,7 +728,12 @@ def ingest_all_from_simbad_named_objects(named_objects: pd.DataFrame) -> pd.Data
                     break
 
         if not str(entry.get("object_type", "")).strip():
-            entry["object_type"] = str(row.get("otype", "")).strip()
+            entry["object_type"] = object_type_label
+        if object_type_description:
+            entry["description"] = _append_simbad_type_description(
+                entry.get("description", ""),
+                object_type_description,
+            )
 
     if not records_by_oid:
         raise ValueError("SIMBAD named-object query could not map any rows")
@@ -582,12 +775,13 @@ def ingest_sh2_from_simbad(named_objects: pd.DataFrame) -> pd.DataFrame:
         if primary_id is None:
             continue
 
+        object_type_label, object_type_description, _ = _resolve_simbad_object_type(row.get("otype", ""))
         if primary_id not in records:
             records[primary_id] = {
                 "primary_id": primary_id,
                 "catalog": "SH2",
                 "common_name": "",
-                "object_type": str(row.get("otype", "")).strip(),
+                "object_type": object_type_label,
                 "ra_deg": row.get("ra", ""),
                 "dec_deg": row.get("dec", ""),
                 "constellation": "",
@@ -595,6 +789,7 @@ def ingest_sh2_from_simbad(named_objects: pd.DataFrame) -> pd.DataFrame:
                 "image_url": "",
                 "image_attribution_url": "",
                 "license_label": "",
+                "description": _append_simbad_type_description("", object_type_description),
             }
 
         name_identifier = str(row.get("name_identifier", "")).strip()
@@ -607,6 +802,13 @@ def ingest_sh2_from_simbad(named_objects: pd.DataFrame) -> pd.DataFrame:
         entry["aliases"] = _merge_alias_values(str(entry.get("aliases", "")), alias_candidates)
         if not entry["common_name"] and main_id and main_id != primary_id:
             entry["common_name"] = main_id
+        if not str(entry.get("object_type", "")).strip():
+            entry["object_type"] = object_type_label
+        if object_type_description:
+            entry["description"] = _append_simbad_type_description(
+                entry.get("description", ""),
+                object_type_description,
+            )
 
     if not records:
         raise ValueError("SIMBAD named-object query could not map any SH2 rows")
@@ -636,11 +838,13 @@ def build_simbad_m_ngc_reference(named_objects: pd.DataFrame) -> pd.DataFrame:
         if primary_id is None:
             continue
 
+        object_type_label, object_type_description, _ = _resolve_simbad_object_type(row.get("otype", ""))
         if primary_id not in records:
             records[primary_id] = {
                 "primary_id": primary_id,
                 "main_id": str(row.get("main_id", "")).strip(),
-                "object_type": str(row.get("otype", "")).strip(),
+                "object_type": object_type_label,
+                "object_type_description": object_type_description,
                 "aliases": "",
             }
 
@@ -653,8 +857,10 @@ def build_simbad_m_ngc_reference(named_objects: pd.DataFrame) -> pd.DataFrame:
         )
         if not entry["main_id"] and main_id:
             entry["main_id"] = main_id
-        if not entry["object_type"] and str(row.get("otype", "")).strip():
-            entry["object_type"] = str(row.get("otype", "")).strip()
+        if not entry["object_type"] and object_type_label:
+            entry["object_type"] = object_type_label
+        if not str(entry.get("object_type_description", "")).strip() and object_type_description:
+            entry["object_type_description"] = object_type_description
 
     if not records:
         raise ValueError("SIMBAD named-object query did not yield mappable M/NGC identifiers")
@@ -685,9 +891,16 @@ def enrich_with_simbad_m_ngc(frame: pd.DataFrame, simbad_reference: pd.DataFrame
             changed = True
 
         simbad_object_type = str(simbad_row.get("object_type", "")).strip()
+        simbad_type_description = str(simbad_row.get("object_type_description", "")).strip()
         existing_object_type = str(row.get("object_type", "")).strip()
         if (not existing_object_type or existing_object_type.lower() in {"other", "-"}) and simbad_object_type:
             enriched.at[idx, "object_type"] = simbad_object_type
+            changed = True
+
+        existing_description = str(row.get("description", "")).strip()
+        description_with_type = _append_simbad_type_description(existing_description, simbad_type_description)
+        if description_with_type != existing_description:
+            enriched.at[idx, "description"] = description_with_type
             changed = True
 
         merged_aliases = _merge_alias_values(
@@ -742,7 +955,12 @@ def ingest_from_enriched_csv(enriched_path: Path) -> pd.DataFrame:
 
         object_type_norm = str(row.get("object_type_norm", "")).strip()
         object_type_simbad = str(row.get("object_type_simbad", "")).strip()
-        object_type = object_type_norm or object_type_simbad
+        object_type_label, object_type_description, _ = _resolve_simbad_object_type(object_type_simbad)
+        object_type = object_type_norm or object_type_label
+        description_value = _append_simbad_type_description(
+            str(row.get("description", "")).strip(),
+            object_type_description,
+        )
 
         records.append(
             {
@@ -757,7 +975,7 @@ def ingest_from_enriched_csv(enriched_path: Path) -> pd.DataFrame:
                 "image_url": str(row.get("hero_image_url", "")).strip(),
                 "image_attribution_url": info_url,
                 "license_label": str(row.get("hero_image_credit", "")).strip(),
-                "description": str(row.get("description", "")).strip(),
+                "description": description_value,
                 "info_url": info_url,
                 "dist_value": row.get("dist_value", ""),
                 "dist_unit": str(row.get("dist_unit", "")).strip(),
@@ -957,15 +1175,15 @@ def load_unified_catalog(
             source_parts.append(str(seed_path))
             notes.append(f"OpenNGC ingest failed: {_error_summary(error)}")
 
-        try:
-            simbad_named_objects = fetch_simbad_named_objects()
-            source_parts.append("SIMBAD NAME objects (sim-tap)")
-            simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
-        except Exception as error:
-            simbad_metadata["named_object_rows"] = 0
-            notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
+    try:
+        simbad_named_objects = fetch_simbad_named_objects()
+        source_parts.append("SIMBAD NAME objects (sim-tap)")
+        simbad_metadata["named_object_rows"] = int(len(simbad_named_objects))
+    except Exception as error:
+        simbad_metadata["named_object_rows"] = 0
+        notes.append(f"SIMBAD named-object query failed: {_error_summary(error)}")
 
-    if not prefer_enriched and simbad_named_objects is not None:
+    if simbad_named_objects is not None:
         try:
             simbad_named_frame = ingest_all_from_simbad_named_objects(simbad_named_objects)
             simbad_metadata["named_catalog_rows"] = int(len(simbad_named_frame))
@@ -978,19 +1196,26 @@ def load_unified_catalog(
             if simbad_sh2_count > 0:
                 simbad_metadata["sh2_source"] = "simbad"
                 simbad_metadata["sh2_row_count"] = simbad_sh2_count
-            else:
+            elif not prefer_enriched:
                 sh2_frame = ingest_sh2_from_seed(seed_path)
                 frame = merge_catalogs(frame, sh2_frame)
                 simbad_metadata["sh2_source"] = "seed_fallback"
                 simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
                 notes.append("SIMBAD SH2 ingest fallback: no SH2 rows mapped from named-object source")
+            elif "sh2_source" not in simbad_metadata:
+                simbad_metadata["sh2_source"] = "enriched_csv"
+                simbad_metadata["sh2_row_count"] = int((frame["catalog"] == "SH2").sum())
         except Exception as error:
-            sh2_frame = ingest_sh2_from_seed(seed_path)
-            frame = merge_catalogs(frame, sh2_frame)
             simbad_metadata["named_catalog_rows"] = 0
             simbad_metadata["named_new_rows_added"] = 0
-            simbad_metadata["sh2_source"] = "seed_fallback"
-            simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+            if not prefer_enriched:
+                sh2_frame = ingest_sh2_from_seed(seed_path)
+                frame = merge_catalogs(frame, sh2_frame)
+                simbad_metadata["sh2_source"] = "seed_fallback"
+                simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
+            elif "sh2_source" not in simbad_metadata:
+                simbad_metadata["sh2_source"] = "enriched_csv"
+                simbad_metadata["sh2_row_count"] = int((frame["catalog"] == "SH2").sum())
             notes.append(f"SIMBAD full ingest failed: {_error_summary(error)}")
     elif not prefer_enriched:
         sh2_frame = ingest_sh2_from_seed(seed_path)
@@ -1001,7 +1226,7 @@ def load_unified_catalog(
         simbad_metadata["sh2_row_count"] = int(len(sh2_frame))
         notes.append("SIMBAD SH2 ingest skipped: named-object source unavailable")
 
-    if not prefer_enriched and simbad_named_objects is not None:
+    if simbad_named_objects is not None:
         try:
             simbad_reference = build_simbad_m_ngc_reference(simbad_named_objects)
             frame, enriched_count = enrich_with_simbad_m_ngc(frame, simbad_reference)
@@ -1012,6 +1237,14 @@ def load_unified_catalog(
     elif not prefer_enriched:
         simbad_metadata["m_ngc_enriched_rows"] = 0
         notes.append("SIMBAD M/NGC enrichment skipped: named-object source unavailable")
+
+    frame, mapped_type_updates = apply_simbad_object_type_labels(frame)
+    simbad_metadata["otype_mapping_entries"] = int(len(SIMBAD_OTYPE_MAP_EXACT))
+    simbad_metadata["otype_label_updates"] = int(mapped_type_updates)
+    frame, renamed_type_updates, grouped_type_updates = apply_object_type_groups(frame)
+    simbad_metadata["object_type_group_rule_entries"] = int(len(OBJECT_TYPE_RENAME_MAP))
+    simbad_metadata["object_type_renamed_rows"] = int(renamed_type_updates)
+    simbad_metadata["object_type_grouped_rows"] = int(grouped_type_updates)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(cache_path, index=False)
