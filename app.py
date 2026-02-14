@@ -33,6 +33,17 @@ try:
     from streamlit_searchbox import st_searchbox
 except Exception:
     st_searchbox = None
+try:
+    from streamlit_vertical_slider import vertical_slider
+except Exception:
+    try:
+        from streamlit_extras.vertical_slider import vertical_slider
+    except Exception:
+        vertical_slider = None
+try:
+    from streamlit_extras.let_it_rain import rain as let_it_rain
+except Exception:
+    let_it_rain = None
 from streamlit_js_eval import (
     get_browser_language,
     get_geolocation,
@@ -135,6 +146,10 @@ WEATHER_MATRIX_ROWS: list[tuple[str, str]] = [
 ]
 WEATHER_ALERT_INDICATOR_LEGEND_ITEMS = "❄️ Snow | ⛈️ Rain | ☔ Showers | ⚠️ 1-20% | 🚨 >20%"
 WEATHER_ALERT_INDICATOR_LEGEND_CAPTION = f"Weather Alert Indicator: {WEATHER_ALERT_INDICATOR_LEGEND_ITEMS}"
+WEATHER_ALERT_RAIN_PRIORITY = ["❄️", "⛈️", "☔", "🚨", "⚠️"]
+WEATHER_ALERT_RAIN_INTERVAL_SECONDS = 5 * 60
+WEATHER_ALERT_RAIN_DURATION_SECONDS = 30
+WEATHER_ALERT_RAIN_BUCKET_STATE_KEY = "weather_alert_rain_last_bucket"
 # Approximate cloud-cover legend gradient inspired by the provided scale:
 # Overcast/90% -> light gray, 70-50% -> cyan/blue, 30-0% -> deeper blue.
 CLOUD_COVER_COLOR_STOPS: list[tuple[float, str]] = [
@@ -149,6 +164,12 @@ CLOUD_COVER_COLOR_STOPS: list[tuple[float, str]] = [
     (80.0, "#BBC9D2"),
     (90.0, "#CAD1D6"),
     (100.0, "#D8D8D8"),
+]
+OBSTRUCTION_SLIDER_COLOR_STOPS: list[tuple[float, str]] = [
+    (0.0, "#22C55E"),
+    (20.0, "#EAB308"),
+    (50.0, "#EF4444"),
+    (90.0, "#EF4444"),
 ]
 TEMPERATURE_COLOR_STOPS_F: list[tuple[float, str]] = [
     (0.0, "#0B2A70"),
@@ -1202,6 +1223,21 @@ def build_weather_alert_indicator_html(hour_row: dict[str, Any], temperature_uni
         'style="display:inline-block; margin-left:4px;">'
         f"{emoji}</span>"
     )
+
+
+def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_unit: str) -> list[str]:
+    seen: set[str] = set()
+    for row in rows:
+        emoji, _ = resolve_weather_alert_indicator(row, temperature_unit)
+        if emoji:
+            seen.add(emoji)
+
+    # Render one rain emoji per night using explicit priority:
+    # snow > rain > showers > alarm > caution.
+    for candidate in WEATHER_ALERT_RAIN_PRIORITY:
+        if candidate in seen:
+            return [candidate]
+    return []
 
 
 def build_hourly_weather_matrix(
@@ -3170,28 +3206,79 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
 
     st.divider()
     st.subheader("Obstructions")
-    obstruction_frame = pd.DataFrame(
-        {
-            "Direction": WIND16,
-            "Min Altitude (deg)": [prefs["obstructions"].get(direction, 20.0) for direction in WIND16],
-        }
-    )
-    edited = st.data_editor(
-        obstruction_frame,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        disabled=["Direction"],
-        key="obstruction_editor",
-    )
+    if vertical_slider is None:
+        st.warning(
+            "`streamlit-vertical-slider` is required for the vertical obstruction sliders. "
+            "Falling back to table editor."
+        )
+        obstruction_frame = pd.DataFrame(
+            {
+                "Direction": WIND16,
+                "Min Altitude (deg)": [prefs["obstructions"].get(direction, 20.0) for direction in WIND16],
+            }
+        )
+        edited = st.data_editor(
+            obstruction_frame,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            disabled=["Direction"],
+            key="obstruction_editor",
+        )
 
-    edited_values = edited["Min Altitude (deg)"].tolist()
-    next_obstructions = {
-        direction: float(max(0.0, min(90.0, edited_values[idx]))) for idx, direction in enumerate(WIND16)
-    }
-    if next_obstructions != prefs["obstructions"]:
-        prefs["obstructions"] = next_obstructions
-        save_preferences(prefs)
+        edited_values = edited["Min Altitude (deg)"].tolist()
+        next_obstructions = {
+            direction: float(max(0.0, min(90.0, edited_values[idx]))) for idx, direction in enumerate(WIND16)
+        }
+        if next_obstructions != prefs["obstructions"]:
+            prefs["obstructions"] = next_obstructions
+            save_preferences(prefs)
+    else:
+        st.caption("Minimum altitude by direction (deg)")
+        header_cols = st.columns(len(WIND16), gap="small")
+        for idx, direction in enumerate(WIND16):
+            header_cols[idx].markdown(f"<div style='text-align:center; font-size:0.8rem;'><strong>{direction}</strong></div>", unsafe_allow_html=True)
+
+        slider_cols = st.columns(len(WIND16), gap="small")
+        value_cols = st.columns(len(WIND16), gap="small")
+        next_obstructions: dict[str, float] = {}
+        for idx, direction in enumerate(WIND16):
+            default_val = int(round(float(prefs["obstructions"].get(direction, 20.0))))
+            state_key = f"obstruction_slider_{direction}"
+            preview_value_raw = st.session_state.get(state_key, default_val)
+            try:
+                preview_value = float(preview_value_raw)
+            except (TypeError, ValueError):
+                preview_value = float(default_val)
+            preview_clamped = float(max(0.0, min(90.0, preview_value)))
+            slider_color = _interpolate_color_stops(preview_clamped, OBSTRUCTION_SLIDER_COLOR_STOPS)
+            with slider_cols[idx]:
+                raw_value = vertical_slider(
+                    key=state_key,
+                    default_value=default_val,
+                    min_value=0,
+                    max_value=90,
+                    step=1,
+                    height=220,
+                    track_color="#E2E8F0",
+                    slider_color=slider_color,
+                    thumb_color=slider_color,
+                )
+            try:
+                slider_value = float(raw_value)
+            except (TypeError, ValueError):
+                slider_value = float(default_val)
+            clamped_value = float(max(0.0, min(90.0, slider_value)))
+            next_obstructions[direction] = clamped_value
+            with value_cols[idx]:
+                st.markdown(
+                    f"<div style='text-align:center; font-size:0.8rem; color:#64748b;'>{int(round(clamped_value))} deg</div>",
+                    unsafe_allow_html=True,
+                )
+
+        if next_obstructions != prefs["obstructions"]:
+            prefs["obstructions"] = next_obstructions
+            save_preferences(prefs)
 
     st.divider()
     st.subheader("Settings Backup / Restore")
@@ -3318,9 +3405,9 @@ def render_detail_panel(
             if image_url:
                 image_url_html = html.escape(image_url, quote=True)
                 image_tag = (
-                    '<div style="width:400px; height:400px; max-width:100%; display:flex; align-items:center; justify-content:center;">'
+                    '<div style="width:200px; height:200px; max-width:100%; display:flex; align-items:center; justify-content:center;">'
                     f'<img src="{image_url_html}" '
-                    'style="max-width:400px; max-height:400px; width:auto; height:auto; object-fit:contain; object-position:center;" />'
+                    'style="max-width:200px; max-height:200px; width:auto; height:auto; object-fit:contain; object-position:center;" />'
                     "</div>"
                 )
                 st.markdown(image_tag, unsafe_allow_html=True)
@@ -3476,6 +3563,15 @@ def render_detail_panel(
         obstructions=prefs["obstructions"],
     )
     events = extract_events(track)
+    hourly_weather_rows = fetch_hourly_weather(
+        lat=float(location["lat"]),
+        lon=float(location["lon"]),
+        tz_name=tzinfo.key,
+        start_local_iso=window_start.isoformat(),
+        end_local_iso=window_end.isoformat(),
+        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+    )
+    nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit)
 
     with st.container(border=True):
         st.markdown("### Night Sky Preview")
@@ -3522,6 +3618,22 @@ def render_detail_panel(
                 set_list_tracks=set_list_tracks,
             )
 
+        if let_it_rain is not None and nightly_weather_alert_emojis:
+            now_local = datetime.now(tzinfo)
+            current_bucket = int(now_local.timestamp() // WEATHER_ALERT_RAIN_INTERVAL_SECONDS)
+            last_bucket = st.session_state.get(WEATHER_ALERT_RAIN_BUCKET_STATE_KEY)
+            if last_bucket != current_bucket:
+                st.session_state[WEATHER_ALERT_RAIN_BUCKET_STATE_KEY] = current_bucket
+                for alert_emoji in nightly_weather_alert_emojis:
+                    let_it_rain(
+                        emoji=alert_emoji,
+                        font_size=34,
+                        falling_speed=5,
+                        animation_length=WEATHER_ALERT_RAIN_DURATION_SECONDS,
+                    )
+        else:
+            st.session_state.pop(WEATHER_ALERT_RAIN_BUCKET_STATE_KEY, None)
+
         st.plotly_chart(
             path_figure,
             use_container_width=True,
@@ -3551,15 +3663,6 @@ def render_detail_panel(
             show_remaining=show_remaining_column,
             now_local=pd.Timestamp(local_now),
         )
-
-    hourly_weather_rows = fetch_hourly_weather(
-        lat=float(location["lat"]),
-        lon=float(location["lon"]),
-        tz_name=tzinfo.key,
-        start_local_iso=window_start.isoformat(),
-        end_local_iso=window_end.isoformat(),
-        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
-    )
     temperatures: dict[str, float] = {}
     cloud_cover_by_hour: dict[str, float] = {}
     weather_by_hour: dict[str, dict[str, Any]] = {}
