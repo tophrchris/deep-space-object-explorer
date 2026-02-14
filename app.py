@@ -557,6 +557,15 @@ def format_time(series: pd.Series | None, use_12_hour: bool) -> str:
     return format_display_time(pd.Timestamp(series["time_local"]), use_12_hour=use_12_hour)
 
 
+def event_time_value(series: pd.Series | None) -> pd.Timestamp | pd.NaTType:
+    if series is None:
+        return pd.NaT
+    try:
+        return pd.Timestamp(series["time_local"])
+    except Exception:
+        return pd.NaT
+
+
 def compute_total_visible_time(track: pd.DataFrame) -> timedelta:
     if track.empty or "visible" not in track:
         return timedelta(0)
@@ -606,7 +615,6 @@ def build_sky_position_summary_rows(
     selected_track: pd.DataFrame,
     set_list_tracks: list[dict[str, Any]],
     pinned_ids: set[str],
-    use_12_hour: bool,
 ) -> list[dict[str, Any]]:
     def _build_row(
         primary_id: str,
@@ -622,12 +630,12 @@ def build_sky_position_summary_rows(
             "primary_id": primary_id,
             "line_color": color,
             "target": label,
-            "rise": format_time(events.get("rise"), use_12_hour=use_12_hour),
-            "first_visible": format_time(events.get("first_visible"), use_12_hour=use_12_hour),
-            "culmination": format_time(events.get("culmination"), use_12_hour=use_12_hour),
+            "rise": event_time_value(events.get("rise")),
+            "first_visible": event_time_value(events.get("first_visible")),
+            "culmination": event_time_value(events.get("culmination")),
             "culmination_alt": culmination_alt,
-            "last_visible": format_time(events.get("last_visible"), use_12_hour=use_12_hour),
-            "set": format_time(events.get("set"), use_12_hour=use_12_hour),
+            "last_visible": event_time_value(events.get("last_visible")),
+            "set": event_time_value(events.get("set")),
             "visible_total": "--",
             "culmination_dir": culmination_dir,
             "is_pinned": is_pinned,
@@ -652,7 +660,7 @@ def build_sky_position_summary_rows(
     return rows
 
 
-def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[str, Any]) -> None:
+def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[str, Any], use_12_hour: bool) -> None:
     if not rows:
         return
 
@@ -710,10 +718,19 @@ def render_sky_position_summary_table(rows: list[dict[str, Any]], prefs: dict[st
         column_config={
             "Line": st.column_config.TextColumn(width="small"),
             "Target": st.column_config.TextColumn(width="large"),
-            "First Visible": st.column_config.TextColumn(width="small"),
-            "Peak": st.column_config.TextColumn(width="small"),
+            "First Visible": st.column_config.DatetimeColumn(
+                width="small",
+                format=("h:mm a" if use_12_hour else "HH:mm"),
+            ),
+            "Peak": st.column_config.DatetimeColumn(
+                width="small",
+                format=("h:mm a" if use_12_hour else "HH:mm"),
+            ),
             "Max Alt": st.column_config.TextColumn(width="small"),
-            "Last Visible": st.column_config.TextColumn(width="small"),
+            "Last Visible": st.column_config.DatetimeColumn(
+                width="small",
+                format=("h:mm a" if use_12_hour else "HH:mm"),
+            ),
             "Duration": st.column_config.TextColumn(width="small"),
             "Direction": st.column_config.TextColumn(width="small"),
             "Set List": st.column_config.TextColumn(width="small"),
@@ -2886,9 +2903,8 @@ def render_detail_panel(
             selected_track=track,
             set_list_tracks=set_list_tracks,
             pinned_ids=set(str(item) for item in prefs["set_list"]),
-            use_12_hour=use_12_hour,
         )
-        render_sky_position_summary_table(summary_rows, prefs)
+        render_sky_position_summary_table(summary_rows, prefs, use_12_hour=use_12_hour)
 
         temperatures = fetch_hourly_temperatures(
             lat=float(location["lat"]),
