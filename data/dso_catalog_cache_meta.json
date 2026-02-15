@@ -3,14 +3,14 @@
   "load_mode": "enriched_csv",
   "source": "data/DSO_CATALOG_ENRICHED.CSV | SIMBAD NAME objects (sim-tap)",
   "cache": "data/dso_catalog_cache.parquet",
-  "loaded_at_utc": "2026-02-15T10:21:40.620815+00:00",
-  "row_count": 10422,
+  "loaded_at_utc": "2026-02-15T11:47:22+00:00",
+  "row_count": 10948,
   "catalog_counts": {
     "SIMBAD": 7232,
-    "NGC": 2097,
-    "IC": 1032,
-    "SH2": 31,
-    "M": 30
+    "NGC": 2526,
+    "IC": 1053,
+    "M": 105,
+    "SH2": 32
   },
   "cache_refresh_policy": "on_demand",
   "simbad": {
@@ -27,5 +27,35 @@
     "object_type_group_rule_entries": 36,
     "object_type_renamed_rows": 2737,
     "object_type_grouped_rows": 10422
+  },
+  "supplements": {
+    "popular_dso_missing_list": {
+      "path": "/Users/chollander/Library/Mobile Documents/com~apple~CloudDocs/VS Code Projects/Deep Space Object Explorer/data/1000_popular_deep_sky_objects_missing_from_parquet.csv",
+      "row_count": 450,
+      "rows_added": 0
+    }
+  },
+  "wikipedia_enrichment_merge": {
+    "applied_at_utc": "2026-02-15T11:47:22+00:00",
+    "enrichment_path": "data/wikipedia_catalog_enrichment.json",
+    "targets_seen": 1067,
+    "rows_updated": 363,
+    "rows_inserted": 0,
+    "skipped_rows_without_payload": 44,
+    "skipped_inserts_missing_coordinates": 0,
+    "field_updates": {
+      "aliases": 10,
+      "ang_size_maj_arcmin": 204,
+      "ang_size_min_arcmin": 112,
+      "common_name": 15,
+      "constellation": 7,
+      "dec_deg": 6,
+      "description": 134,
+      "image_attribution_url": 123,
+      "image_url": 10,
+      "info_url": 123,
+      "object_type": 18,
+      "ra_deg": 6
+    }
   }
 }

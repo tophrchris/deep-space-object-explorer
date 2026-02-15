@@ -105,6 +105,32 @@ DESIGNATION_KEY_EXCLUDES = (
     "mass",
     "temperature",
 )
+ANGULAR_SIZE_KEY_HINTS = (
+    "angularsize",
+    "apparentsize",
+    "apparentdimensions",
+    "sizev",
+    "dimensions",
+    "diameter",
+    "majoraxis",
+    "minoraxis",
+)
+ANGULAR_SIZE_KEY_EXCLUDES = (
+    "image",
+    "caption",
+    "distance",
+    "radius",
+    "mass",
+    "temperature",
+    "discover",
+    "epoch",
+    "physical",
+    "linear",
+    "lightyear",
+    "parsec",
+    "kiloparsec",
+    "megaparsec",
+)
 
 BR_TAG_RE = re.compile(r"<br\s*/?>", flags=re.IGNORECASE)
 REF_TAG_RE = re.compile(r"<ref[^>/]*/>|<ref[^>]*>.*?</ref>", flags=re.IGNORECASE | re.DOTALL)
@@ -118,6 +144,7 @@ NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 NAME_PREFIX_RE = re.compile(r"^\s*NAME\s+(.+)$", flags=re.IGNORECASE)
 DESIGNATION_INVALID_CHAR_RE = re.compile(r"[^A-Za-z0-9+\-./() ]+")
 NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+ANGULAR_SIZE_PAIR_RE = re.compile(r"(×|x| by )", flags=re.IGNORECASE)
 
 
 def _utc_now_iso() -> str:
@@ -208,19 +235,18 @@ def _truncate(text: str, max_len: int = 120) -> str:
     return f"{value[: max_len - 3]}..."
 
 
-def _description_3_to_4_sentences(*texts: str) -> str:
+def _description_up_to_10_sentences(*texts: str) -> str:
+    max_sentences = 10
     best: list[str] = []
     for text in texts:
         sentences = _sentence_list(text)
-        if len(sentences) >= 4:
-            return " ".join(sentences[:4])
-        if len(sentences) >= 3:
-            return " ".join(sentences[:3])
+        if len(sentences) >= max_sentences:
+            return " ".join(sentences[:max_sentences])
         if len(sentences) > len(best):
             best = sentences
     if not best:
         return ""
-    return " ".join(best[:4])
+    return " ".join(best[:max_sentences])
 
 
 def _append_sentence_if_missing(base_text: str, sentence: str) -> str:
@@ -698,6 +724,131 @@ def _extract_emission_lines(entries: list[tuple[str, str, str]]) -> list[str]:
     return _dedupe_preserve_order(lines)
 
 
+def _is_angular_size_key(normalized_key: str) -> bool:
+    key = str(normalized_key or "")
+    if not key:
+        return False
+    if any(bad in key for bad in ANGULAR_SIZE_KEY_EXCLUDES):
+        return False
+    return any(hint in key for hint in ANGULAR_SIZE_KEY_HINTS)
+
+
+def _infer_arcmin_multiplier(text: str) -> float | None:
+    source = str(text or "")
+    lowered = source.lower()
+
+    if (
+        "arcsec" in lowered
+        or "arcsecond" in lowered
+        or "″" in source
+        or re.search(r"\d\s*\"", source) is not None
+    ):
+        return 1.0 / 60.0
+
+    if (
+        "arcmin" in lowered
+        or "arcminute" in lowered
+        or "′" in source
+        or re.search(r"\d\s*'\s*(?:x|×|by|$)", source, flags=re.IGNORECASE) is not None
+    ):
+        return 1.0
+
+    if "°" in source or "deg" in lowered or "degree" in lowered:
+        return 60.0
+
+    return None
+
+
+def _sanitize_arcmin_value(value: float | None) -> float | None:
+    if value is None:
+        return None
+    numeric = float(value)
+    if not (0.01 <= numeric <= 5000.0):
+        return None
+    return numeric
+
+
+def _parse_apparent_size_from_text(
+    text: str,
+    *,
+    allow_unitless: bool,
+) -> tuple[float | None, float | None]:
+    source = str(text or "").replace("−", "-").replace("–", "-").strip()
+    if not source:
+        return None, None
+
+    values = [abs(value) for value in _to_float_tokens(source) if abs(value) > 0.0]
+    if not values:
+        return None, None
+
+    multiplier = _infer_arcmin_multiplier(source)
+    if multiplier is None and not allow_unitless:
+        return None, None
+    if multiplier is None:
+        multiplier = 1.0
+
+    has_pair_separator = ANGULAR_SIZE_PAIR_RE.search(source) is not None
+    major = _sanitize_arcmin_value(values[0] * multiplier)
+    minor: float | None = None
+
+    if has_pair_separator and len(values) >= 2:
+        minor = _sanitize_arcmin_value(values[1] * multiplier)
+
+    return major, minor
+
+
+def _extract_apparent_size_arcmin(entries: list[tuple[str, str, str]]) -> tuple[float | None, float | None]:
+    major: float | None = None
+    minor: float | None = None
+
+    for normalized_key, cleaned_value, raw_value in entries:
+        if not _is_angular_size_key(normalized_key):
+            continue
+
+        allow_unitless = any(
+            token in normalized_key for token in ("angular", "apparent", "sizev", "dimensions", "diameter")
+        )
+        parsed_major: float | None = None
+        parsed_minor: float | None = None
+        for candidate_text in (raw_value, cleaned_value):
+            candidate_major, candidate_minor = _parse_apparent_size_from_text(
+                candidate_text,
+                allow_unitless=allow_unitless,
+            )
+            if candidate_major is not None:
+                parsed_major = candidate_major
+                parsed_minor = candidate_minor
+                break
+
+        if parsed_major is None:
+            continue
+
+        if "minoraxis" in normalized_key or normalized_key.startswith("minor"):
+            if minor is None:
+                minor = parsed_major
+            continue
+
+        if "majoraxis" in normalized_key or normalized_key.startswith("major"):
+            if major is None:
+                major = parsed_major
+            if parsed_minor is not None and minor is None:
+                minor = parsed_minor
+            continue
+
+        if major is None:
+            major = parsed_major
+        if parsed_minor is not None and minor is None:
+            minor = parsed_minor
+
+        if major is not None and minor is not None:
+            break
+
+    if major is not None and minor is not None and minor > major:
+        major, minor = minor, major
+
+    return major, minor
+
+
 def _identifier_catalog(primary_id: str) -> str:
     cleaned = str(primary_id or "").strip()
     if re.fullmatch(r"M\s*[0-9]+[A-Za-z]*", cleaned, flags=re.IGNORECASE):
@@ -1010,6 +1161,8 @@ class WikipediaLookup:
     dec_deg: float | None = None
     constellation: str = ""
     emission_lines: list[str] = None  # type: ignore[assignment]
+    ang_size_maj_arcmin: float | None = None
+    ang_size_min_arcmin: float | None = None
     wikipedia_primary_id: str = ""
     wikipedia_catalog: str = ""
     match_method: str = "none"
@@ -1581,7 +1734,7 @@ def _resolve_wikipedia_page(
     chosen_short_desc = str(chosen_summary.get("description", "")).strip()
     info_url = selected.url or _summary_to_url(chosen_summary, selected.title)
     intro_extract = client.intro_extract(selected.title) if len(_sentence_list(chosen_extract)) < 3 else ""
-    description = _description_3_to_4_sentences(chosen_extract, intro_extract)
+    description = _description_up_to_10_sentences(chosen_extract, intro_extract)
 
     image_url = _summary_to_image(chosen_summary)
     image_details = client.page_image_details(selected.title)
@@ -1634,6 +1787,7 @@ def _resolve_wikipedia_page(
     ra_deg, dec_deg = _extract_ra_dec_from_infobox(infobox_entries)
     constellation = _extract_constellation(infobox_entries)
     emission_lines = _extract_emission_lines(infobox_entries)
+    ang_size_maj_arcmin, ang_size_min_arcmin = _extract_apparent_size_arcmin(infobox_entries)
     aliases = _dedupe_preserve_order([*designations, common_name, _strip_parenthetical_suffix(selected.title)])
     aliases = [alias for alias in aliases if _normalize_text(alias) != _normalize_text(catalog_primary_id)]
     wikipedia_primary_id, wikipedia_catalog = _extract_wikipedia_primary_catalog_reference(
@@ -1667,6 +1821,8 @@ def _resolve_wikipedia_page(
         dec_deg=dec_deg,
         constellation=constellation,
         emission_lines=emission_lines,
+        ang_size_maj_arcmin=ang_size_maj_arcmin,
+        ang_size_min_arcmin=ang_size_min_arcmin,
         wikipedia_primary_id=wikipedia_primary_id,
         wikipedia_catalog=wikipedia_catalog,
         match_method=selected.match_method,
@@ -1773,6 +1929,8 @@ EXPECTED_CATALOG_ENRICHMENT_KEYS = (
     "object_type",
     "ra_deg",
     "dec_deg",
+    "ang_size_maj_arcmin",
+    "ang_size_min_arcmin",
     "constellation",
     "aliases",
     "image_url",
@@ -2177,6 +2335,8 @@ def main() -> None:
                     "object_type": lookup.object_type,
                     "ra_deg": lookup.ra_deg,
                     "dec_deg": lookup.dec_deg,
+                    "ang_size_maj_arcmin": lookup.ang_size_maj_arcmin,
+                    "ang_size_min_arcmin": lookup.ang_size_min_arcmin,
                     "constellation": lookup.constellation,
                     "aliases": lookup.aliases,
                     "image_url": lookup.image_url,
