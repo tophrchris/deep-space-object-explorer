@@ -1490,15 +1490,36 @@ def render_hourly_weather_matrix(
     st.markdown(table_html, unsafe_allow_html=True)
 
 
-def build_path_hovertext(target_label: str, emission_details: str, time_values: np.ndarray) -> np.ndarray:
+def build_path_hovertext(
+    target_label: str,
+    emission_details: str,
+    time_values: np.ndarray,
+    altitude_values: np.ndarray | None = None,
+) -> np.ndarray:
     emissions = str(emission_details or "").strip()
     emissions_line = f"<br>Emissions: {emissions}" if emissions else ""
+    total = int(len(time_values))
+
+    if altitude_values is None:
+        altitude = np.full(total, np.nan, dtype=float)
+    else:
+        altitude = np.asarray(altitude_values, dtype=float)
+        if altitude.shape[0] != total:
+            aligned = np.full(total, np.nan, dtype=float)
+            copy_count = min(total, int(altitude.shape[0]))
+            if copy_count > 0:
+                aligned[:copy_count] = altitude[:copy_count]
+            altitude = aligned
 
     hover_values: list[str] = []
-    for value in time_values:
+    for idx, value in enumerate(time_values):
         time_text = str(value).strip()
         if time_text:
-            hover_values.append(f"{target_label}{emissions_line}<br>Time: {time_text}")
+            altitude_line = ""
+            altitude_value = float(altitude[idx])
+            if np.isfinite(altitude_value):
+                altitude_line = f"<br>Altitude: {altitude_value:.1f} deg"
+            hover_values.append(f"{target_label}{emissions_line}<br>Time: {time_text}{altitude_line}")
         else:
             hover_values.append("")
     return np.asarray(hover_values, dtype=object)
@@ -1771,7 +1792,7 @@ def build_path_plot(
     )
 
     path_x, path_y, path_times = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
-    selected_hover = build_path_hovertext(selected_label, selected_emissions, path_times)
+    selected_hover = build_path_hovertext(selected_label, selected_emissions, path_times, path_y)
     fig.add_trace(
         go.Scatter(
             x=path_x,
@@ -1876,7 +1897,7 @@ def build_path_plot(
             target_color = str(target_track.get("color", "#22c55e"))
             target_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
-            overlay_hover = build_path_hovertext(target_label, target_emissions, path_times)
+            overlay_hover = build_path_hovertext(target_label, target_emissions, path_times, path_y)
             fig.add_trace(
                 go.Scatter(
                     x=path_x,
@@ -2060,7 +2081,12 @@ def build_path_plot_radial(
         [format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in track["time_local"].tolist()],
         dtype=object,
     )
-    selected_hover = build_path_hovertext(selected_label, selected_emissions, selected_time_values)
+    selected_hover = build_path_hovertext(
+        selected_label,
+        selected_emissions,
+        selected_time_values,
+        track["alt"].to_numpy(dtype=float),
+    )
     fig.add_trace(
         go.Scatterpolar(
             theta=track["az"],
@@ -2177,7 +2203,12 @@ def build_path_plot_radial(
                 ],
                 dtype=object,
             )
-            overlay_hover = build_path_hovertext(target_label, target_emissions, overlay_time_values)
+            overlay_hover = build_path_hovertext(
+                target_label,
+                target_emissions,
+                overlay_time_values,
+                overlay_track["alt"].to_numpy(dtype=float),
+            )
             fig.add_trace(
                 go.Scatterpolar(
                     theta=overlay_track["az"],
@@ -3104,51 +3135,77 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
             prefs["obstructions"] = next_obstructions
             save_preferences(prefs)
     else:
-        st.caption("Minimum altitude by direction (deg)")
-        header_cols = st.columns(len(WIND16), gap="small")
-        for idx, direction in enumerate(WIND16):
-            header_cols[idx].markdown(f"<div style='text-align:center; font-size:0.8rem;'><strong>{direction}</strong></div>", unsafe_allow_html=True)
-
-        slider_cols = st.columns(len(WIND16), gap="small")
-        value_cols = st.columns(len(WIND16), gap="small")
-        next_obstructions: dict[str, float] = {}
-        for idx, direction in enumerate(WIND16):
-            default_val = int(round(float(prefs["obstructions"].get(direction, 20.0))))
-            state_key = f"obstruction_slider_{direction}"
-            preview_value_raw = st.session_state.get(state_key, default_val)
-            try:
-                preview_value = float(preview_value_raw)
-            except (TypeError, ValueError):
-                preview_value = float(default_val)
-            preview_clamped = float(max(0.0, min(90.0, preview_value)))
-            slider_color = _interpolate_color_stops(preview_clamped, OBSTRUCTION_SLIDER_COLOR_STOPS)
-            with slider_cols[idx]:
-                raw_value = vertical_slider(
-                    key=state_key,
-                    default_value=default_val,
-                    min_value=0,
-                    max_value=90,
-                    step=1,
-                    height=220,
-                    track_color="#E2E8F0",
-                    slider_color=slider_color,
-                    thumb_color=slider_color,
-                )
-            try:
-                slider_value = float(raw_value)
-            except (TypeError, ValueError):
-                slider_value = float(default_val)
-            clamped_value = float(max(0.0, min(90.0, slider_value)))
-            next_obstructions[direction] = clamped_value
-            with value_cols[idx]:
+        mobile_obstruction_layout = int(st.session_state.get("browser_viewport_width", 1920)) < 900
+        with st.container():
+            st.markdown('<div id="obstruction-slider-scroll-anchor"></div>', unsafe_allow_html=True)
+            if mobile_obstruction_layout:
                 st.markdown(
-                    f"<div style='text-align:center; font-size:0.8rem; color:#64748b;'>{int(round(clamped_value))} deg</div>",
+                    """
+                    <style>
+                    @media (max-width: 900px) {
+                      div[data-testid="stVerticalBlock"]:has(#obstruction-slider-scroll-anchor) {
+                        overflow-x: auto;
+                        overflow-y: visible;
+                        -webkit-overflow-scrolling: touch;
+                        padding-bottom: 0.4rem;
+                      }
+                      div[data-testid="stVerticalBlock"]:has(#obstruction-slider-scroll-anchor) > div[data-testid="stHorizontalBlock"] {
+                        min-width: 950px;
+                      }
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.caption("Swipe horizontally to adjust all direction sliders.")
+            st.caption("Minimum altitude by direction (deg)")
+            header_cols = st.columns(len(WIND16), gap="small")
+            for idx, direction in enumerate(WIND16):
+                header_cols[idx].markdown(
+                    f"<div style='text-align:center; font-size:0.8rem;'><strong>{direction}</strong></div>",
                     unsafe_allow_html=True,
                 )
 
-        if next_obstructions != prefs["obstructions"]:
-            prefs["obstructions"] = next_obstructions
-            save_preferences(prefs)
+            slider_cols = st.columns(len(WIND16), gap="small")
+            value_cols = st.columns(len(WIND16), gap="small")
+            next_obstructions: dict[str, float] = {}
+            for idx, direction in enumerate(WIND16):
+                default_val = int(round(float(prefs["obstructions"].get(direction, 20.0))))
+                state_key = f"obstruction_slider_{direction}"
+                preview_value_raw = st.session_state.get(state_key, default_val)
+                try:
+                    preview_value = float(preview_value_raw)
+                except (TypeError, ValueError):
+                    preview_value = float(default_val)
+                preview_clamped = float(max(0.0, min(90.0, preview_value)))
+                slider_color = _interpolate_color_stops(preview_clamped, OBSTRUCTION_SLIDER_COLOR_STOPS)
+                with slider_cols[idx]:
+                    raw_value = vertical_slider(
+                        key=state_key,
+                        default_value=default_val,
+                        min_value=0,
+                        max_value=90,
+                        step=1,
+                        height=220,
+                        track_color="#E2E8F0",
+                        slider_color=slider_color,
+                        thumb_color=slider_color,
+                    )
+                try:
+                    slider_value = float(raw_value)
+                except (TypeError, ValueError):
+                    slider_value = float(default_val)
+                clamped_value = float(max(0.0, min(90.0, slider_value)))
+                next_obstructions[direction] = clamped_value
+                with value_cols[idx]:
+                    st.markdown(
+                        f"<div style='text-align:center; font-size:0.8rem; color:#64748b;'>{int(round(clamped_value))} deg</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            if next_obstructions != prefs["obstructions"]:
+                prefs["obstructions"] = next_obstructions
+                save_preferences(prefs)
 
     st.divider()
     st.subheader("Settings Backup / Restore")
