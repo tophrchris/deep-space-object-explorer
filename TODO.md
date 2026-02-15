@@ -18,9 +18,9 @@
 
 ## Phase 3: Core Product Loop
 - [x] Search + results + target detail wired to live Alt/Az calculations.
-- [x] Favorites + Set List persistence.
+- [x] Generic list persistence (including auto recent list).
 - [x] Obstruction 16-bin editor applied to visibility calculations.
-- [ ] Set List reorder UX improvements and quick actions.
+- [ ] List reorder UX improvements and quick actions.
 - [ ] Better empty/loading/error states in detail panel.
 
 ## Phase 4: Data Enrichment
@@ -48,17 +48,26 @@
 - [ ] add resilience for missing weather data
 - [ ] add lunar interference model
 - [ ] add the notion of "sweet spot" (visible, unobstructed, not in danger zone of mounts, no lunar interference)
-- [ ] disconnect night sky preview from "pinning", introduce more general list concept
+- [x] disconnect night sky preview from "pinning", introduce more general list concept
 - [ ] look at things like https://en.wikipedia.org/wiki/Lists_of_nebulae for catalog enrichment
 - [ ] integrate barnard objects, caldwell objects
+- [ ] use panoramic picture for obstructions and as overlay in night view
+- [ ] 
   
 ## launch Phase
 - [ ] build github pages based website
 - [ ] create product usage documentation- wiki?
 - [ ] create hero images of app 
 - [ ] integrate some sort of uservoice system for bug tracking
-
+- [ ] survey to gauge interest, locations, equipment 
 
 ## refactoring plans
 - [ ] pull weather service out into its own folder
 - [ ] break up main UI (search, forecast, details, night sky preview) into files/folders
+
+
+
+
+
+
+./.venv/bin/python scripts/build_wikipedia_catalog_enrichment.py --no-resume --output-path data/wikipedia_catalog_enrichment.json --cache-path data/wikipedia_api_cache.json --verbosity 2

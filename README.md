@@ -8,7 +8,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - Desktop split layout and phone-style stacked layout preview
 - Location controls (default Princeton, manual geocode, browser geolocation permission flow, IP fallback)
 - 16-bin obstruction editor (default 20 deg)
-- Favorites and Set List with browser-local persistence (per user/device)
+- Generic Lists (including `Auto (Recent)` + editable custom lists) with browser-local persistence
 - Settings export/import via JSON for backup or migration to another machine
 - Catalog ingestion module with normalized schema + disk cache + metadata
 - Target detail panel with:
@@ -94,7 +94,7 @@ Notes:
 - more instructional content
 - "about this app" page with contact info
 
-- have multiple set lists
+- expand list planning workflows (templates, quick actions, nicknames)
 - ability to give a nickname to an object
 
 - for each wind4, for each hour, find the best target of each type (emission? galaxy? cluster?) in terms of number of minutes in the sweet zone (unobstructed, not too high/low based on mount)
