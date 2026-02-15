@@ -1,17 +1,17 @@
-# DSO Explorer — Web Prototype PRD (v1.2)
+# DSO Explorer — Web Prototype PRD (v1.3)
 
-> This document supersedes `dso_explorer_web_prd_v0.md` and reflects the implemented product state through **February 13, 2026**.
+> This document supersedes `dso_explorer_web_prd_v0.md` and reflects the implemented product state through **February 15, 2026**.
 
-- Updated: 2026-02-13
+- Updated: 2026-02-15
 - Platforms: phone + tablet + laptop (responsive)
 - Runtime target: Streamlit Community Cloud (private GitHub repo supported)
 
 ## 1. Product goals
 
 - Unified discovery across Messier, NGC, IC, and Sharpless (Sh2).
-- Fast loop: Search -> Select target -> Review detail + plots -> Save to Favorites / Set List.
+- Fast loop: Search -> Select target -> Review detail + plots -> Add to user-defined Lists.
 - Reliable real-time sky context using current location and 60s Alt/Az refresh.
-- Local/session persistence of user preferences (favorites, set list, location, obstructions, display choices).
+- Local/session persistence of user preferences (lists, location, obstructions, display choices).
 
 ## 2. Non-goals
 
@@ -86,6 +86,7 @@
 - Settings page sections are implemented and grouped as:
 - Location
 - Display
+- Lists
 - Catalog
 - Obstructions
 - Settings Backup / Restore
@@ -93,7 +94,7 @@
 
 ### 3.6 Detail panel
 
-- Header with ID/name + Favorite and Set List toggles.
+- Header with ID/name + a single `Add to list...` action.
 - Three-column detail layout:
 - Left: image
 - Middle: description + links
@@ -123,7 +124,7 @@
 - `false`: center = 0 deg altitude.
 - Style and dome preferences persist across target switches.
 - Selected target always renders as full-night path.
-- Set List targets render as additional full-night paths (same sunset->sunrise window).
+- Targets from the currently selected preview list render as additional full-night paths (same sunset->sunrise window).
 - All plotted target paths are solid lines and color-coded by target.
 - Event labels are rendered per plotted target:
 - `Rise`, `Set`, `First Visible`, `Last Visible`, `Culmination`.
@@ -135,11 +136,12 @@
 - Columns:
 - `Line` (color swatch)
 - `Target`
-- `Rise`, `First Visible`, `Culmination`, `Last Visible`, `Set`
-- `Visible` (total visible duration across tonight window)
-- `Culm Dir` (compass direction at culmination)
-- `Set List` (Pinned/Unpinned state)
-- Multi-row selection supports bulk Set List toggling via `Toggle Selected` action.
+- `Type`
+- `First Visible`, `Peak`, `Last Visible`
+- `Duration` (+ `Remaining` during the active night window)
+- `Max Alt`, `Direction`
+- `List` (`Add`/`Remove`, or `Auto` for system-managed lists)
+- Row selection highlights the target used for the Target Tips panel without changing the detail target selection.
 
 - Hourly Forecast plot:
 - Stacked hourly bars where total height is hourly max altitude.
@@ -161,8 +163,8 @@
 ### 3.9 Persistence model
 
 - Preferences persisted locally when filesystem is writable:
-- Favorites
-- Set List order
+- Lists payload + list order + list metadata
+- Active preview list selection
 - Last valid location
 - 16-bin obstructions
 - Temperature preference
@@ -187,15 +189,15 @@
 
 - User can search across M/NGC/IC/SH2 and select a target from search suggestions.
 - App provides dedicated `Explorer` and `Settings` pages with stable navigation.
-- Settings page contains clearly defined sections for location, display, catalog, obstructions, and settings backup/restore.
+- Settings page contains clearly defined sections for location, display, lists, catalog, obstructions, and settings backup/restore.
 - Catalog load path supports enriched-first ingest with cache-only ID supplementation, preserving enriched values for overlapping IDs.
 - Detail panel shows required metadata, list actions, image/source/background attribution behavior, and two always-visible plots.
 - Detail panel uses the implemented 3-column layout with image scaling at max 400x400 and preserved aspect ratio.
 - Detail property table hides blank rows and surfaces enriched fields where available.
 - Sky plot supports Line/Radial and radial Dome View axis inversion.
-- Sky plot includes full-night paths for selected + Set List targets, per-target event labels, and directional movement arrows.
+- Sky plot includes full-night paths for selected + active-preview-list targets, per-target event labels, and directional movement arrows.
 - Sky obstruction rendering uses hard stepped per-direction floors in light gray.
-- Sky Position summary appears under the chart as a sortable table with event times, total visible time, culmination direction, and bulk Set List toggling.
+- Sky Position summary appears under the chart as a sortable table with event timing/duration columns and per-row list membership actions.
 - Hourly plot renders stacked obstructed/clear bars with direction and temperature labeling.
 - Alt/Az refreshes at least every 60 seconds.
 - Browser geolocation failure cases do not replace prior valid location.
@@ -256,3 +258,7 @@
 - description + source/background links column
 - enriched property/value table
 - Detail property table row rendering adjusted to suppress blank visual rows (commit `d991f41`).
+- Lists refactor:
+- Removed Favorites/Set List tab model in favor of generic lists with `Auto (Recent)` default preview binding.
+- Added Settings list-management controls (create, rename, reorder, delete) for editable lists.
+- Search ranking now prioritizes targets that appear in any list, not only legacy favorites.

@@ -28,6 +28,26 @@ from catalog_service import (
     load_catalog_data,
     search_catalog,
 )
+from list_subsystem import (
+    AUTO_RECENT_LIST_ID,
+    all_listed_ids_in_order,
+    clean_primary_id_list,
+    default_list_meta,
+    default_list_order,
+    default_lists_payload,
+    editable_list_ids_in_order,
+    get_active_preview_list_id,
+    get_list_ids,
+    get_list_name,
+    is_system_list,
+    list_ids_in_order,
+    normalize_list_preferences,
+    push_target_to_auto_recent_list,
+    set_active_preview_list_id,
+    toggle_target_in_list,
+)
+from list_search import searchbox_target_options, subset_by_id_list
+from list_settings_ui import render_lists_settings_section
 from geopy.geocoders import ArcGIS, Nominatim, Photon
 try:
     from streamlit_searchbox import st_searchbox
@@ -128,11 +148,11 @@ CATALOG_ENRICHED_PATH = Path("data/DSO_CATALOG_ENRICHED.CSV")
 # - "curated_parquet": read directly from `CURATED_CATALOG_PATH` and fallback to legacy on validation/load errors
 CATALOG_LOADER_MODES = (CATALOG_MODE_LEGACY, CATALOG_MODE_CURATED_PARQUET)
 CATALOG_LOADER_MODE = CATALOG_MODE_LEGACY
-BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v1"
+BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v2"
 ENABLE_COOKIE_BACKUP = True
 PREFS_BOOTSTRAP_MAX_RUNS = 6
 PREFS_BOOTSTRAP_RETRY_INTERVAL_MS = 250
-SETTINGS_EXPORT_FORMAT_VERSION = 1
+SETTINGS_EXPORT_FORMAT_VERSION = 2
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -294,8 +314,10 @@ def target_line_color(primary_id: str) -> str:
 
 def default_preferences() -> dict[str, Any]:
     return {
-        "favorites": [],
-        "set_list": [],
+        "lists": default_lists_payload(),
+        "list_order": default_list_order(),
+        "list_meta": default_list_meta(),
+        "active_preview_list_id": AUTO_RECENT_LIST_ID,
         "obstructions": {direction: 20.0 for direction in WIND16},
         "location": copy.deepcopy(DEFAULT_LOCATION),
         "temperature_unit": "auto",
@@ -305,8 +327,8 @@ def default_preferences() -> dict[str, Any]:
 def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
     prefs = default_preferences()
     if isinstance(raw, dict):
-        prefs["favorites"] = [str(x) for x in raw.get("favorites", []) if str(x).strip()]
-        prefs["set_list"] = [str(x) for x in raw.get("set_list", []) if str(x).strip()]
+        prefs.update(normalize_list_preferences(raw))
+
         temp_unit = str(raw.get("temperature_unit", "auto")).strip().lower()
         prefs["temperature_unit"] = temp_unit if temp_unit in {"auto", "f", "c"} else "auto"
 
@@ -465,12 +487,6 @@ def persist_and_rerun(prefs: dict[str, Any]) -> None:
     st.session_state["prefs"] = prefs
     save_preferences(prefs)
     st.rerun()
-
-
-def normalize_text(value: str | None) -> str:
-    if value is None:
-        return ""
-    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
 def infer_12_hour_clock_from_locale(locale_value: str | None) -> bool:
@@ -766,8 +782,8 @@ def build_sky_position_summary_rows(
     selected_color: str,
     selected_events: dict[str, pd.Series | None],
     selected_track: pd.DataFrame,
-    set_list_tracks: list[dict[str, Any]],
-    pinned_ids: set[str],
+    overlay_tracks: list[dict[str, Any]],
+    list_member_ids: set[str],
     now_local: pd.Timestamp | datetime | None = None,
     row_order_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -777,7 +793,7 @@ def build_sky_position_summary_rows(
         type_group: str,
         color: str,
         events: dict[str, pd.Series | None],
-        is_pinned: bool,
+        is_in_list: bool,
     ) -> dict[str, Any]:
         culmination = events.get("culmination")
         culmination_dir = str(culmination["wind16"]) if culmination is not None else "--"
@@ -796,7 +812,7 @@ def build_sky_position_summary_rows(
             "visible_total": "--",
             "visible_remaining": "--",
             "culmination_dir": culmination_dir,
-            "is_pinned": is_pinned,
+            "is_in_list": is_in_list,
         }
 
     selected_row = _build_row(
@@ -805,20 +821,20 @@ def build_sky_position_summary_rows(
         selected_type_group,
         selected_color,
         selected_events,
-        selected_id in pinned_ids,
+        selected_id in list_member_ids,
     )
     selected_row["visible_total"] = format_duration_hm(compute_total_visible_time(selected_track))
     selected_row["visible_remaining"] = format_duration_hm(compute_remaining_visible_time(selected_track, now=now_local))
     rows = [selected_row]
-    for target_track in set_list_tracks:
+    for target_track in overlay_tracks:
         primary_id = str(target_track.get("primary_id", ""))
         target_row = _build_row(
             primary_id,
-            str(target_track.get("label", "Set List target")),
+            str(target_track.get("label", "List target")),
             str(target_track.get("object_type_group", "other")),
             str(target_track.get("color", "#22c55e")),
             target_track.get("events", {}),
-            primary_id in pinned_ids,
+            primary_id in list_member_ids,
         )
         overlay_track = target_track.get("track")
         if isinstance(overlay_track, pd.DataFrame):
@@ -840,6 +856,9 @@ def render_sky_position_summary_table(
     prefs: dict[str, Any],
     use_12_hour: bool,
     *,
+    preview_list_id: str,
+    preview_list_name: str,
+    allow_list_membership_toggle: bool,
     show_remaining: bool = False,
     now_local: pd.Timestamp | datetime | None = None,
 ) -> None:
@@ -854,7 +873,10 @@ def render_sky_position_summary_table(
         return
 
     summary_df["line_swatch"] = "■"
-    summary_df["set_list_action"] = summary_df["is_pinned"].map(lambda value: "Un pin" if bool(value) else "Pin")
+    if allow_list_membership_toggle:
+        summary_df["list_action"] = summary_df["is_in_list"].map(lambda value: "Remove" if bool(value) else "Add")
+    else:
+        summary_df["list_action"] = "Auto"
     summary_df["visible_remaining_display"] = "--"
     if show_remaining:
         for row_index, row in summary_df.iterrows():
@@ -901,7 +923,7 @@ def render_sky_position_summary_table(
     ]
     if show_remaining:
         display_columns.append("visible_remaining_display")
-    display_columns.extend(["culmination_alt", "culmination_dir", "set_list_action"])
+    display_columns.extend(["culmination_alt", "culmination_dir", "list_action"])
 
     display = summary_df[display_columns].rename(
         columns={
@@ -915,7 +937,7 @@ def render_sky_position_summary_table(
             "visible_remaining_display": "Remaining",
             "culmination_alt": "Max Alt",
             "culmination_dir": "Direction",
-            "set_list_action": "Set List",
+            "list_action": "List",
         }
     )
 
@@ -957,7 +979,7 @@ def render_sky_position_summary_table(
         ),
         "Duration": st.column_config.TextColumn(width="small"),
         "Direction": st.column_config.TextColumn(width="small"),
-        "Set List": st.column_config.TextColumn(width="small"),
+        "List": st.column_config.TextColumn(width="small"),
     }
     if show_remaining:
         column_config["Remaining"] = st.column_config.TextColumn(width="small")
@@ -1037,39 +1059,48 @@ def render_sky_position_summary_table(
     if selected_index is not None:
         selected_primary_id = str(summary_df.iloc[selected_index].get("primary_id", ""))
 
+    selection_token = (
+        f"{selected_index}:{selected_column_index}"
+        if selected_index is not None and selected_column_index is not None
+        else ""
+    )
+    last_selection_token = str(st.session_state.get("sky_summary_last_selection_token", ""))
+    selection_changed = bool(selection_token) and selection_token != last_selection_token
+    st.session_state["sky_summary_last_selection_token"] = selection_token
+
     current_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", ""))
-    if selected_primary_id and selected_primary_id != current_highlight_id:
+    if selection_changed and selected_primary_id and selected_primary_id != current_highlight_id:
         st.session_state["sky_summary_highlight_primary_id"] = selected_primary_id
 
-    set_list_col_index = int(display.columns.get_loc("Set List"))
+    list_col_index = int(display.columns.get_loc("List"))
 
-    if selected_primary_id:
-        current_selected = str(st.session_state.get("selected_id") or "").strip()
-        if selected_primary_id != current_selected:
-            st.session_state["selected_id"] = selected_primary_id
-            if selected_column_index != set_list_col_index:
-                st.rerun()
-
-    if selected_index is not None and selected_column_index == set_list_col_index:
+    if (
+        selection_changed
+        and selected_index is not None
+        and selected_column_index == list_col_index
+        and allow_list_membership_toggle
+    ):
         action_token = f"{selected_index}:{selected_column_index}"
-        last_action_token = str(st.session_state.get("sky_summary_set_list_action_token", ""))
+        last_action_token = str(st.session_state.get("sky_summary_list_action_token", ""))
         if action_token != last_action_token:
             selected_row = summary_df.iloc[selected_index]
             primary_id = str(selected_row.get("primary_id", ""))
             if primary_id:
-                next_set_list = list(prefs["set_list"])
-                next_set_list = (
-                    remove_if_present(next_set_list, primary_id)
-                    if primary_id in next_set_list
-                    else add_if_missing(next_set_list, primary_id)
-                )
-                prefs["set_list"] = next_set_list
-                st.session_state["sky_summary_set_list_action_token"] = action_token
-                persist_and_rerun(prefs)
+                if toggle_target_in_list(prefs, preview_list_id, primary_id):
+                    st.session_state["sky_summary_list_action_token"] = action_token
+                    persist_and_rerun(prefs)
+                st.session_state["sky_summary_list_action_token"] = action_token
     else:
-        st.session_state["sky_summary_set_list_action_token"] = ""
+        st.session_state["sky_summary_list_action_token"] = ""
 
-    st.caption("Click a target cell to select detail. Click Pin/Un pin in Set List to update your set list.")
+    if allow_list_membership_toggle:
+        st.caption(
+            f"Search results choose the detail target. Use this table to highlight rows and update '{preview_list_name}'."
+        )
+    else:
+        st.caption(
+            f"Search results choose the detail target. '{preview_list_name}' is auto-managed from recent search selections."
+        )
 
 
 def format_hour_label(value: pd.Timestamp | datetime, use_12_hour: bool) -> str:
@@ -1708,7 +1739,7 @@ def build_path_plot(
     selected_color: str,
     selected_line_width: float,
     use_12_hour: bool,
-    set_list_tracks: list[dict[str, Any]] | None = None,
+    overlay_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -1832,8 +1863,8 @@ def build_path_plot(
             )
         )
 
-    if set_list_tracks:
-        for target_track in set_list_tracks:
+    if overlay_tracks:
+        for target_track in overlay_tracks:
             overlay_track = target_track.get("track")
             if not isinstance(overlay_track, pd.DataFrame) or overlay_track.empty:
                 continue
@@ -1841,7 +1872,7 @@ def build_path_plot(
             if path_x.size == 0:
                 continue
 
-            target_label = str(target_track.get("label", "Set List target"))
+            target_label = str(target_track.get("label", "List target"))
             target_color = str(target_track.get("color", "#22c55e"))
             target_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
@@ -1971,7 +2002,7 @@ def build_path_plot_radial(
     selected_color: str,
     selected_line_width: float,
     use_12_hour: bool,
-    set_list_tracks: list[dict[str, Any]] | None = None,
+    overlay_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -2127,13 +2158,13 @@ def build_path_plot_radial(
             )
         )
 
-    if set_list_tracks:
-        for target_track in set_list_tracks:
+    if overlay_tracks:
+        for target_track in overlay_tracks:
             overlay_track = target_track.get("track")
             if not isinstance(overlay_track, pd.DataFrame) or overlay_track.empty:
                 continue
 
-            target_label = str(target_track.get("label", "Set List target"))
+            target_label = str(target_track.get("label", "List target"))
             target_color = str(target_track.get("color", "#22c55e"))
             target_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
@@ -2794,203 +2825,38 @@ def fetch_free_use_image(search_phrase: str) -> dict[str, str] | None:
         return None
 
 
-def add_if_missing(values: list[str], item: str) -> list[str]:
-    if item not in values:
-        values.append(item)
-    return values
-
-
-def remove_if_present(values: list[str], item: str) -> list[str]:
-    return [value for value in values if value != item]
-
-
-def move_item(values: list[str], index: int, step: int) -> list[str]:
-    new_index = index + step
-    if new_index < 0 or new_index >= len(values):
-        return values
-    updated = values.copy()
-    updated[index], updated[new_index] = updated[new_index], updated[index]
-    return updated
-
-
 def sanitize_saved_lists(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
     available_ids = set(catalog["primary_id"].tolist())
-    next_favorites = [item for item in prefs["favorites"] if item in available_ids]
-    next_set_list = [item for item in prefs["set_list"] if item in available_ids]
+    current = ensure_preferences_shape(prefs)
+    current_lists = current.get("lists", {})
+    if not isinstance(current_lists, dict):
+        return
 
-    if next_favorites != prefs["favorites"] or next_set_list != prefs["set_list"]:
-        prefs["favorites"] = next_favorites
-        prefs["set_list"] = next_set_list
+    next_lists: dict[str, list[str]] = {}
+    for raw_list_id, raw_ids in current_lists.items():
+        list_id = str(raw_list_id).strip()
+        if not list_id:
+            continue
+        cleaned_ids = [item for item in clean_primary_id_list(raw_ids) if item in available_ids]
+        next_lists[list_id] = cleaned_ids
+
+    next_payload = dict(current)
+    next_payload["lists"] = next_lists
+    next = ensure_preferences_shape(next_payload)
+    if next != current:
+        prefs.clear()
+        prefs.update(next)
         st.session_state["prefs"] = prefs
         save_preferences(prefs)
-
-
-def subset_by_id_list(frame: pd.DataFrame, ordered_ids: list[str]) -> pd.DataFrame:
-    if not ordered_ids:
-        return frame.iloc[0:0].copy()
-
-    id_rank = {identifier: idx for idx, identifier in enumerate(ordered_ids)}
-    subset = frame[frame["primary_id"].isin(id_rank)].copy()
-    if subset.empty:
-        return subset
-
-    subset["_rank"] = subset["primary_id"].map(id_rank)
-    subset = subset.sort_values(by="_rank", ascending=True).drop(columns=["_rank"]).reset_index(drop=True)
-    return subset
-
-
-def format_search_suggestion(row: pd.Series, *, is_favorite: bool = False) -> str:
-    primary_id = str(row.get("primary_id") or "").strip() or "Unknown ID"
-    common_name = str(row.get("common_name") or "").strip()
-    object_type = str(row.get("object_type") or "").strip() or "Unknown type"
-    wind = str(row.get("wind16") or "").strip() or "--"
-    arrow = WIND16_ARROWS.get(wind, "🧭")
-    alt_now = row.get("alt_now")
-    try:
-        alt_text = f"{float(alt_now):.0f} deg"
-    except (TypeError, ValueError):
-        alt_text = "--"
-
-    id_and_name = f"{primary_id} - {common_name}" if common_name else primary_id
-    favorite_suffix = " ⭐" if is_favorite else ""
-    return f"{id_and_name} • {object_type} • {arrow} {wind} {alt_text}{favorite_suffix}"
-
-
-def catalog_search_rank(catalog_value: str | None) -> int:
-    norm = normalize_text(catalog_value)
-    if norm in {"m", "messier"} or norm.startswith("messier"):
-        return 0
-    if norm.startswith("sha") or norm.startswith("sh2") or norm.startswith("sh") or norm.startswith("sharpless"):
-        return 1
-    if norm.startswith("ic"):
-        return 2
-    if norm.startswith("ngc"):
-        return 3
-    return 4
-
-
-def object_type_group_search_rank(object_type_group_value: str | None) -> int:
-    norm = normalize_text(object_type_group_value)
-    if norm in {"galaxy", "galaxies"}:
-        return 0
-    if norm == "brightnebula":
-        return 1
-    if norm == "darknebula":
-        return 2
-    if norm == "clusters":
-        return 3
-    if norm == "stars":
-        return 4
-    if norm == "other":
-        return 5
-    return 6
-
-
-def compute_abs_minutes_to_culmination(targets: pd.DataFrame, lon: float) -> pd.Series:
-    if targets.empty or "ra_deg" not in targets.columns:
-        return pd.Series(np.inf, index=targets.index, dtype=float)
-
-    try:
-        now_utc = Time(datetime.now(timezone.utc))
-        lst_deg = float(now_utc.sidereal_time("apparent", longitude=float(lon) * u.deg).degree) % 360.0
-    except Exception:
-        return pd.Series(np.inf, index=targets.index, dtype=float)
-
-    ra_values = pd.to_numeric(targets["ra_deg"], errors="coerce").to_numpy(dtype=float)
-    abs_minutes = np.full(len(targets), np.inf, dtype=float)
-    valid = np.isfinite(ra_values)
-    if np.any(valid):
-        hour_angle_deg = ((lst_deg - ra_values[valid] + 540.0) % 360.0) - 180.0
-        abs_minutes[valid] = np.abs(hour_angle_deg) * 4.0
-
-    return pd.Series(abs_minutes, index=targets.index, dtype=float)
-
-
-def searchbox_target_options(
-    search_term: str,
-    *,
-    catalog: pd.DataFrame,
-    lat: float,
-    lon: float,
-    favorite_ids: list[str] | set[str] | None = None,
-    max_options: int = 20,
-) -> list[tuple[str, str]]:
-    query = str(search_term or "").strip()
-    if not query:
-        return []
-
-    favorite_list = [str(value) for value in (favorite_ids or [])]
-    favorite_set = set(favorite_list)
-    query_norm = normalize_text(query)
-    if query_norm in {"favorite", "favorites"}:
-        matches = subset_by_id_list(catalog, favorite_list).copy()
-    else:
-        matches = search_catalog(catalog, query).copy()
-        if "object_type_group" in catalog.columns and query_norm:
-            group_norm = catalog["object_type_group"].fillna("").astype(str).map(normalize_text)
-            group_matches = catalog[group_norm.str.contains(query_norm, regex=False)].copy()
-            if not group_matches.empty:
-                if matches.empty:
-                    matches = group_matches
-                else:
-                    matches = (
-                        pd.concat([matches, group_matches], ignore_index=True)
-                        .drop_duplicates(subset=["primary_id"], keep="first")
-                        .reset_index(drop=True)
-                    )
-    if matches.empty:
-        return []
-
-    matches = compute_altaz_now(matches, lat=lat, lon=lon)
-    if query_norm not in {"favorite", "favorites"}:
-        matches["_favorite_rank"] = np.where(matches["primary_id"].astype(str).isin(favorite_set), 0, 1)
-        matches["_horizon_rank"] = np.where(pd.to_numeric(matches["alt_now"], errors="coerce").fillna(-9999.0) >= 0.0, 0, 1)
-        matches["_catalog_rank"] = matches["catalog"].map(catalog_search_rank)
-        matches["_type_group_rank"] = matches["object_type_group"].map(object_type_group_search_rank)
-        matches["_altitude_sort"] = pd.to_numeric(matches["alt_now"], errors="coerce").fillna(-9999.0)
-        matches["_culm_abs_minutes"] = compute_abs_minutes_to_culmination(matches, lon=lon)
-        matches = matches.sort_values(
-            by=[
-                "_favorite_rank",
-                "_horizon_rank",
-                "_catalog_rank",
-                "_type_group_rank",
-                "_altitude_sort",
-                "_culm_abs_minutes",
-                "primary_id",
-            ],
-            ascending=[True, True, True, True, False, True, True],
-            kind="stable",
-        ).drop(
-            columns=[
-                "_favorite_rank",
-                "_horizon_rank",
-                "_catalog_rank",
-                "_type_group_rank",
-                "_altitude_sort",
-                "_culm_abs_minutes",
-            ]
-        )
-    matches = matches.head(max_options)
-
-    options: list[tuple[str, str]] = []
-    for _, row in matches.iterrows():
-        primary_id = str(row.get("primary_id") or "")
-        options.append(
-            (
-                format_search_suggestion(row, is_favorite=primary_id in favorite_set),
-                primary_id,
-            )
-        )
-    return options
 
 
 def render_searchbox_results(
     catalog: pd.DataFrame,
     *,
+    prefs: dict[str, Any] | None = None,
     lat: float,
     lon: float,
-    favorite_ids: list[str] | set[str] | None = None,
+    listed_ids: list[str] | set[str] | None = None,
 ) -> str | None:
     if catalog.empty:
         st.info("No targets matched that search.")
@@ -3008,8 +2874,11 @@ def render_searchbox_results(
             catalog=catalog,
             lat=lat,
             lon=lon,
-            favorite_ids=favorite_ids,
+            listed_ids=listed_ids,
             max_options=20,
+            wind16_arrows=WIND16_ARROWS,
+            search_catalog_fn=search_catalog,
+            compute_altaz_now_fn=compute_altaz_now,
         ),
         label="Search",
         placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
@@ -3027,6 +2896,9 @@ def render_searchbox_results(
         if picked_value != last_applied_pick:
             st.session_state["selected_id"] = picked_value
             st.session_state["targets_searchbox_last_applied_pick"] = picked_value
+            if isinstance(prefs, dict) and push_target_to_auto_recent_list(prefs, picked_value):
+                st.session_state["prefs"] = prefs
+                save_preferences(prefs)
         st.caption(f"Selected: {picked_value}")
         return picked_value
     else:
@@ -3051,140 +2923,6 @@ def render_searchbox_results(
 
     st.caption("No target selected. Type to search and choose a target.")
     return None
-
-
-def render_target_table(
-    targets: pd.DataFrame,
-    *,
-    table_key: str,
-    empty_message: str,
-    auto_select_first: bool = False,
-) -> str | None:
-    display = targets[["primary_id", "common_name", "catalog", "object_type", "alt_now", "az_now", "wind16"]].copy()
-    display = display.rename(
-        columns={
-            "primary_id": "ID",
-            "common_name": "Name",
-            "catalog": "Catalog",
-            "object_type": "Type",
-            "alt_now": "Alt(now)",
-            "az_now": "Az(now)",
-            "wind16": "Direction",
-        }
-    )
-
-    table_event = st.dataframe(
-        display,
-        use_container_width=True,
-        height=360,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=table_key,
-    )
-
-    ids = targets["primary_id"].tolist()
-    if not ids:
-        st.info(empty_message)
-        return None
-
-    selected_id = st.session_state.get("selected_id")
-    if auto_select_first and (not selected_id or selected_id not in ids):
-        st.session_state["selected_id"] = ids[0]
-
-    selected_rows: list[int] = []
-    if table_event is not None:
-        try:
-            selected_rows = list(table_event.selection.rows)
-        except Exception:
-            if isinstance(table_event, dict):
-                selected_rows = list(table_event.get("selection", {}).get("rows", []))
-
-    if selected_rows:
-        selected_index = int(selected_rows[0])
-        if 0 <= selected_index < len(ids):
-            st.session_state["selected_id"] = ids[selected_index]
-
-    selected_id = st.session_state.get("selected_id")
-    if selected_id in ids:
-        st.caption(f"Selected: {selected_id}")
-        return str(selected_id)
-
-    return None
-
-
-def render_main_tabs(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
-    with st.container(border=True):
-        st.subheader("Targets")
-        location = prefs["location"]
-        location_lat = float(location["lat"])
-        location_lon = float(location["lon"])
-        results_count = len(catalog)
-        favorites = compute_altaz_now(
-            subset_by_id_list(catalog, prefs["favorites"]),
-            lat=location_lat,
-            lon=location_lon,
-        )
-        set_list = compute_altaz_now(
-            subset_by_id_list(catalog, prefs["set_list"]),
-            lat=location_lat,
-            lon=location_lon,
-        )
-
-        tab_results, tab_favorites, tab_set_list = st.tabs(
-            [
-                f"Results ({results_count})",
-                f"Favorites ({len(favorites)})",
-                f"Set List ({len(set_list)})",
-            ]
-        )
-
-        with tab_results:
-            st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
-            render_searchbox_results(catalog, lat=location_lat, lon=location_lon)
-
-        with tab_favorites:
-            render_target_table(
-                favorites,
-                table_key="favorites_table",
-                empty_message="No favorites yet.",
-            )
-
-        with tab_set_list:
-            selected_in_set = render_target_table(
-                set_list,
-                table_key="set_list_table",
-                empty_message="Set list is empty.",
-            )
-
-            if not set_list.empty:
-                active_id = selected_in_set or st.session_state.get("selected_id")
-                if active_id in prefs["set_list"]:
-                    active_idx = prefs["set_list"].index(str(active_id))
-                    controls = st.columns(3)
-                    if controls[0].button(
-                        "Move Up",
-                        disabled=active_idx == 0,
-                        key="set_list_move_up_main",
-                        use_container_width=True,
-                    ):
-                        prefs["set_list"] = move_item(prefs["set_list"], active_idx, -1)
-                        persist_and_rerun(prefs)
-                    if controls[1].button(
-                        "Move Down",
-                        disabled=active_idx == len(prefs["set_list"]) - 1,
-                        key="set_list_move_down_main",
-                        use_container_width=True,
-                    ):
-                        prefs["set_list"] = move_item(prefs["set_list"], active_idx, 1)
-                        persist_and_rerun(prefs)
-                    if controls[2].button(
-                        "Remove",
-                        key="set_list_remove_main",
-                        use_container_width=True,
-                    ):
-                        prefs["set_list"] = remove_if_present(prefs["set_list"], str(active_id))
-                        persist_and_rerun(prefs)
 
 
 def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Series | None:
@@ -3286,6 +3024,9 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     effective_unit = resolve_temperature_unit(selected_pref, browser_locale)
     source_note = "browser locale" if selected_pref == "auto" else "manual setting"
     st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
+
+    st.divider()
+    render_lists_settings_section(prefs, persist_and_rerun_fn=persist_and_rerun)
 
     st.divider()
     st.subheader("Catalog")
@@ -3426,7 +3167,7 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
         "Import settings JSON",
         type=["json"],
         key="settings_import_file",
-        help="Imports location, obstructions, favorites, set list, and display preferences.",
+        help="Imports location, obstructions, lists, and display preferences.",
     )
     if st.button("Import settings", use_container_width=True, key="settings_import_apply"):
         if uploaded_settings is None:
@@ -3483,8 +3224,11 @@ def render_detail_panel(
         return
 
     target_id = str(selected["primary_id"])
-    is_favorite = target_id in prefs["favorites"]
-    in_set_list = target_id in prefs["set_list"]
+    active_preview_list_id = get_active_preview_list_id(prefs)
+    active_preview_list_name = get_list_name(prefs, active_preview_list_id)
+    active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
+    active_preview_list_members = set(active_preview_list_ids)
+    preview_list_is_system = is_system_list(prefs, active_preview_list_id)
 
     title = target_id
     if selected.get("common_name"):
@@ -3554,25 +3298,37 @@ def render_detail_panel(
                 st.caption(f"License/Credit: {image_license}")
 
         with property_container:
-            action_cols = st.columns([1, 2], gap="small")
-            favorite_label = "⭐" if is_favorite else "☆"
-            favorite_help = "Unfavorite target" if is_favorite else "Favorite target"
-            if action_cols[0].button(favorite_label, use_container_width=True, help=favorite_help):
-                prefs["favorites"] = (
-                    remove_if_present(prefs["favorites"], target_id)
-                    if is_favorite
-                    else add_if_missing(prefs["favorites"], target_id)
+            editable_list_ids = editable_list_ids_in_order(prefs)
+            if not editable_list_ids:
+                st.caption("No editable lists available yet.")
+            else:
+                preferred_action_list_id = (
+                    active_preview_list_id if active_preview_list_id in editable_list_ids else editable_list_ids[0]
                 )
-                persist_and_rerun(prefs)
+                action_select_key = "detail_add_to_list_select"
+                current_action_selection = str(st.session_state.get(action_select_key, "")).strip()
+                if current_action_selection not in editable_list_ids:
+                    st.session_state[action_select_key] = preferred_action_list_id
+                    current_action_selection = preferred_action_list_id
 
-            set_list_label = "Remove Set List" if in_set_list else "Add to Set List"
-            if action_cols[1].button(set_list_label, use_container_width=True):
-                prefs["set_list"] = (
-                    remove_if_present(prefs["set_list"], target_id)
-                    if in_set_list
-                    else add_if_missing(prefs["set_list"], target_id)
+                selected_action_list_id = st.selectbox(
+                    "Add to list...",
+                    options=editable_list_ids,
+                    index=editable_list_ids.index(current_action_selection),
+                    key=action_select_key,
+                    format_func=lambda list_id: get_list_name(prefs, list_id),
                 )
-                persist_and_rerun(prefs)
+                selected_action_list_name = get_list_name(prefs, selected_action_list_id)
+                selected_action_list_members = set(get_list_ids(prefs, selected_action_list_id))
+                is_in_selected_action_list = target_id in selected_action_list_members
+                list_action_label = "Remove" if is_in_selected_action_list else "Add"
+                if st.button(list_action_label, use_container_width=True, key="detail_add_to_list_apply"):
+                    if toggle_target_in_list(prefs, selected_action_list_id, target_id):
+                        st.session_state["selected_id"] = target_id
+                        persist_and_rerun(prefs)
+                st.caption(
+                    f"{'In' if is_in_selected_action_list else 'Not in'} list: {selected_action_list_name}"
+                )
 
             property_items = [
                 {
@@ -3622,25 +3378,35 @@ def render_detail_panel(
         else PATH_LINE_WIDTH_PRIMARY_DEFAULT
     )
 
-    set_list_tracks: list[dict[str, Any]] = []
-    set_list_targets = subset_by_id_list(catalog, prefs["set_list"])
-    for _, set_list_target in set_list_targets.iterrows():
-        set_list_target_id = str(set_list_target["primary_id"])
-        if set_list_target_id == target_id:
+    available_preview_list_ids = list_ids_in_order(prefs, include_auto_recent=True)
+    if not available_preview_list_ids:
+        available_preview_list_ids = [AUTO_RECENT_LIST_ID]
+    if active_preview_list_id not in available_preview_list_ids:
+        active_preview_list_id = AUTO_RECENT_LIST_ID
+        active_preview_list_name = get_list_name(prefs, active_preview_list_id)
+        active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
+        active_preview_list_members = set(active_preview_list_ids)
+        preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+
+    preview_tracks: list[dict[str, Any]] = []
+    preview_targets = subset_by_id_list(catalog, active_preview_list_ids)
+    for _, preview_target in preview_targets.iterrows():
+        preview_target_id = str(preview_target["primary_id"])
+        if preview_target_id == target_id:
             continue
 
         try:
-            set_list_ra = float(set_list_target["ra_deg"])
-            set_list_dec = float(set_list_target["dec_deg"])
+            preview_ra = float(preview_target["ra_deg"])
+            preview_dec = float(preview_target["dec_deg"])
         except (TypeError, ValueError):
             continue
-        if not np.isfinite(set_list_ra) or not np.isfinite(set_list_dec):
+        if not np.isfinite(preview_ra) or not np.isfinite(preview_dec):
             continue
 
         try:
-            set_list_track = compute_track(
-                ra_deg=set_list_ra,
-                dec_deg=set_list_dec,
+            preview_track = compute_track(
+                ra_deg=preview_ra,
+                dec_deg=preview_dec,
                 lat=float(location["lat"]),
                 lon=float(location["lon"]),
                 start_local=window_start,
@@ -3649,33 +3415,33 @@ def render_detail_panel(
             )
         except Exception:
             continue
-        if set_list_track.empty:
+        if preview_track.empty:
             continue
 
-        set_list_common_name = str(set_list_target.get("common_name") or "").strip()
-        set_list_label = f"{set_list_target_id} - {set_list_common_name}" if set_list_common_name else set_list_target_id
-        set_list_emission_details = re.sub(r"[\[\]]", "", clean_text(set_list_target.get("emission_lines")))
-        set_list_group = str(set_list_target.get("object_type_group") or "").strip() or "other"
-        set_list_tracks.append(
+        preview_common_name = str(preview_target.get("common_name") or "").strip()
+        preview_label = f"{preview_target_id} - {preview_common_name}" if preview_common_name else preview_target_id
+        preview_emission_details = re.sub(r"[\[\]]", "", clean_text(preview_target.get("emission_lines")))
+        preview_group = str(preview_target.get("object_type_group") or "").strip() or "other"
+        preview_tracks.append(
             {
-                "primary_id": set_list_target_id,
-                "common_name": set_list_common_name,
-                "label": set_list_label,
-                "object_type_group": set_list_group,
-                "emission_lines_display": set_list_emission_details,
+                "primary_id": preview_target_id,
+                "common_name": preview_common_name,
+                "label": preview_label,
+                "object_type_group": preview_group,
+                "emission_lines_display": preview_emission_details,
                 "line_width": (
                     (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
-                    if summary_highlight_id == set_list_target_id
+                    if summary_highlight_id == preview_target_id
                     else PATH_LINE_WIDTH_OVERLAY_DEFAULT
                 ),
-                "track": set_list_track,
-                "events": extract_events(set_list_track),
+                "track": preview_track,
+                "events": extract_events(preview_track),
             }
         )
 
     # Evenly distribute same-group targets across each group's start->end gradient.
     group_total_counts: dict[str, int] = {selected_group: 1}
-    for target_track in set_list_tracks:
+    for target_track in preview_tracks:
         group_key = str(target_track.get("object_type_group") or "").strip() or "other"
         group_total_counts[group_key] = group_total_counts.get(group_key, 0) + 1
 
@@ -3690,7 +3456,7 @@ def render_detail_panel(
         return object_type_group_color(group_key, step_fraction=step_fraction)
 
     selected_color = _next_group_plot_color(selected_group)
-    for target_track in set_list_tracks:
+    for target_track in preview_tracks:
         group_key = str(target_track.get("object_type_group") or "").strip() or "other"
         target_track["color"] = _next_group_plot_color(group_key)
 
@@ -3726,6 +3492,24 @@ def render_detail_panel(
 
     with st.container(border=True):
         st.markdown("### Night Sky Preview")
+        current_preview_idx = available_preview_list_ids.index(active_preview_list_id)
+        selected_preview_list_id = st.selectbox(
+            "Preview List",
+            options=available_preview_list_ids,
+            index=current_preview_idx,
+            format_func=lambda list_id: get_list_name(prefs, list_id),
+            key="night_sky_preview_list_select",
+        )
+        if selected_preview_list_id != active_preview_list_id:
+            if set_active_preview_list_id(prefs, selected_preview_list_id):
+                persist_and_rerun(prefs)
+
+        active_preview_list_id = get_active_preview_list_id(prefs)
+        active_preview_list_name = get_list_name(prefs, active_preview_list_id)
+        active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
+        active_preview_list_members = set(active_preview_list_ids)
+        preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+
         st.caption(
             f"Tonight ({tzinfo.key}): "
             f"{format_display_time(window_start, use_12_hour=use_12_hour)} -> "
@@ -3735,6 +3519,7 @@ def render_detail_panel(
             f"Culmination {format_time(events['culmination'], use_12_hour=use_12_hour)} | "
             f"Last-visible {format_time(events['last_visible'], use_12_hour=use_12_hour)}"
         )
+        st.caption(f"Overlaying list: {active_preview_list_name} ({len(preview_tracks)} companion targets)")
 
         path_style = st.segmented_control(
             "Target Paths Style",
@@ -3754,7 +3539,7 @@ def render_detail_panel(
                 selected_color=selected_color,
                 selected_line_width=selected_line_width,
                 use_12_hour=use_12_hour,
-                set_list_tracks=set_list_tracks,
+                overlay_tracks=preview_tracks,
             )
         else:
             path_figure = build_path_plot(
@@ -3766,7 +3551,7 @@ def render_detail_panel(
                 selected_color=selected_color,
                 selected_line_width=selected_line_width,
                 use_12_hour=use_12_hour,
-                set_list_tracks=set_list_tracks,
+                overlay_tracks=preview_tracks,
             )
 
         if let_it_rain is not None and nightly_weather_alert_emojis:
@@ -3797,13 +3582,13 @@ def render_detail_panel(
             selected_color=selected_color,
             selected_events=events,
             selected_track=track,
-            set_list_tracks=set_list_tracks,
-            pinned_ids=set(str(item) for item in prefs["set_list"]),
+            overlay_tracks=preview_tracks,
+            list_member_ids=active_preview_list_members,
             now_local=pd.Timestamp(datetime.now(tzinfo)),
             row_order_ids=(
-                [target_id] + [str(item) for item in prefs["set_list"] if str(item) != target_id]
-                if target_id not in set(str(item) for item in prefs["set_list"])
-                else [str(item) for item in prefs["set_list"]]
+                [target_id] + [str(item) for item in active_preview_list_ids if str(item) != target_id]
+                if target_id not in active_preview_list_members
+                else [str(item) for item in active_preview_list_ids]
             ),
         )
         local_now = datetime.now(tzinfo)
@@ -3814,16 +3599,59 @@ def render_detail_panel(
                 summary_rows,
                 prefs,
                 use_12_hour=use_12_hour,
+                preview_list_id=active_preview_list_id,
+                preview_list_name=active_preview_list_name,
+                allow_list_membership_toggle=(not preview_list_is_system),
                 show_remaining=show_remaining_column,
                 now_local=pd.Timestamp(local_now),
             )
         with tips_col:
+            summary_ids = {
+                str(row.get("primary_id", "")).strip()
+                for row in summary_rows
+                if str(row.get("primary_id", "")).strip()
+            }
+            tips_focus_id = target_id
+            summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+            if summary_highlight_id and summary_highlight_id in summary_ids:
+                tips_focus_id = summary_highlight_id
+
+            tips_track_by_id: dict[str, pd.DataFrame | None] = {target_id: track}
+            for preview_track_payload in preview_tracks:
+                preview_track_id = str(preview_track_payload.get("primary_id", "")).strip()
+                if not preview_track_id:
+                    continue
+                preview_track_df = preview_track_payload.get("track")
+                tips_track_by_id[preview_track_id] = (
+                    preview_track_df if isinstance(preview_track_df, pd.DataFrame) else None
+                )
+
+            tips_data_by_id: dict[str, pd.Series | dict[str, Any] | None] = {target_id: selected}
+            for _, preview_target in preview_targets.iterrows():
+                preview_target_id = str(preview_target.get("primary_id", "")).strip()
+                if preview_target_id:
+                    tips_data_by_id[preview_target_id] = preview_target
+
+            tips_label_by_id: dict[str, str] = {}
+            for row in summary_rows:
+                row_id = str(row.get("primary_id", "")).strip()
+                if not row_id:
+                    continue
+                row_label = str(row.get("target", "")).strip()
+                if row_label:
+                    tips_label_by_id[row_id] = row_label
+            tips_label_by_id.setdefault(target_id, selected_label)
+
+            tips_focus_label = tips_label_by_id.get(tips_focus_id, target_id)
+            tips_focus_data = tips_data_by_id.get(tips_focus_id)
+            tips_focus_track = tips_track_by_id.get(tips_focus_id)
+
             with st.container(border=True):
                 render_target_tips_panel(
-                    target_id,
-                    selected_label,
-                    selected,
-                    track,
+                    tips_focus_id,
+                    tips_focus_label,
+                    tips_focus_data,
+                    tips_focus_track,
                     summary_rows,
                     nightly_weather_alert_emojis,
                     hourly_weather_rows,
@@ -3909,15 +3737,16 @@ def render_explorer_page(
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
-    favorite_ids = [str(item) for item in prefs["favorites"]]
+    listed_ids = all_listed_ids_in_order(prefs)
     top_cols = st.columns([3, 2], gap="medium")
     with top_cols[0]:
         st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
         render_searchbox_results(
             catalog,
+            prefs=prefs,
             lat=location_lat,
             lon=location_lon,
-            favorite_ids=favorite_ids,
+            listed_ids=listed_ids,
         )
     with top_cols[1]:
         st.caption("Tonight weather by hour")
@@ -3947,7 +3776,8 @@ def render_explorer_page(
         st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
 
     selected_row = resolve_selected_row(catalog, prefs)
-    if selected_row is not None or bool(prefs["set_list"]):
+    active_preview_list_ids = get_list_ids(prefs, get_active_preview_list_id(prefs))
+    if selected_row is not None or bool(active_preview_list_ids):
         render_detail_panel(
             selected=selected_row,
             catalog=catalog,
