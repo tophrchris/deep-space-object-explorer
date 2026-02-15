@@ -247,6 +247,7 @@ PATH_LINE_COLORS = [
 ]
 OBSTRUCTION_FILL_COLOR = "rgba(181, 186, 192, 0.40)"
 OBSTRUCTION_LINE_COLOR = "rgba(148, 163, 184, 0.95)"
+UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG = 20.0
 CARDINAL_GRIDLINE_COLOR = "rgba(100, 116, 139, 0.45)"
 DETAIL_PANE_STACK_BREAKPOINT_PX = 800
 PATH_PLOT_BACKGROUND_COLOR = "#E2F0FB"
@@ -1749,6 +1750,322 @@ def obstruction_step_profile(obstructions: dict[str, float]) -> tuple[np.ndarray
             y_values.append(next_altitude)
 
     return np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=float)
+
+
+def visible_track_segments(track: pd.DataFrame) -> list[pd.DataFrame]:
+    if track.empty or "visible" not in track.columns:
+        return []
+
+    visible_mask = track["visible"].fillna(False).astype(bool).to_numpy()
+    if not visible_mask.any():
+        return []
+
+    segments: list[pd.DataFrame] = []
+    start_idx: int | None = None
+    for idx, is_visible in enumerate(visible_mask):
+        if is_visible and start_idx is None:
+            start_idx = idx
+            continue
+        if (not is_visible) and start_idx is not None:
+            segment = track.iloc[start_idx:idx].copy()
+            if not segment.empty:
+                segments.append(segment)
+            start_idx = None
+    if start_idx is not None:
+        segment = track.iloc[start_idx:].copy()
+        if not segment.empty:
+            segments.append(segment)
+    return segments
+
+
+def distribute_non_overlapping_values(
+    values: list[float],
+    *,
+    lower: float,
+    upper: float,
+    min_gap: float,
+) -> list[float]:
+    if not values:
+        return []
+
+    numeric_values = np.asarray(values, dtype=float)
+    total = int(numeric_values.size)
+    if total <= 1:
+        clipped_single = float(np.clip(numeric_values[0], lower, upper))
+        return [clipped_single]
+
+    bounded_lower = float(min(lower, upper))
+    bounded_upper = float(max(lower, upper))
+    span = max(0.0, bounded_upper - bounded_lower)
+    effective_gap = min(max(0.0, float(min_gap)), span / float(total - 1))
+
+    sorted_indices = np.argsort(numeric_values)
+    sorted_values = np.clip(numeric_values[sorted_indices], bounded_lower, bounded_upper).astype(float)
+    adjusted = sorted_values.copy()
+
+    for idx in range(1, total):
+        adjusted[idx] = max(adjusted[idx], adjusted[idx - 1] + effective_gap)
+
+    overflow = adjusted[-1] - bounded_upper
+    if overflow > 0:
+        adjusted -= overflow
+
+    for idx in range(total - 2, -1, -1):
+        adjusted[idx] = min(adjusted[idx], adjusted[idx + 1] - effective_gap)
+
+    underflow = bounded_lower - adjusted[0]
+    if underflow > 0:
+        adjusted += underflow
+
+    adjusted = np.clip(adjusted, bounded_lower, bounded_upper)
+    unsorted_adjusted = np.empty_like(adjusted)
+    unsorted_adjusted[sorted_indices] = adjusted
+    return [float(value) for value in unsorted_adjusted]
+
+
+def build_unobstructed_altitude_area_plot(
+    target_tracks: list[dict[str, Any]],
+    *,
+    use_12_hour: bool,
+) -> go.Figure:
+    fig = go.Figure()
+    plotted_any = False
+    plotted_times: list[pd.Timestamp] = []
+    label_candidates: list[dict[str, Any]] = []
+    obstruction_ceiling = max(0.0, min(90.0, float(UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG)))
+
+    fig.add_shape(
+        type="rect",
+        xref="paper",
+        yref="y",
+        x0=0.0,
+        x1=1.0,
+        y0=0.0,
+        y1=obstruction_ceiling,
+        fillcolor=OBSTRUCTION_FILL_COLOR,
+        line={"width": 0},
+        layer="below",
+    )
+    fig.add_shape(
+        type="line",
+        xref="paper",
+        yref="y",
+        x0=0.0,
+        x1=1.0,
+        y0=obstruction_ceiling,
+        y1=obstruction_ceiling,
+        line={"width": 1, "color": OBSTRUCTION_LINE_COLOR},
+        layer="below",
+    )
+
+    non_selected_tracks = [target for target in target_tracks if not bool(target.get("is_selected", False))]
+    selected_tracks = [target for target in target_tracks if bool(target.get("is_selected", False))]
+    ordered_tracks = [*non_selected_tracks, *selected_tracks]
+
+    for target_track in ordered_tracks:
+        track = target_track.get("track")
+        if not isinstance(track, pd.DataFrame) or track.empty:
+            continue
+
+        is_selected = bool(target_track.get("is_selected", False))
+        target_label = str(target_track.get("label", "List target")).strip() or "List target"
+        target_color = str(target_track.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)).strip() or OBJECT_TYPE_GROUP_COLOR_DEFAULT
+        base_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
+        target_line_width = (
+            max(base_line_width, PATH_LINE_WIDTH_PRIMARY_DEFAULT + 1.2)
+            if is_selected
+            else max(1.6, min(base_line_width, PATH_LINE_WIDTH_OVERLAY_DEFAULT))
+        )
+        target_line_color = target_color if is_selected else _muted_rgba_from_hex(target_color, alpha=0.68)
+        target_emissions = str(target_track.get("emission_lines_display") or "").strip()
+        target_fill_color = _muted_rgba_from_hex(target_color, alpha=(0.30 if is_selected else 0.10))
+        latest_visible_time: pd.Timestamp | None = None
+        latest_visible_altitude: float | None = None
+
+        for segment in visible_track_segments(track):
+            segment_times = pd.to_datetime(segment["time_local"], errors="coerce")
+            segment_altitudes = pd.to_numeric(segment["alt"], errors="coerce")
+            if segment_times.empty or segment_altitudes.empty:
+                continue
+
+            finite_mask = segment_times.notna() & segment_altitudes.notna()
+            if not bool(finite_mask.any()):
+                continue
+
+            segment_times = segment_times.loc[finite_mask]
+            segment_altitudes = segment_altitudes.loc[finite_mask].astype(float)
+            altitude_values = segment_altitudes.to_numpy(dtype=float)
+            finite_altitude_mask = np.isfinite(altitude_values)
+            if not bool(finite_altitude_mask.any()):
+                continue
+
+            segment_times = segment_times.iloc[finite_altitude_mask]
+            altitude_values = altitude_values[finite_altitude_mask]
+            if segment_times.empty or altitude_values.size == 0:
+                continue
+
+            plotted_times.extend([pd.Timestamp(value) for value in segment_times.tolist()])
+            segment_latest_time = pd.Timestamp(segment_times.iloc[-1])
+            segment_latest_altitude = float(altitude_values[-1])
+            if latest_visible_time is None or segment_latest_time > latest_visible_time:
+                latest_visible_time = segment_latest_time
+                latest_visible_altitude = segment_latest_altitude
+
+            hover_times = np.asarray(
+                [format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in segment_times.tolist()],
+                dtype=object,
+            )
+            hover_text = build_path_hovertext(target_label, target_emissions, hover_times, altitude_values)
+            fig.add_trace(
+                go.Scatter(
+                    x=segment_times,
+                    y=altitude_values,
+                    mode="lines",
+                    showlegend=False,
+                    line={"width": target_line_width, "color": target_line_color},
+                    fill="tozeroy",
+                    fillcolor=target_fill_color,
+                    hovertext=hover_text,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                )
+            )
+            plotted_any = True
+        if latest_visible_time is not None and latest_visible_altitude is not None:
+            label_candidates.append(
+                {
+                    "label": target_label,
+                    "color": target_color,
+                    "is_selected": is_selected,
+                    "anchor_time": latest_visible_time,
+                    "anchor_altitude": float(max(0.0, min(90.0, latest_visible_altitude))),
+                }
+            )
+
+    title = "Unobstructed Altitude Coverage"
+    if not plotted_any:
+        fig.add_annotation(
+            text="No unobstructed intervals for these targets tonight.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font={"size": 13, "color": "#334155"},
+        )
+    else:
+        anchored_altitudes = [float(candidate["anchor_altitude"]) for candidate in label_candidates]
+        placed_altitudes = distribute_non_overlapping_values(
+            anchored_altitudes,
+            lower=2.0,
+            upper=88.0,
+            min_gap=4.0,
+        )
+        for idx, candidate in enumerate(label_candidates):
+            candidate_color = str(candidate["color"])
+            is_selected_label = bool(candidate["is_selected"])
+            label_text = html.escape(str(candidate["label"]))
+            if is_selected_label:
+                label_text = f"<b>{label_text}</b>"
+            placed_altitude = float(placed_altitudes[idx])
+            anchor_altitude = float(candidate["anchor_altitude"])
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[candidate["anchor_time"]],
+                    y=[anchor_altitude],
+                    mode="markers",
+                    showlegend=False,
+                    marker={
+                        "size": 5 if is_selected_label else 4,
+                        "color": candidate_color,
+                        "line": {"width": 0},
+                    },
+                    hoverinfo="skip",
+                )
+            )
+            if abs(placed_altitude - anchor_altitude) >= 0.2:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[candidate["anchor_time"], candidate["anchor_time"]],
+                        y=[anchor_altitude, placed_altitude],
+                        mode="lines",
+                        showlegend=False,
+                        line={
+                            "width": 1,
+                            "color": _muted_rgba_from_hex(candidate_color, alpha=0.70),
+                            "dash": "dot",
+                        },
+                        hoverinfo="skip",
+                    )
+                )
+            fig.add_annotation(
+                x=1.004,
+                y=placed_altitude,
+                xref="paper",
+                yref="y",
+                text=label_text,
+                showarrow=False,
+                xanchor="left",
+                align="left",
+                font={
+                    "size": 11 if is_selected_label else 10,
+                    "color": candidate_color if is_selected_label else _muted_rgba_from_hex(candidate_color, alpha=0.86),
+                },
+                bgcolor="rgba(255, 255, 255, 0.45)",
+                bordercolor="rgba(148, 163, 184, 0.35)",
+                borderwidth=1,
+                borderpad=2,
+            )
+
+    fig.update_layout(
+        title=title,
+        height=360,
+        margin={"l": 10, "r": 170, "t": 70, "b": 10},
+        showlegend=False,
+        plot_bgcolor=PATH_PLOT_BACKGROUND_COLOR,
+        xaxis_title="Time",
+        yaxis_title="Altitude (deg)",
+    )
+
+    x_axis_settings: dict[str, Any] = {
+        "type": "date",
+        "showgrid": True,
+        "gridcolor": PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        "gridwidth": 1,
+        "dtick": 60 * 60 * 1000,
+    }
+    if plotted_times:
+        min_time = min(plotted_times)
+        max_time = max(plotted_times)
+        tick_start = min_time.floor("h")
+        tick_end = max_time.ceil("h")
+        hourly_ticks = pd.date_range(start=tick_start, end=tick_end, freq="1h")
+        if len(hourly_ticks) > 0:
+            x_axis_settings["tickmode"] = "array"
+            x_axis_settings["tickvals"] = [pd.Timestamp(value).isoformat() for value in hourly_ticks]
+            if use_12_hour:
+                x_axis_settings["ticktext"] = [
+                    normalize_12_hour_label(pd.Timestamp(value).strftime("%I%p")) for value in hourly_ticks
+                ]
+            else:
+                x_axis_settings["ticktext"] = [pd.Timestamp(value).strftime("%H") for value in hourly_ticks]
+        x_axis_settings["tick0"] = tick_start.isoformat()
+        x_axis_settings["range"] = [
+            (min_time - pd.Timedelta(minutes=10)).isoformat(),
+            (max_time + pd.Timedelta(minutes=10)).isoformat(),
+        ]
+
+    fig.update_xaxes(
+        **x_axis_settings,
+    )
+    fig.update_yaxes(
+        range=[0, 90],
+        tickvals=[0, 15, 30, 45, 60, 75, 90],
+        showgrid=True,
+        gridcolor=PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        gridwidth=1,
+    )
+    return fig
 
 
 def build_path_plot(
@@ -3733,6 +4050,25 @@ def render_detail_panel(
                 allow_list_membership_toggle=(not preview_list_is_system),
                 show_remaining=show_remaining_column,
                 now_local=pd.Timestamp(local_now),
+            )
+            unobstructed_area_tracks = [
+                {
+                    "is_selected": True,
+                    "label": selected_label,
+                    "color": selected_color,
+                    "line_width": selected_line_width,
+                    "emission_lines_display": emission_details_display,
+                    "track": track,
+                },
+                *[{**preview_track, "is_selected": False} for preview_track in preview_tracks],
+            ]
+            st.plotly_chart(
+                build_unobstructed_altitude_area_plot(
+                    unobstructed_area_tracks,
+                    use_12_hour=use_12_hour,
+                ),
+                use_container_width=True,
+                key="detail_unobstructed_area_plot",
             )
         with tips_col:
             summary_ids = {
