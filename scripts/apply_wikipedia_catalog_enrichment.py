@@ -18,7 +18,14 @@ if str(ROOT) not in sys.path:
 from catalog_ingestion import ENRICHED_OPTIONAL_COLUMNS, OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 
 CACHE_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS
-NUMERIC_COLUMNS = {"ra_deg", "dec_deg", "dist_value", "redshift"}
+NUMERIC_COLUMNS = {
+    "ra_deg",
+    "dec_deg",
+    "dist_value",
+    "redshift",
+    "ang_size_maj_arcmin",
+    "ang_size_min_arcmin",
+}
 STRING_COLUMNS = [column for column in CACHE_COLUMNS if column not in NUMERIC_COLUMNS]
 
 
@@ -125,6 +132,8 @@ def _parse_enrichment_row(row: dict[str, Any]) -> dict[str, Any]:
         "object_type": str(catalog_enrichment.get("object_type", "")).strip(),
         "ra_deg": _coerce_float(catalog_enrichment.get("ra_deg")),
         "dec_deg": _coerce_float(catalog_enrichment.get("dec_deg")),
+        "ang_size_maj_arcmin": _coerce_float(catalog_enrichment.get("ang_size_maj_arcmin")),
+        "ang_size_min_arcmin": _coerce_float(catalog_enrichment.get("ang_size_min_arcmin")),
         "constellation": str(catalog_enrichment.get("constellation", "")).strip(),
         "aliases": aliases,
         "image_url": image_url,
@@ -144,6 +153,8 @@ def _has_enrichment_payload(enrichment: dict[str, Any]) -> bool:
             bool(enrichment.get("object_type")),
             enrichment.get("ra_deg") is not None,
             enrichment.get("dec_deg") is not None,
+            enrichment.get("ang_size_maj_arcmin") is not None,
+            enrichment.get("ang_size_min_arcmin") is not None,
             bool(enrichment.get("constellation")),
             bool(enrichment.get("aliases")),
             bool(enrichment.get("image_url")),
@@ -276,7 +287,7 @@ def main() -> None:
                 updates_by_field[field] = updates_by_field.get(field, 0) + 1
                 row_changed = True
 
-            for field in ("ra_deg", "dec_deg"):
+            for field in ("ra_deg", "dec_deg", "ang_size_maj_arcmin", "ang_size_min_arcmin"):
                 new_number = _coerce_float(enrichment.get(field))
                 if new_number is None:
                     continue
@@ -328,6 +339,8 @@ def main() -> None:
         new_row["object_type"] = str(enrichment.get("object_type", "")).strip()
         new_row["ra_deg"] = ra_deg
         new_row["dec_deg"] = dec_deg
+        new_row["ang_size_maj_arcmin"] = _coerce_float(enrichment.get("ang_size_maj_arcmin"))
+        new_row["ang_size_min_arcmin"] = _coerce_float(enrichment.get("ang_size_min_arcmin"))
         new_row["constellation"] = str(enrichment.get("constellation", "")).strip()
         new_row["aliases"] = ";".join(_to_list(enrichment.get("aliases", [])))
         new_row["object_type_group"] = str(item.get("object_type_group", "")).strip()

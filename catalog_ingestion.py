@@ -36,6 +36,8 @@ ENRICHED_OPTIONAL_COLUMNS = [
     "dist_value",
     "dist_unit",
     "redshift",
+    "ang_size_maj_arcmin",
+    "ang_size_min_arcmin",
     "morphology",
     "emission_lines",
 ]
@@ -43,6 +45,9 @@ ENRICHED_OPTIONAL_COLUMNS = [
 INGESTION_VERSION = 9
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
+POPULAR_DSO_SUPPLEMENT_PATH = (
+    Path(__file__).resolve().parent / "data" / "1000_popular_deep_sky_objects_missing_from_parquet.csv"
+)
 SIMBAD_OTYPE_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "simbad_otype_mapping.csv"
 OBJECT_TYPE_GROUP_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "object_type_groups.csv"
 OBJECT_TYPE_GROUP_DEFAULT = "other"
@@ -334,6 +339,8 @@ def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     normalized["dec_deg"] = pd.to_numeric(normalized["dec_deg"], errors="coerce")
     normalized["dist_value"] = pd.to_numeric(normalized["dist_value"], errors="coerce")
     normalized["redshift"] = pd.to_numeric(normalized["redshift"], errors="coerce")
+    normalized["ang_size_maj_arcmin"] = pd.to_numeric(normalized["ang_size_maj_arcmin"], errors="coerce")
+    normalized["ang_size_min_arcmin"] = pd.to_numeric(normalized["ang_size_min_arcmin"], errors="coerce")
 
     normalized = normalized.dropna(subset=["ra_deg", "dec_deg"])
     normalized = normalized[normalized["primary_id"] != ""]
@@ -474,6 +481,10 @@ def _parse_radec(ra_raw: str, dec_raw: str) -> tuple[float, float] | None:
         return float(coords.ra.deg), float(coords.dec.deg)
     except Exception:
         return None
+
+
+def _empty_catalog_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
 
 
 def _query_simbad_tap(query: str) -> pd.DataFrame:
@@ -947,6 +958,8 @@ def ingest_from_enriched_csv(enriched_path: Path) -> pd.DataFrame:
                 "dist_value": row.get("dist_value", ""),
                 "dist_unit": str(row.get("dist_unit", "")).strip(),
                 "redshift": row.get("redshift", ""),
+                "ang_size_maj_arcmin": row.get("ang_size_maj_arcmin", ""),
+                "ang_size_min_arcmin": row.get("ang_size_min_arcmin", ""),
                 "morphology": str(row.get("morphology", "")).strip(),
                 "emission_lines": "; ".join(emission_lines),
             }
@@ -960,17 +973,101 @@ def ingest_from_enriched_csv(enriched_path: Path) -> pd.DataFrame:
 
 def ingest_sh2_from_seed(seed_path: Path) -> pd.DataFrame:
     if not seed_path.exists():
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
+        return _empty_catalog_frame()
 
     source = pd.read_csv(seed_path)
     if "catalog" not in source.columns:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
+        return _empty_catalog_frame()
 
     sh2 = source[source["catalog"].fillna("").astype(str).str.upper() == "SH2"].copy()
     if sh2.empty:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS)
+        return _empty_catalog_frame()
 
     return _normalize_frame(sh2)
+
+
+def ingest_from_popular_dso_csv(popular_path: Path) -> pd.DataFrame:
+    if not popular_path.exists():
+        return _empty_catalog_frame()
+
+    source = pd.read_csv(popular_path, keep_default_na=False)
+    if source.empty:
+        return _empty_catalog_frame()
+
+    required_columns = {"id", "RA", "Dec"}
+    missing_columns = required_columns - set(source.columns)
+    if missing_columns:
+        missing_list = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Popular DSO supplement is missing required columns: {missing_list}")
+
+    records: list[dict[str, Any]] = []
+    for _, row in source.iterrows():
+        raw_id = str(row.get("id", "")).strip()
+        primary_id = _normalize_primary_id_for_app(raw_id)
+        if not primary_id:
+            continue
+
+        coords = _parse_radec(row.get("RA", ""), row.get("Dec", ""))
+        if coords is None:
+            ra_deg = pd.to_numeric(row.get("RA", ""), errors="coerce")
+            dec_deg = pd.to_numeric(row.get("Dec", ""), errors="coerce")
+            if pd.isna(ra_deg) or pd.isna(dec_deg):
+                continue
+            coords = (float(ra_deg), float(dec_deg))
+
+        common_names = _parse_common_names(str(row.get("common_names", "")))
+        common_name = common_names[0] if common_names else ""
+        identifiers_raw = str(row.get("identifiers", "")).strip()
+
+        alias_candidates: list[str] = []
+        if raw_id and raw_id != primary_id:
+            alias_candidates.append(raw_id)
+        alias_candidates.extend(common_names[:5])
+        if identifiers_raw and identifiers_raw.lower() != "nan":
+            alias_candidates.extend(
+                [token.strip() for token in identifiers_raw.split(",") if token and token.strip()]
+            )
+        aliases = ";".join(
+            [alias for alias in _dedupe_preserve_order(alias_candidates) if alias and alias != primary_id]
+        )
+
+        object_type_code = str(row.get("object_type", "")).strip()
+        object_type = OPENNGC_TYPE_MAP.get(object_type_code, object_type_code)
+        info_url = str(row.get("wikipedia_url", "")).strip()
+        major_axis_deg = pd.to_numeric(row.get("major_axis_deg", ""), errors="coerce")
+        minor_axis_deg = pd.to_numeric(row.get("minor_axis_deg", ""), errors="coerce")
+        major_axis_arcmin = float(major_axis_deg * 60.0) if not pd.isna(major_axis_deg) else ""
+        minor_axis_arcmin = float(minor_axis_deg * 60.0) if not pd.isna(minor_axis_deg) else ""
+
+        records.append(
+            {
+                "primary_id": primary_id,
+                "catalog": _catalog_from_primary_id(primary_id),
+                "common_name": common_name,
+                "object_type": object_type,
+                "ra_deg": coords[0],
+                "dec_deg": coords[1],
+                "constellation": str(row.get("constellation", "")).strip(),
+                "aliases": aliases,
+                "image_url": "",
+                "image_attribution_url": "",
+                "license_label": "",
+                "description": "",
+                "info_url": info_url,
+                "dist_value": "",
+                "dist_unit": "",
+                "redshift": "",
+                "ang_size_maj_arcmin": major_axis_arcmin,
+                "ang_size_min_arcmin": minor_axis_arcmin,
+                "morphology": "",
+                "emission_lines": "",
+            }
+        )
+
+    if not records:
+        return _empty_catalog_frame()
+
+    return _normalize_frame(pd.DataFrame.from_records(records))
 
 
 def ingest_from_openngc() -> pd.DataFrame:
@@ -1069,6 +1166,7 @@ def load_unified_catalog(
     cache_path: Path,
     metadata_path: Path,
     enriched_path: Path | None = None,
+    popular_dso_path: Path | None = POPULAR_DSO_SUPPLEMENT_PATH,
     force_refresh: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     metadata = _read_metadata(metadata_path)
@@ -1078,10 +1176,53 @@ def load_unified_catalog(
         try:
             cached = pd.read_parquet(cache_path)
             frame = _normalize_frame(cached)
+            persist_metadata = False
+            supplement_metadata = {
+                "path": str(popular_dso_path) if popular_dso_path else "",
+                "row_count": 0,
+                "rows_added": 0,
+            }
+            if popular_dso_path is not None and popular_dso_path.exists():
+                supplement_frame = ingest_from_popular_dso_csv(popular_dso_path)
+                supplement_metadata["row_count"] = int(len(supplement_frame))
+                if not supplement_frame.empty:
+                    pre_merge_count = int(len(frame))
+                    frame = merge_catalogs(frame, supplement_frame)
+                    supplement_metadata["rows_added"] = int(max(0, len(frame) - pre_merge_count))
+                    frame, _ = apply_simbad_object_type_labels(frame)
+                    frame, _, _ = apply_object_type_groups(frame)
+                if supplement_metadata["rows_added"] > 0:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    frame.to_parquet(cache_path, index=False)
+                    metadata["row_count"] = int(len(frame))
+                    metadata["catalog_counts"] = {
+                        str(key): int(value) for key, value in frame["catalog"].value_counts().to_dict().items()
+                    }
+                    metadata["loaded_at_utc"] = datetime.now(timezone.utc).isoformat()
+                    source_text = str(metadata.get("source", "")).strip()
+                    supplement_source = str(popular_dso_path)
+                    if source_text:
+                        source_parts = [part.strip() for part in source_text.split("|") if part.strip()]
+                        if supplement_source not in source_parts:
+                            source_parts.append(supplement_source)
+                        metadata["source"] = " | ".join(source_parts)
+                    else:
+                        metadata["source"] = supplement_source
+                    persist_metadata = True
+
+            supplements = metadata.get("supplements", {})
+            if not isinstance(supplements, dict):
+                supplements = {}
+            if supplements.get("popular_dso_missing_list") != supplement_metadata:
+                persist_metadata = True
+            supplements["popular_dso_missing_list"] = supplement_metadata
+            metadata["supplements"] = supplements
             metadata.setdefault("load_mode", "cache")
             metadata.setdefault("row_count", len(frame))
             metadata.setdefault("catalog_counts", frame["catalog"].value_counts().to_dict())
             metadata.setdefault("cache_refresh_policy", "on_demand")
+            if persist_metadata:
+                _write_metadata(metadata_path, metadata)
             return frame, metadata
         except Exception:
             pass
@@ -1089,6 +1230,11 @@ def load_unified_catalog(
     notes: list[str] = []
     source_parts: list[str] = []
     simbad_metadata: dict[str, Any] = {}
+    supplement_metadata = {
+        "path": str(popular_dso_path) if popular_dso_path else "",
+        "row_count": 0,
+        "rows_added": 0,
+    }
     simbad_named_objects: pd.DataFrame | None = None
     prefer_enriched = enriched_path is not None and enriched_path.exists()
 
@@ -1196,6 +1342,19 @@ def load_unified_catalog(
         simbad_metadata["m_ngc_enriched_rows"] = 0
         notes.append("SIMBAD M/NGC enrichment skipped: named-object source unavailable")
 
+    if popular_dso_path is not None and popular_dso_path.exists():
+        try:
+            supplement_frame = ingest_from_popular_dso_csv(popular_dso_path)
+            supplement_metadata["row_count"] = int(len(supplement_frame))
+            if not supplement_frame.empty:
+                pre_merge_count = int(len(frame))
+                frame = merge_catalogs(frame, supplement_frame)
+                supplement_metadata["rows_added"] = int(max(0, len(frame) - pre_merge_count))
+                if supplement_metadata["rows_added"] > 0:
+                    source_parts.append(str(popular_dso_path))
+        except Exception as error:
+            notes.append(f"Popular DSO supplement ingest failed: {_error_summary(error)}")
+
     frame, mapped_type_updates = apply_simbad_object_type_labels(frame)
     simbad_metadata["otype_mapping_entries"] = int(len(SIMBAD_OTYPE_MAP_EXACT))
     simbad_metadata["otype_label_updates"] = int(mapped_type_updates)
@@ -1217,6 +1376,7 @@ def load_unified_catalog(
         "catalog_counts": {str(key): int(value) for key, value in frame["catalog"].value_counts().to_dict().items()},
         "cache_refresh_policy": "on_demand",
         "simbad": simbad_metadata,
+        "supplements": {"popular_dso_missing_list": supplement_metadata},
     }
 
     if notes:
