@@ -1,0 +1,31 @@
+{
+  "ingestion_version": 9,
+  "load_mode": "enriched_csv",
+  "source": "data/DSO_CATALOG_ENRICHED.CSV | SIMBAD NAME objects (sim-tap)",
+  "cache": "data/dso_catalog_cache.parquet",
+  "loaded_at_utc": "2026-02-15T10:21:40.620815+00:00",
+  "row_count": 10422,
+  "catalog_counts": {
+    "SIMBAD": 7232,
+    "NGC": 2097,
+    "IC": 1032,
+    "SH2": 31,
+    "M": 30
+  },
+  "cache_refresh_policy": "on_demand",
+  "simbad": {
+    "named_object_rows": 11364,
+    "named_catalog_rows": 7947,
+    "named_new_rows_added": 7309,
+    "sh2_source": "simbad",
+    "sh2_row_count": 23,
+    "m_ngc_enriched_rows": 413,
+    "parquet_row_count": 0,
+    "parquet_rows_added": 0,
+    "otype_mapping_entries": 226,
+    "otype_label_updates": 0,
+    "object_type_group_rule_entries": 36,
+    "object_type_renamed_rows": 2737,
+    "object_type_grouped_rows": 10422
+  }
+}
