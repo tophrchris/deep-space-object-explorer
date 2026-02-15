@@ -1,0 +1,37 @@
+area/app:
+- changed-files:
+  - any-glob-to-any-file:
+    - "app.py"
+    - "catalog_*.py"
+    - "list_*.py"
+    - "target_tips/**"
+    - "weather_service.py"
+
+area/data:
+- changed-files:
+  - any-glob-to-any-file:
+    - "data/**"
+
+area/docs:
+- changed-files:
+  - any-glob-to-any-file:
+    - "*.md"
+    - "docs/**"
+
+area/scripts:
+- changed-files:
+  - any-glob-to-any-file:
+    - "scripts/**"
+
+area/enricher:
+- changed-files:
+  - any-glob-to-any-file:
+    - "dso_enricher/**"
+
+area/infra:
+- changed-files:
+  - any-glob-to-any-file:
+    - ".github/**"
+    - ".gitignore"
+    - "requirements.txt"
+    - "runtime.txt"
