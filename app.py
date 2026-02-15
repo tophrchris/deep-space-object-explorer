@@ -3273,6 +3273,15 @@ def render_detail_panel(
             return ""
         return f"{numeric:.6g}"
 
+    def parse_numeric(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric):
+            return None
+        return numeric
+
     if selected is None:
         with st.container(border=True):
             st.info("Select a target from results to view detail and plots.")
@@ -3310,6 +3319,47 @@ def render_detail_panel(
     dist_value = format_numeric(selected.get("dist_value"))
     dist_unit = clean_text(selected.get("dist_unit"))
     redshift = format_numeric(selected.get("redshift"))
+    ang_size_maj_arcmin_value = parse_numeric(selected.get("ang_size_maj_arcmin"))
+    ang_size_min_arcmin_value = parse_numeric(selected.get("ang_size_min_arcmin"))
+    ang_size_maj_arcmin = format_numeric(ang_size_maj_arcmin_value)
+    ang_size_min_arcmin = format_numeric(ang_size_min_arcmin_value)
+
+    if ang_size_maj_arcmin and ang_size_min_arcmin:
+        ang_size_arcmin_display = f"{ang_size_maj_arcmin} x {ang_size_min_arcmin} arcmin"
+    elif ang_size_maj_arcmin:
+        ang_size_arcmin_display = f"{ang_size_maj_arcmin} arcmin"
+    elif ang_size_min_arcmin:
+        ang_size_arcmin_display = f"{ang_size_min_arcmin} arcmin"
+    else:
+        ang_size_arcmin_display = ""
+
+    show_ang_size_in_degrees = (
+        (ang_size_maj_arcmin_value is not None and ang_size_maj_arcmin_value >= 60.0)
+        or (ang_size_min_arcmin_value is not None and ang_size_min_arcmin_value >= 60.0)
+    )
+    if show_ang_size_in_degrees:
+        ang_size_maj_deg = (
+            format_numeric(ang_size_maj_arcmin_value / 60.0)
+            if ang_size_maj_arcmin_value is not None
+            else ""
+        )
+        ang_size_min_deg = (
+            format_numeric(ang_size_min_arcmin_value / 60.0)
+            if ang_size_min_arcmin_value is not None
+            else ""
+        )
+        if ang_size_maj_deg and ang_size_min_deg:
+            ang_size_display = f"{ang_size_maj_deg} x {ang_size_min_deg} deg"
+        elif ang_size_maj_deg:
+            ang_size_display = f"{ang_size_maj_deg} deg"
+        elif ang_size_min_deg:
+            ang_size_display = f"{ang_size_min_deg} deg"
+        else:
+            ang_size_display = ""
+        ang_size_tooltip = ang_size_arcmin_display
+    else:
+        ang_size_display = ang_size_arcmin_display
+        ang_size_tooltip = ""
     morphology = clean_text(selected.get("morphology"))
     emission_details = clean_text(selected.get("emission_lines"))
     emission_details_display = re.sub(r"[\[\]]", "", emission_details)
@@ -3401,6 +3451,7 @@ def render_detail_panel(
                 {"Property": "Distance Value", "Value": dist_value or "-"},
                 {"Property": "Distance Unit", "Value": dist_unit or "-"},
                 {"Property": "Redshift", "Value": redshift or "-"},
+                {"Property": "Angular Size", "Value": ang_size_display or "-", "Tooltip": ang_size_tooltip},
                 {"Property": "Morphology", "Value": morphology or "-"},
                 {"Property": "Emissions Details", "Value": emission_details_display or "-"},
             ]
@@ -3412,13 +3463,34 @@ def render_detail_panel(
                 ]
             )
             if not property_rows.empty:
-                table_height = max(72, min(320, 36 * (len(property_rows) + 1)))
-                st.dataframe(
-                    property_rows,
-                    hide_index=True,
-                    use_container_width=True,
-                    height=table_height,
+                table_rows_html: list[str] = []
+                for _, row in property_rows.iterrows():
+                    property_label = html.escape(str(row.get("Property", "")))
+                    value_text = clean_text(row.get("Value")) or "-"
+                    tooltip_text = clean_text(row.get("Tooltip"))
+                    value_html = html.escape(value_text)
+                    if tooltip_text and tooltip_text != value_text:
+                        tooltip_html = html.escape(tooltip_text, quote=True)
+                        value_html = (
+                            f'<span title="{tooltip_html}" style="text-decoration: underline dotted; cursor: help;">'
+                            f"{value_html}</span>"
+                        )
+                    table_rows_html.append(
+                        "<tr>"
+                        f'<td style="padding:0.35rem 0.5rem; vertical-align:top; border-bottom:1px solid rgba(120,120,120,0.18);">{property_label}</td>'
+                        f'<td style="padding:0.35rem 0.5rem; vertical-align:top; border-bottom:1px solid rgba(120,120,120,0.18);">{value_html}</td>'
+                        "</tr>"
+                    )
+                attributes_table_html = (
+                    '<table style="width:100%; border-collapse:collapse; font-size:0.92rem;">'
+                    "<thead><tr>"
+                    '<th style="text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(120,120,120,0.28);">Property</th>'
+                    '<th style="text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(120,120,120,0.28);">Value</th>'
+                    "</tr></thead>"
+                    f"<tbody>{''.join(table_rows_html)}</tbody>"
+                    "</table>"
                 )
+                st.markdown(attributes_table_html, unsafe_allow_html=True)
         with forecast_container:
             forecast_placeholder = st.empty()
             forecast_legend_placeholder = st.empty()
