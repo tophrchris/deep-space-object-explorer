@@ -3,14 +3,14 @@
   "load_mode": "enriched_csv",
   "source": "data/DSO_CATALOG_ENRICHED.CSV | SIMBAD NAME objects (sim-tap)",
   "cache": "data/dso_catalog_cache.parquet",
-  "loaded_at_utc": "2026-02-15T10:21:40.620815+00:00",
-  "row_count": 10422,
+  "loaded_at_utc": "2026-02-15T12:12:19+00:00",
+  "row_count": 10498,
   "catalog_counts": {
     "SIMBAD": 7232,
     "NGC": 2097,
     "IC": 1032,
-    "SH2": 31,
-    "M": 30
+    "M": 105,
+    "SH2": 32
   },
   "cache_refresh_policy": "on_demand",
   "simbad": {
@@ -27,5 +27,26 @@
     "object_type_group_rule_entries": 36,
     "object_type_renamed_rows": 2737,
     "object_type_grouped_rows": 10422
+  },
+  "wikipedia_enrichment_merge": {
+    "applied_at_utc": "2026-02-15T12:12:19+00:00",
+    "enrichment_path": "data/wikipedia_catalog_enrichment.json",
+    "targets_seen": 1067,
+    "rows_updated": 945,
+    "rows_inserted": 76,
+    "skipped_rows_without_payload": 44,
+    "skipped_inserts_missing_coordinates": 2,
+    "field_updates": {
+      "aliases": 209,
+      "common_name": 124,
+      "constellation": 146,
+      "dec_deg": 156,
+      "description": 260,
+      "image_attribution_url": 945,
+      "image_url": 249,
+      "info_url": 945,
+      "object_type": 287,
+      "ra_deg": 154
+    }
   }
 }
