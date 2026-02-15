@@ -6,7 +6,7 @@
 - [x] Add in-app control to refresh catalog ingestion cache.
 - [x] Expand seed dataset toward full catalog coverage for M/NGC/IC/SH2.
 - [ ] Add source-specific ingest adapters (one module per catalog source).
-- [ ] Add ingest validation checks (required fields, RA/Dec ranges, duplicate IDs).
+- [x] Add ingest validation checks (required fields, RA/Dec ranges, duplicate IDs).
 - [x] Add ingest tests and a CLI entry point for batch refresh.
 
 ## Phase 2: Location + Sky Semantics
@@ -52,7 +52,8 @@
 - [ ] look at things like https://en.wikipedia.org/wiki/Lists_of_nebulae for catalog enrichment
 - [ ] integrate barnard objects, caldwell objects
 - [ ] use panoramic picture for obstructions and as overlay in night view
-- [ ] 
+- [ ] list management as a first class app experience- show objects in list similar to how the wikipedia enrichment ui shows them
+- [ ] start reshaping "explorer" Page into "tonights plan" Page
   
 ## launch Phase
 - [ ] build github pages based website
