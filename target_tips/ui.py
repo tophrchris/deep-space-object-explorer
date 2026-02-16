@@ -43,17 +43,24 @@ def render_target_tips_panel(
     window_end: datetime,
 ) -> None:
     st.markdown("#### Target Tips")
+    selected_primary_id = str(selected_id or "").strip()
+    selected_display_label = str(selected_label or "").strip()
+    if not selected_primary_id:
+        st.caption(selected_display_label or "No target selected")
+        st.caption("No target tips available.")
+        return
+
     if not summary_rows:
         st.caption("No target tips available.")
         return
 
     selected_row = next(
-        (row for row in summary_rows if str(row.get("primary_id", "")).strip() == selected_id),
+        (row for row in summary_rows if str(row.get("primary_id", "")).strip() == selected_primary_id),
         summary_rows[0],
     )
     context = TargetTipsContext(
-        selected_id=selected_id,
-        selected_label=selected_label,
+        selected_id=selected_primary_id,
+        selected_label=selected_display_label,
         selected_target_data=selected_target_data,
         selected_track=selected_track,
         selected_row=selected_row,
@@ -67,7 +74,7 @@ def render_target_tips_panel(
     )
     tips = collect_target_tips(context)
 
-    st.caption(selected_label)
+    st.caption(selected_display_label or selected_primary_id)
     if not tips:
         st.caption("No target tips available.")
         return
