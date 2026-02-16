@@ -776,13 +776,48 @@ def format_duration_hm(duration: timedelta) -> str:
     return f"{minutes}m"
 
 
+def format_ra_hms(ra_deg: float | None) -> str:
+    if ra_deg is None:
+        return "-"
+    try:
+        ra_value = float(ra_deg)
+    except (TypeError, ValueError):
+        return "-"
+    if not np.isfinite(ra_value):
+        return "-"
+
+    total_seconds = int(round((ra_value % 360.0) * 240.0))
+    total_seconds %= 24 * 3600
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
+
+
+def format_dec_dms(dec_deg: float | None) -> str:
+    if dec_deg is None:
+        return "-"
+    try:
+        dec_value = float(dec_deg)
+    except (TypeError, ValueError):
+        return "-"
+    if not np.isfinite(dec_value):
+        return "-"
+
+    clamped_dec = max(-90.0, min(90.0, dec_value))
+    sign = "-" if clamped_dec < 0 else "+"
+    total_seconds = int(round(abs(clamped_dec) * 3600.0))
+    degrees, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{sign}{degrees:02d}° {minutes:02d}' {seconds:02d}\""
+
+
 def build_sky_position_summary_rows(
-    selected_id: str,
-    selected_label: str,
-    selected_type_group: str,
-    selected_color: str,
-    selected_events: dict[str, pd.Series | None],
-    selected_track: pd.DataFrame,
+    selected_id: str | None,
+    selected_label: str | None,
+    selected_type_group: str | None,
+    selected_color: str | None,
+    selected_events: dict[str, pd.Series | None] | None,
+    selected_track: pd.DataFrame | None,
     overlay_tracks: list[dict[str, Any]],
     list_member_ids: set[str],
     now_local: pd.Timestamp | datetime | None = None,
@@ -816,17 +851,22 @@ def build_sky_position_summary_rows(
             "is_in_list": is_in_list,
         }
 
-    selected_row = _build_row(
-        selected_id,
-        selected_label,
-        selected_type_group,
-        selected_color,
-        selected_events,
-        selected_id in list_member_ids,
-    )
-    selected_row["visible_total"] = format_duration_hm(compute_total_visible_time(selected_track))
-    selected_row["visible_remaining"] = format_duration_hm(compute_remaining_visible_time(selected_track, now=now_local))
-    rows = [selected_row]
+    rows: list[dict[str, Any]] = []
+    selected_primary_id = str(selected_id or "").strip()
+    if selected_primary_id and isinstance(selected_track, pd.DataFrame):
+        selected_row = _build_row(
+            selected_primary_id,
+            str(selected_label or selected_primary_id),
+            str(selected_type_group or "other"),
+            str(selected_color or "#22c55e"),
+            selected_events or {},
+            selected_primary_id in list_member_ids,
+        )
+        selected_row["visible_total"] = format_duration_hm(compute_total_visible_time(selected_track))
+        selected_row["visible_remaining"] = format_duration_hm(
+            compute_remaining_visible_time(selected_track, now=now_local)
+        )
+        rows.append(selected_row)
     for target_track in overlay_tracks:
         primary_id = str(target_track.get("primary_id", ""))
         target_row = _build_row(
@@ -1086,8 +1126,15 @@ def render_sky_position_summary_table(
         if action_token != last_action_token:
             selected_row = summary_df.iloc[selected_index]
             primary_id = str(selected_row.get("primary_id", ""))
+            was_in_list = bool(selected_row.get("is_in_list", False))
             if primary_id:
                 if toggle_target_in_list(prefs, preview_list_id, primary_id):
+                    selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
+                    if was_in_list and selected_detail_id and selected_detail_id == primary_id:
+                        st.session_state["selected_id"] = ""
+                        highlighted_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+                        if highlighted_id == primary_id:
+                            st.session_state["sky_summary_highlight_primary_id"] = ""
                     st.session_state["sky_summary_list_action_token"] = action_token
                     persist_and_rerun(prefs)
                 st.session_state["sky_summary_list_action_token"] = action_token
@@ -3601,9 +3648,185 @@ def render_detail_panel(
 
     if selected is None:
         with st.container(border=True):
-            st.info("Select a target from results to view detail and plots.")
-            st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_path_plot")
-            st.plotly_chart(go.Figure(), use_container_width=True, key="detail_empty_night_plot")
+            st.info("No target selected. Showing preview list targets.")
+
+        location = prefs["location"]
+        window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
+
+        active_preview_list_id = get_active_preview_list_id(prefs)
+        active_preview_list_name = get_list_name(prefs, active_preview_list_id)
+        active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
+        active_preview_list_members = set(active_preview_list_ids)
+        preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+
+        available_preview_list_ids = list_ids_in_order(prefs, include_auto_recent=True)
+        if not available_preview_list_ids:
+            available_preview_list_ids = [AUTO_RECENT_LIST_ID]
+        if active_preview_list_id not in available_preview_list_ids:
+            active_preview_list_id = AUTO_RECENT_LIST_ID
+            active_preview_list_name = get_list_name(prefs, active_preview_list_id)
+            active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
+            active_preview_list_members = set(active_preview_list_ids)
+            preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+
+        hourly_weather_rows = fetch_hourly_weather(
+            lat=float(location["lat"]),
+            lon=float(location["lon"]),
+            tz_name=tzinfo.key,
+            start_local_iso=window_start.isoformat(),
+            end_local_iso=window_end.isoformat(),
+            hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+        )
+        nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit)
+
+        with st.container(border=True):
+            st.markdown("### Night Sky Preview")
+            current_preview_idx = available_preview_list_ids.index(active_preview_list_id)
+            selected_preview_list_id = st.selectbox(
+                "Preview List",
+                options=available_preview_list_ids,
+                index=current_preview_idx,
+                format_func=lambda list_id: get_list_name(prefs, list_id),
+                key="night_sky_preview_list_select",
+            )
+            if selected_preview_list_id != active_preview_list_id:
+                if set_active_preview_list_id(prefs, selected_preview_list_id):
+                    persist_and_rerun(prefs)
+
+            active_preview_list_id = get_active_preview_list_id(prefs)
+            active_preview_list_name = get_list_name(prefs, active_preview_list_id)
+            active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
+            active_preview_list_members = set(active_preview_list_ids)
+            preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+
+            st.caption(
+                f"Tonight ({tzinfo.key}): "
+                f"{format_display_time(window_start, use_12_hour=use_12_hour)} -> "
+                f"{format_display_time(window_end, use_12_hour=use_12_hour)}"
+            )
+
+            summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+            preview_tracks: list[dict[str, Any]] = []
+            preview_targets = subset_by_id_list(catalog, active_preview_list_ids)
+            for _, preview_target in preview_targets.iterrows():
+                preview_target_id = str(preview_target["primary_id"])
+                try:
+                    preview_ra = float(preview_target["ra_deg"])
+                    preview_dec = float(preview_target["dec_deg"])
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(preview_ra) or not np.isfinite(preview_dec):
+                    continue
+
+                try:
+                    preview_track = compute_track(
+                        ra_deg=preview_ra,
+                        dec_deg=preview_dec,
+                        lat=float(location["lat"]),
+                        lon=float(location["lon"]),
+                        start_local=window_start,
+                        end_local=window_end,
+                        obstructions=prefs["obstructions"],
+                    )
+                except Exception:
+                    continue
+                if preview_track.empty:
+                    continue
+
+                preview_common_name = str(preview_target.get("common_name") or "").strip()
+                preview_label = f"{preview_target_id} - {preview_common_name}" if preview_common_name else preview_target_id
+                preview_emission_details = re.sub(r"[\[\]]", "", clean_text(preview_target.get("emission_lines")))
+                preview_group = str(preview_target.get("object_type_group") or "").strip() or "other"
+                preview_tracks.append(
+                    {
+                        "primary_id": preview_target_id,
+                        "common_name": preview_common_name,
+                        "label": preview_label,
+                        "object_type_group": preview_group,
+                        "emission_lines_display": preview_emission_details,
+                        "line_width": (
+                            (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
+                            if summary_highlight_id == preview_target_id
+                            else PATH_LINE_WIDTH_OVERLAY_DEFAULT
+                        ),
+                        "track": preview_track,
+                        "events": extract_events(preview_track),
+                    }
+                )
+
+            group_total_counts: dict[str, int] = {}
+            for track_payload in preview_tracks:
+                group_key = str(track_payload.get("object_type_group") or "").strip() or "other"
+                group_total_counts[group_key] = group_total_counts.get(group_key, 0) + 1
+
+            group_seen_counts: dict[str, int] = {}
+
+            def _next_group_plot_color(group_label: str | None) -> str:
+                group_key = str(group_label or "").strip() or "other"
+                index_in_group = group_seen_counts.get(group_key, 0)
+                group_seen_counts[group_key] = index_in_group + 1
+                total_in_group = max(1, int(group_total_counts.get(group_key, 1)))
+                step_fraction = 0.0 if total_in_group <= 1 else (float(index_in_group) / float(total_in_group - 1))
+                return object_type_group_color(group_key, step_fraction=step_fraction)
+
+            for track_payload in preview_tracks:
+                group_key = str(track_payload.get("object_type_group") or "").strip() or "other"
+                track_payload["color"] = _next_group_plot_color(group_key)
+
+            st.caption(f"Preview list: {active_preview_list_name} ({len(preview_tracks)} targets)")
+
+            summary_rows = build_sky_position_summary_rows(
+                selected_id=None,
+                selected_label=None,
+                selected_type_group=None,
+                selected_color=None,
+                selected_events=None,
+                selected_track=None,
+                overlay_tracks=preview_tracks,
+                list_member_ids=active_preview_list_members,
+                now_local=pd.Timestamp(datetime.now(tzinfo)),
+                row_order_ids=[str(item) for item in active_preview_list_ids],
+            )
+
+            local_now = datetime.now(tzinfo)
+            show_remaining_column = window_start <= local_now <= window_end
+            summary_col, tips_col = st.columns([3, 1], gap="medium")
+            with summary_col:
+                render_sky_position_summary_table(
+                    summary_rows,
+                    prefs,
+                    use_12_hour=use_12_hour,
+                    preview_list_id=active_preview_list_id,
+                    preview_list_name=active_preview_list_name,
+                    allow_list_membership_toggle=(not preview_list_is_system),
+                    show_remaining=show_remaining_column,
+                    now_local=pd.Timestamp(local_now),
+                )
+                unobstructed_area_tracks = [{**preview_track, "is_selected": False} for preview_track in preview_tracks]
+                st.plotly_chart(
+                    build_unobstructed_altitude_area_plot(
+                        unobstructed_area_tracks,
+                        use_12_hour=use_12_hour,
+                    ),
+                    use_container_width=True,
+                    key="detail_unobstructed_area_plot",
+                )
+            with tips_col:
+                with st.container(border=True):
+                    render_target_tips_panel(
+                        "",
+                        "No target selected",
+                        None,
+                        None,
+                        summary_rows,
+                        nightly_weather_alert_emojis,
+                        hourly_weather_rows,
+                        temperature_unit=temperature_unit,
+                        use_12_hour=use_12_hour,
+                        local_now=local_now,
+                        window_start=window_start,
+                        window_end=window_end,
+                    )
         return
 
     target_id = str(selected["primary_id"])
@@ -3754,10 +3977,43 @@ def render_detail_panel(
                     f"{'In' if is_in_selected_action_list else 'Not in'} list: {selected_action_list_name}"
                 )
 
+            coord_format_key = "detail_coord_format_mode"
+            coord_format_mode = str(st.session_state.get(coord_format_key, "sexagesimal")).strip().lower()
+            if coord_format_mode not in {"sexagesimal", "degrees"}:
+                coord_format_mode = "sexagesimal"
+                st.session_state[coord_format_key] = coord_format_mode
+
+            ra_deg_value = parse_numeric(selected.get("ra_deg"))
+            dec_deg_value = parse_numeric(selected.get("dec_deg"))
+
+            if coord_format_mode == "degrees":
+                ra_display = f"{ra_deg_value:.4f} deg" if ra_deg_value is not None else "-"
+                dec_display = f"{dec_deg_value:.4f} deg" if dec_deg_value is not None else "-"
+            else:
+                ra_display = format_ra_hms(ra_deg_value)
+                dec_display = format_dec_dms(dec_deg_value)
+
+            coord_toggle_label = f"RA: {ra_display}\nDEC: {dec_display}"
+            if st.button(
+                coord_toggle_label,
+                key="detail_coord_format_toggle",
+                use_container_width=True,
+                help="Click to switch RA/DEC between sexagesimal and degrees.",
+            ):
+                st.session_state[coord_format_key] = (
+                    "degrees" if coord_format_mode == "sexagesimal" else "sexagesimal"
+                )
+                st.rerun()
+            st.caption("Click coordinates to toggle display format.")
+
             property_items = [
                 {
-                    "Property": "RA / Dec",
-                    "Value": f"{float(selected['ra_deg']):.4f} deg / {float(selected['dec_deg']):.4f} deg",
+                    "Property": "RA",
+                    "Value": ra_display,
+                },
+                {
+                    "Property": "DEC",
+                    "Value": dec_display,
                 },
                 {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
                 {
