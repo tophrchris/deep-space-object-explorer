@@ -987,7 +987,15 @@ def render_sky_position_summary_table(
         color = str(summary_df.loc[row.name, "line_color"]).strip()
         row_primary_id = str(summary_df.loc[row.name, "primary_id"]).strip()
         selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
-        if row_primary_id and selected_detail_id and row_primary_id == selected_detail_id:
+        highlighted_summary_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+        row_is_selected = (
+            row_primary_id
+            and (
+                (selected_detail_id and row_primary_id == selected_detail_id)
+                or (highlighted_summary_id and row_primary_id == highlighted_summary_id)
+            )
+        )
+        if row_is_selected:
             selected_bg = _muted_rgba_from_hex(color, alpha=0.16)
             for idx in range(len(styles)):
                 styles[idx] = f"background-color: {selected_bg};"
@@ -1149,6 +1157,590 @@ def render_sky_position_summary_table(
         st.caption(
             f"Search results choose the detail target. '{preview_list_name}' is auto-managed from recent search selections."
         )
+
+
+def normalize_object_type_group(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return "other"
+    return text
+
+
+def format_emissions_display(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return "-"
+    cleaned = re.sub(r"[\[\]]", "", text).strip()
+    return cleaned or "-"
+
+
+def format_apparent_size_display(major_arcmin: Any, minor_arcmin: Any) -> str:
+    def _coerce(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric) or numeric <= 0.0:
+            return None
+        return numeric
+
+    def _fmt(value: float) -> str:
+        return f"{value:.6g}"
+
+    major_value = _coerce(major_arcmin)
+    minor_value = _coerce(minor_arcmin)
+    if major_value is None and minor_value is None:
+        return "-"
+
+    show_degrees = (
+        (major_value is not None and major_value >= 60.0)
+        or (minor_value is not None and minor_value >= 60.0)
+    )
+    if show_degrees:
+        major_deg = (major_value / 60.0) if major_value is not None else None
+        minor_deg = (minor_value / 60.0) if minor_value is not None else None
+        if major_deg is not None and minor_deg is not None:
+            return f"{_fmt(major_deg)} x {_fmt(minor_deg)} deg"
+        if major_deg is not None:
+            return f"{_fmt(major_deg)} deg"
+        return f"{_fmt(float(minor_deg))} deg"
+
+    if major_value is not None and minor_value is not None:
+        return f"{_fmt(major_value)} x {_fmt(minor_value)} arcmin"
+    if major_value is not None:
+        return f"{_fmt(major_value)} arcmin"
+    return f"{_fmt(float(minor_value))} arcmin"
+
+
+def apparent_size_sort_key_arcmin(major_arcmin: Any, minor_arcmin: Any) -> float:
+    def _coerce(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric) or numeric <= 0.0:
+            return None
+        return numeric
+
+    major_value = _coerce(major_arcmin)
+    minor_value = _coerce(minor_arcmin)
+    candidates = [value for value in (major_value, minor_value) if value is not None]
+    if not candidates:
+        return -1.0
+    return float(max(candidates))
+
+
+def format_description_preview(value: Any, max_chars: int = 100) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return "-"
+    collapsed = re.sub(r"\s+", " ", text)
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return f"{collapsed[:max_chars].rstrip()}..."
+
+
+def build_full_dark_hour_starts(window_start: datetime, window_end: datetime) -> list[pd.Timestamp]:
+    start_ts = pd.Timestamp(window_start)
+    end_ts = pd.Timestamp(window_end)
+    if end_ts <= start_ts:
+        return []
+
+    first_full_hour_start = start_ts.ceil("h")
+    last_full_hour_start = (end_ts - pd.Timedelta(hours=1)).floor("h")
+    if last_full_hour_start < first_full_hour_start:
+        return []
+
+    return [
+        pd.Timestamp(hour_start)
+        for hour_start in pd.date_range(
+            start=first_full_hour_start,
+            end=last_full_hour_start,
+            freq="1h",
+        )
+    ]
+
+
+def format_hour_window_label(hour_start: pd.Timestamp | datetime, use_12_hour: bool) -> str:
+    start_ts = pd.Timestamp(hour_start)
+    end_ts = start_ts + pd.Timedelta(hours=1)
+
+    if use_12_hour:
+        start_label = normalize_12_hour_label(start_ts.strftime("%I%p"))
+        end_label = normalize_12_hour_label(end_ts.strftime("%I%p"))
+        if (
+            len(start_label) >= 2
+            and len(end_label) >= 2
+            and start_label[-2:] in {"am", "pm"}
+            and end_label[-2:] in {"am", "pm"}
+            and start_label[-2:] == end_label[-2:]
+        ):
+            return f"{start_label[:-2]}-{end_label}"
+        return f"{start_label}-{end_label}"
+
+    return f"{start_ts.strftime('%H')}-{end_ts.strftime('%H')}"
+
+
+def compute_hourly_target_recommendations(
+    catalog: pd.DataFrame,
+    *,
+    lat: float,
+    lon: float,
+    hour_start_local: pd.Timestamp | datetime,
+    obstructions: dict[str, float],
+    object_type_groups: list[str],
+    exclude_ids: set[str] | None = None,
+    max_results: int = 5,
+) -> pd.DataFrame:
+    if catalog.empty:
+        return pd.DataFrame()
+
+    selected_groups = {
+        normalize_object_type_group(value)
+        for value in object_type_groups
+        if str(value).strip()
+    }
+    if not selected_groups:
+        return pd.DataFrame()
+
+    group_series = catalog["object_type_group"].map(normalize_object_type_group)
+    candidate_mask = group_series.isin(selected_groups)
+
+    excluded = {str(item).strip() for item in (exclude_ids or set()) if str(item).strip()}
+    if excluded:
+        candidate_mask &= ~catalog["primary_id"].astype(str).isin(excluded)
+
+    candidate_columns = [
+        "primary_id",
+        "common_name",
+        "description",
+        "object_type",
+        "object_type_group",
+        "emission_lines",
+        "ang_size_maj_arcmin",
+        "ang_size_min_arcmin",
+        "ra_deg",
+        "dec_deg",
+    ]
+    candidates = catalog.loc[candidate_mask, candidate_columns].copy()
+    if candidates.empty:
+        return pd.DataFrame()
+
+    candidates["ra_deg"] = pd.to_numeric(candidates["ra_deg"], errors="coerce")
+    candidates["dec_deg"] = pd.to_numeric(candidates["dec_deg"], errors="coerce")
+    candidates = candidates[np.isfinite(candidates["ra_deg"]) & np.isfinite(candidates["dec_deg"])]
+    if candidates.empty:
+        return pd.DataFrame()
+
+    hour_start_ts = pd.Timestamp(hour_start_local)
+    hour_end_ts = hour_start_ts + pd.Timedelta(hours=1)
+    sample_times_local = pd.date_range(
+        start=hour_start_ts,
+        end=hour_end_ts,
+        freq="10min",
+        inclusive="both",
+    )
+    if sample_times_local.empty:
+        return pd.DataFrame()
+
+    target_count = len(candidates)
+    time_count = len(sample_times_local)
+    location = EarthLocation(lat=lat * u.deg, lon=lon * u.deg)
+    sample_times_utc = sample_times_local.tz_convert("UTC")
+
+    ra_values = candidates["ra_deg"].to_numpy(dtype=float)
+    dec_values = candidates["dec_deg"].to_numpy(dtype=float)
+    repeated_ra = np.tile(ra_values, time_count)
+    repeated_dec = np.tile(dec_values, time_count)
+    repeated_times = np.repeat(sample_times_utc.to_pydatetime(), target_count)
+
+    coords = SkyCoord(ra=repeated_ra * u.deg, dec=repeated_dec * u.deg)
+    frame = AltAz(obstime=Time(repeated_times), location=location)
+    altaz = coords.transform_to(frame)
+
+    altitude_matrix = np.asarray(altaz.alt.deg, dtype=float).reshape(time_count, target_count)
+    azimuth_matrix = (np.asarray(altaz.az.deg, dtype=float).reshape(time_count, target_count)) % 360.0
+    wind_index_matrix = (((azimuth_matrix + 11.25) // 22.5).astype(int)) % 16
+    obstruction_thresholds = np.array(
+        [float(obstructions.get(direction, 20.0)) for direction in WIND16],
+        dtype=float,
+    )
+    min_required_matrix = obstruction_thresholds[wind_index_matrix]
+    visible_matrix = (altitude_matrix >= 0.0) & (altitude_matrix >= min_required_matrix)
+
+    visible_any = np.any(visible_matrix, axis=0)
+    if not np.any(visible_any):
+        return pd.DataFrame()
+
+    visible_altitudes = np.where(visible_matrix, altitude_matrix, -np.inf)
+    max_visible_altitude = np.max(visible_altitudes, axis=0)
+    peak_index_by_target = np.argmax(visible_altitudes, axis=0)
+    peak_time_local = np.array(
+        [sample_times_local[int(index)] for index in peak_index_by_target],
+        dtype=object,
+    )
+    direction_during_hour = np.array(["--"] * target_count, dtype=object)
+    for target_index in range(target_count):
+        visible_time_indexes = np.where(visible_matrix[:, target_index])[0]
+        if visible_time_indexes.size == 0:
+            continue
+
+        start_idx = int(visible_time_indexes[0])
+        end_idx = int(visible_time_indexes[-1])
+        start_wind = WIND16[int(wind_index_matrix[start_idx, target_index])]
+        end_wind = WIND16[int(wind_index_matrix[end_idx, target_index])]
+        if start_wind == end_wind:
+            direction_during_hour[target_index] = start_wind
+        else:
+            direction_during_hour[target_index] = f"{start_wind}->{end_wind}"
+
+    recommended = candidates.copy()
+    recommended["visible_in_hour"] = visible_any
+    recommended = recommended[recommended["visible_in_hour"]].copy()
+    if recommended.empty:
+        return pd.DataFrame()
+
+    visible_indices = np.where(visible_any)[0]
+    recommended["max_alt_hour"] = np.round(max_visible_altitude[visible_indices], 1)
+    recommended["peak_time_local"] = peak_time_local[visible_indices]
+    recommended["direction_during_hour"] = direction_during_hour[visible_indices]
+    recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
+    recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
+    recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
+    recommended["description_preview"] = recommended["description"].apply(
+        lambda value: format_description_preview(value, max_chars=100)
+    )
+    recommended["apparent_size"] = recommended.apply(
+        lambda row: format_apparent_size_display(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+    recommended["apparent_size_sort_arcmin"] = recommended.apply(
+        lambda row: apparent_size_sort_key_arcmin(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+
+    primary_ids = recommended["primary_id"].astype(str)
+    common_names = recommended["common_name"].fillna("").astype(str).str.strip()
+    recommended["target"] = np.where(
+        common_names != "",
+        primary_ids + " - " + common_names,
+        primary_ids,
+    )
+    recommended["line_color"] = recommended["object_type_group"].map(
+        lambda group: object_type_group_color(normalize_object_type_group(group))
+    )
+
+    return (
+        recommended.sort_values(
+            by=["apparent_size_sort_arcmin", "max_alt_hour", "primary_id"],
+            ascending=[False, False, True],
+        )
+        .head(max(1, int(max_results)))
+        .loc[
+            :,
+            [
+                "primary_id",
+                "target",
+                "description_preview",
+                "object_type",
+                "object_type_group",
+                "emissions",
+                "apparent_size",
+                "max_alt_hour",
+                "peak_time_local",
+                "direction_during_hour",
+                "line_color",
+            ],
+        ]
+        .reset_index(drop=True)
+    )
+
+
+def render_target_recommendations(
+    catalog: pd.DataFrame,
+    prefs: dict[str, Any],
+    *,
+    active_preview_list_ids: list[str],
+    window_start: datetime,
+    window_end: datetime,
+    tzinfo: ZoneInfo,
+    use_12_hour: bool,
+) -> None:
+    st.markdown("#### Find New Targets")
+
+    hour_starts = build_full_dark_hour_starts(window_start, window_end)
+    if not hour_starts:
+        st.caption("No full dark-hour windows available tonight.")
+        return
+
+    hour_options = [hour_start.isoformat() for hour_start in hour_starts]
+    hour_labels = {
+        option: format_hour_window_label(pd.Timestamp(option), use_12_hour=use_12_hour)
+        for option in hour_options
+    }
+
+    now_local = pd.Timestamp(datetime.now(tzinfo))
+    default_hour_option = hour_options[0]
+    for hour_start in hour_starts:
+        if hour_start <= now_local < hour_start + pd.Timedelta(hours=1):
+            default_hour_option = hour_start.isoformat()
+            break
+
+    hour_state_key = "target_recommend_hour_option"
+    if str(st.session_state.get(hour_state_key, "")).strip() not in hour_options:
+        st.session_state[hour_state_key] = default_hour_option
+
+    catalog_groups = catalog["object_type_group"].map(normalize_object_type_group)
+    global_group_counts = catalog_groups.value_counts()
+    group_options = [str(group).strip() for group in global_group_counts.index.tolist() if str(group).strip()]
+    if not group_options:
+        group_options = ["other"]
+
+    list_targets = subset_by_id_list(catalog, active_preview_list_ids)
+    default_group = group_options[0]
+    if not list_targets.empty and "object_type_group" in list_targets.columns:
+        list_group_counts = list_targets["object_type_group"].map(normalize_object_type_group).value_counts()
+        if not list_group_counts.empty:
+            candidate_default_group = str(list_group_counts.index[0]).strip()
+            if candidate_default_group in group_options:
+                default_group = candidate_default_group
+
+    group_state_key = "target_recommend_group_options"
+    raw_group_state = st.session_state.get(group_state_key, [])
+    if isinstance(raw_group_state, str):
+        normalized_group_state = [raw_group_state]
+    elif isinstance(raw_group_state, (list, tuple, set)):
+        normalized_group_state = [str(item).strip() for item in raw_group_state if str(item).strip()]
+    else:
+        normalized_group_state = []
+    normalized_group_state = [group for group in normalized_group_state if group in group_options]
+    if not normalized_group_state:
+        normalized_group_state = [default_group]
+    st.session_state[group_state_key] = normalized_group_state
+
+    controls = st.columns([2, 2, 1], gap="small")
+    selected_hour_option = controls[0].selectbox(
+        "Dark Hour",
+        options=hour_options,
+        key=hour_state_key,
+        format_func=lambda option: hour_labels.get(option, option),
+    )
+    selected_group_options = controls[1].multiselect(
+        "Object Type Group",
+        options=group_options,
+        key=group_state_key,
+    )
+    find_targets_clicked = controls[2].button(
+        "Find Targets",
+        use_container_width=True,
+        key="target_recommend_find_button",
+    )
+
+    results_state_key = "target_recommend_results_rows"
+    query_state_key = "target_recommend_results_query"
+    selection_state_key = "target_recommend_table_selection_token"
+
+    if find_targets_clicked:
+        selected_hour_ts = pd.Timestamp(selected_hour_option)
+        recommended = compute_hourly_target_recommendations(
+            catalog,
+            lat=float(prefs["location"]["lat"]),
+            lon=float(prefs["location"]["lon"]),
+            hour_start_local=selected_hour_ts,
+            obstructions=prefs["obstructions"],
+            object_type_groups=selected_group_options,
+            exclude_ids={str(item) for item in active_preview_list_ids},
+            max_results=50,
+        )
+        st.session_state[results_state_key] = recommended.to_dict(orient="records")
+        st.session_state[query_state_key] = {
+            "hour_option": selected_hour_option,
+            "group_options": list(selected_group_options),
+        }
+        st.session_state[selection_state_key] = ""
+
+    query_state = st.session_state.get(query_state_key, {})
+    results_rows = st.session_state.get(results_state_key, [])
+    has_query = bool(str(query_state.get("hour_option", "")).strip())
+    if not results_rows and not has_query:
+        st.caption("Choose an hour and one or more object type groups, then click Find Targets.")
+        return
+
+    query_hour = str(query_state.get("hour_option", "")).strip()
+    raw_query_groups = query_state.get("group_options", query_state.get("group_option", []))
+    if isinstance(raw_query_groups, str):
+        query_groups = [raw_query_groups.strip()] if raw_query_groups.strip() else []
+    elif isinstance(raw_query_groups, (list, tuple, set)):
+        query_groups = [str(value).strip() for value in raw_query_groups if str(value).strip()]
+    else:
+        query_groups = []
+    query_groups_display = ", ".join(query_groups) if query_groups else "-"
+    if query_hour:
+        query_hour_label = hour_labels.get(query_hour, query_hour)
+        st.caption(f"Results for {query_hour_label} | {query_groups_display}")
+
+    selected_groups_for_compare = [str(value).strip() for value in selected_group_options if str(value).strip()]
+    if query_hour != selected_hour_option or query_groups != selected_groups_for_compare:
+        st.caption("Selections changed. Click Find Targets to refresh.")
+
+    if not results_rows and has_query:
+        empty_table = pd.DataFrame(
+            columns=[
+                "Target",
+                "Object Type",
+                "Object Type Group",
+                "Emissions",
+                "Apparent Size",
+                "Peak",
+                "Max Alt",
+                "Direction",
+            ],
+        )
+        st.dataframe(
+            empty_table,
+            hide_index=True,
+            use_container_width=True,
+            key="target_recommendations_table_empty",
+            column_config={
+                "Target": st.column_config.TextColumn(width="large"),
+                "Object Type": st.column_config.TextColumn(width="small"),
+                "Object Type Group": st.column_config.TextColumn(width="small"),
+                "Emissions": st.column_config.TextColumn(width="medium"),
+                "Apparent Size": st.column_config.TextColumn(width="small"),
+                "Peak": st.column_config.TextColumn(width="small"),
+                "Max Alt": st.column_config.TextColumn(width="small"),
+                "Direction": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.caption("no objects of the designated type are visible during this time")
+        st.session_state[selection_state_key] = ""
+        return
+
+    recommendation_df = pd.DataFrame(results_rows)
+    if recommendation_df.empty:
+        st.caption("no objects of the designated type are visible during this time")
+        st.session_state[selection_state_key] = ""
+        return
+
+    recommendation_df["object_type_group"] = recommendation_df["object_type_group"].map(normalize_object_type_group)
+    display = recommendation_df.copy()
+    display["Object Type"] = display["object_type"].apply(
+        lambda value: str(value).strip() if str(value).strip() else "-"
+    )
+    display["Object Type Group"] = display["object_type_group"]
+    display["Emissions"] = display["emissions"].apply(lambda value: str(value).strip() if str(value).strip() else "-")
+    display["Apparent Size"] = display["apparent_size"].apply(
+        lambda value: str(value).strip() if str(value).strip() else "-"
+    )
+    display["Peak"] = display["peak_time_local"].apply(
+        lambda value: format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+        if value is not None and not pd.isna(value)
+        else "--"
+    )
+    display["Max Alt"] = display["max_alt_hour"].apply(
+        lambda value: f"{float(value):.1f} deg" if value is not None and not pd.isna(value) else "--"
+    )
+    if "direction_during_hour" in display.columns:
+        direction_series = display["direction_during_hour"]
+    elif "peak_wind16" in display.columns:
+        direction_series = display["peak_wind16"]
+    else:
+        direction_series = pd.Series(["--"] * len(display), index=display.index)
+    display["Direction"] = direction_series.fillna("--").astype(str)
+    display_table = display[
+        [
+            "target",
+            "Object Type",
+            "Object Type Group",
+            "Emissions",
+            "Apparent Size",
+            "Peak",
+            "Max Alt",
+            "Direction",
+        ]
+    ].rename(
+        columns={"target": "Target"}
+    )
+
+    def _style_recommendation_row(row: pd.Series) -> list[str]:
+        styles = ["" for _ in row]
+        source_row = recommendation_df.loc[row.name]
+        color = str(source_row.get("line_color", "")).strip()
+        row_primary_id = str(source_row.get("primary_id", "")).strip()
+        selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
+        if row_primary_id and selected_detail_id and row_primary_id == selected_detail_id:
+            selected_bg = _muted_rgba_from_hex(color, alpha=0.16)
+            for idx in range(len(styles)):
+                styles[idx] = f"background-color: {selected_bg};"
+        if color:
+            target_idx = row.index.get_loc("Target")
+            base_style = styles[target_idx]
+            if base_style and not base_style.endswith(";"):
+                base_style = f"{base_style};"
+            styles[target_idx] = f"{base_style} color: {color}; font-weight: 700;"
+        return styles
+
+    recommendation_event = st.dataframe(
+        display_table.style.apply(_style_recommendation_row, axis=1),
+        hide_index=True,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="target_recommendations_table",
+        column_config={
+            "Target": st.column_config.TextColumn(width="large"),
+            "Object Type": st.column_config.TextColumn(width="small"),
+            "Object Type Group": st.column_config.TextColumn(width="small"),
+            "Emissions": st.column_config.TextColumn(width="medium"),
+            "Apparent Size": st.column_config.TextColumn(width="small"),
+            "Peak": st.column_config.TextColumn(width="small"),
+            "Max Alt": st.column_config.TextColumn(width="small"),
+            "Direction": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+    selected_rows: list[int] = []
+    if recommendation_event is not None:
+        try:
+            selected_rows = list(recommendation_event.selection.rows)
+        except Exception:
+            if isinstance(recommendation_event, dict):
+                selection_payload = recommendation_event.get("selection", {})
+                selected_rows = list(selection_payload.get("rows", []))
+
+    selected_index: int | None = None
+    if selected_rows:
+        try:
+            parsed_row_index = int(selected_rows[0])
+            if 0 <= parsed_row_index < len(recommendation_df):
+                selected_index = parsed_row_index
+        except (TypeError, ValueError):
+            selected_index = None
+
+    if selected_index is None:
+        st.session_state[selection_state_key] = ""
+        return
+
+    selected_primary_id = str(recommendation_df.iloc[selected_index].get("primary_id", "")).strip()
+    if not selected_primary_id:
+        return
+
+    selection_token = f"{selected_index}:{selected_primary_id}"
+    last_selection_token = str(st.session_state.get(selection_state_key, ""))
+    if selection_token == last_selection_token:
+        return
+
+    st.session_state[selection_state_key] = selection_token
+    current_selected_id = str(st.session_state.get("selected_id") or "").strip()
+    if selected_primary_id != current_selected_id:
+        st.session_state["selected_id"] = selected_primary_id
+        st.rerun()
 
 
 def format_hour_label(value: pd.Timestamp | datetime, use_12_hour: bool) -> str:
@@ -2168,7 +2760,7 @@ def build_path_plot(
             hovertemplate="%{hovertext}<extra></extra>",
         )
     )
-    rise_segment, set_segment = endpoint_marker_segments_cartesian(track, events)
+    rise_segment, _ = endpoint_marker_segments_cartesian(track, events)
     if rise_segment is not None:
         fig.add_trace(
             go.Scatter(
@@ -2186,44 +2778,6 @@ def build_path_plot(
                 hoverinfo="skip",
             )
         )
-    if set_segment is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=[set_segment[0], set_segment[2]],
-                y=[set_segment[1], set_segment[3]],
-                mode="markers",
-                showlegend=False,
-                marker={
-                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
-                    "symbol": "arrow-right",
-                    "angleref": "previous",
-                    "color": selected_color,
-                    "line": {"width": 0},
-                },
-                hoverinfo="skip",
-            )
-        )
-
-    direction_segments = direction_marker_segments_cartesian(track, max_markers=PATH_DIRECTION_MARKERS_PRIMARY)
-    for segment in direction_segments:
-        x_start, y_start, x_end, y_end = segment
-        fig.add_trace(
-            go.Scatter(
-                x=[x_start, x_end],
-                y=[y_start, y_end],
-                mode="markers",
-                showlegend=False,
-                marker={
-                    "size": [0, PATH_DIRECTION_ARROW_SIZE_PRIMARY],
-                    "symbol": "arrow-right",
-                    "angleref": "previous",
-                    "color": PATH_DIRECTION_ARROW_COLOR,
-                    "line": {"width": 0},
-                },
-                hoverinfo="skip",
-            )
-        )
-
     selected_events = iter_labeled_events(events)
     if selected_events:
         event_x = [float(event["az"]) for _, event in selected_events]
@@ -2274,7 +2828,7 @@ def build_path_plot(
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
-            overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_cartesian(
+            overlay_rise_segment, _ = endpoint_marker_segments_cartesian(
                 overlay_track, target_track.get("events", {})
             )
             if overlay_rise_segment is not None:
@@ -2294,46 +2848,6 @@ def build_path_plot(
                         hoverinfo="skip",
                     )
                 )
-            if overlay_set_segment is not None:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[overlay_set_segment[0], overlay_set_segment[2]],
-                        y=[overlay_set_segment[1], overlay_set_segment[3]],
-                        mode="markers",
-                        showlegend=False,
-                        marker={
-                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
-                            "symbol": "arrow-right",
-                            "angleref": "previous",
-                            "color": target_color,
-                            "line": {"width": 0},
-                        },
-                        hoverinfo="skip",
-                    )
-                )
-
-            overlay_direction_segments = direction_marker_segments_cartesian(
-                overlay_track, max_markers=PATH_DIRECTION_MARKERS_OVERLAY
-            )
-            for segment in overlay_direction_segments:
-                x_start, y_start, x_end, y_end = segment
-                fig.add_trace(
-                    go.Scatter(
-                        x=[x_start, x_end],
-                        y=[y_start, y_end],
-                        mode="markers",
-                        showlegend=False,
-                        marker={
-                            "size": [0, PATH_DIRECTION_ARROW_SIZE_OVERLAY],
-                            "symbol": "arrow-right",
-                            "angleref": "previous",
-                            "color": PATH_DIRECTION_ARROW_COLOR,
-                            "line": {"width": 0},
-                        },
-                        hoverinfo="skip",
-                    )
-                )
-
             overlay_events = iter_labeled_events(target_track.get("events", {}))
             if overlay_events:
                 event_x = [float(event["az"]) for _, event in overlay_events]
@@ -2463,7 +2977,7 @@ def build_path_plot_radial(
         )
     )
     radial_values = np.asarray(track_r, dtype=float)
-    rise_segment, set_segment = endpoint_marker_segments_radial(track, events, radial_values)
+    rise_segment, _ = endpoint_marker_segments_radial(track, events, radial_values)
     if rise_segment is not None:
         fig.add_trace(
             go.Scatterpolar(
@@ -2481,46 +2995,6 @@ def build_path_plot_radial(
                 hoverinfo="skip",
             )
         )
-    if set_segment is not None:
-        fig.add_trace(
-            go.Scatterpolar(
-                theta=[set_segment[0], set_segment[2]],
-                r=[set_segment[1], set_segment[3]],
-                mode="markers",
-                showlegend=False,
-                marker={
-                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
-                    "symbol": "arrow-right",
-                    "angleref": "previous",
-                    "color": selected_color,
-                    "line": {"width": 0},
-                },
-                hoverinfo="skip",
-            )
-        )
-
-    selected_direction_segments = direction_marker_segments_radial(
-        track, np.asarray(track_r, dtype=float), max_markers=PATH_DIRECTION_MARKERS_PRIMARY
-    )
-    for segment in selected_direction_segments:
-        theta_start, r_start, theta_end, r_end = segment
-        fig.add_trace(
-            go.Scatterpolar(
-                theta=[theta_start, theta_end],
-                r=[r_start, r_end],
-                mode="markers",
-                showlegend=False,
-                marker={
-                    "size": [0, PATH_DIRECTION_ARROW_SIZE_PRIMARY],
-                    "symbol": "arrow-right",
-                    "angleref": "previous",
-                    "color": PATH_DIRECTION_ARROW_COLOR,
-                    "line": {"width": 0},
-                },
-                hoverinfo="skip",
-            )
-        )
-
     selected_events = iter_labeled_events(events)
     if selected_events:
         event_theta = [float(event["az"]) for _, event in selected_events]
@@ -2586,7 +3060,7 @@ def build_path_plot_radial(
                 )
             )
             overlay_radial_values = np.asarray(overlay_r, dtype=float)
-            overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_radial(
+            overlay_rise_segment, _ = endpoint_marker_segments_radial(
                 overlay_track, target_track.get("events", {}), overlay_radial_values
             )
             if overlay_rise_segment is not None:
@@ -2606,46 +3080,6 @@ def build_path_plot_radial(
                         hoverinfo="skip",
                     )
                 )
-            if overlay_set_segment is not None:
-                fig.add_trace(
-                    go.Scatterpolar(
-                        theta=[overlay_set_segment[0], overlay_set_segment[2]],
-                        r=[overlay_set_segment[1], overlay_set_segment[3]],
-                        mode="markers",
-                        showlegend=False,
-                        marker={
-                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
-                            "symbol": "arrow-right",
-                            "angleref": "previous",
-                            "color": target_color,
-                            "line": {"width": 0},
-                        },
-                        hoverinfo="skip",
-                    )
-                )
-
-            overlay_direction_segments = direction_marker_segments_radial(
-                overlay_track, np.asarray(overlay_r, dtype=float), max_markers=PATH_DIRECTION_MARKERS_OVERLAY
-            )
-            for segment in overlay_direction_segments:
-                theta_start, r_start, theta_end, r_end = segment
-                fig.add_trace(
-                    go.Scatterpolar(
-                        theta=[theta_start, theta_end],
-                        r=[r_start, r_end],
-                        mode="markers",
-                        showlegend=False,
-                        marker={
-                            "size": [0, PATH_DIRECTION_ARROW_SIZE_OVERLAY],
-                            "symbol": "arrow-right",
-                            "angleref": "previous",
-                            "color": PATH_DIRECTION_ARROW_COLOR,
-                            "line": {"width": 0},
-                        },
-                        hoverinfo="skip",
-                    )
-                )
-
             overlay_events = iter_labeled_events(target_track.get("events", {}))
             if overlay_events:
                 event_theta = [float(event["az"]) for _, event in overlay_events]
@@ -3802,7 +4236,17 @@ def render_detail_panel(
                     show_remaining=show_remaining_column,
                     now_local=pd.Timestamp(local_now),
                 )
-                unobstructed_area_tracks = [{**preview_track, "is_selected": False} for preview_track in preview_tracks]
+                summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+                unobstructed_area_tracks = [
+                    {
+                        **preview_track,
+                        "is_selected": (
+                            bool(summary_highlight_id)
+                            and str(preview_track.get("primary_id", "")).strip() == summary_highlight_id
+                        ),
+                    }
+                    for preview_track in preview_tracks
+                ]
                 st.plotly_chart(
                     build_unobstructed_altitude_area_plot(
                         unobstructed_area_tracks,
@@ -3810,6 +4254,15 @@ def render_detail_panel(
                     ),
                     use_container_width=True,
                     key="detail_unobstructed_area_plot",
+                )
+                render_target_recommendations(
+                    catalog,
+                    prefs,
+                    active_preview_list_ids=active_preview_list_ids,
+                    window_start=window_start,
+                    window_end=window_end,
+                    tzinfo=tzinfo,
+                    use_12_hour=use_12_hour,
                 )
             with tips_col:
                 with st.container(border=True):
@@ -4307,16 +4760,23 @@ def render_detail_panel(
                 show_remaining=show_remaining_column,
                 now_local=pd.Timestamp(local_now),
             )
+            highlight_for_area = summary_highlight_id if summary_highlight_id else target_id
             unobstructed_area_tracks = [
                 {
-                    "is_selected": True,
+                    "is_selected": target_id == highlight_for_area,
                     "label": selected_label,
                     "color": selected_color,
                     "line_width": selected_line_width,
                     "emission_lines_display": emission_details_display,
                     "track": track,
                 },
-                *[{**preview_track, "is_selected": False} for preview_track in preview_tracks],
+                *[
+                    {
+                        **preview_track,
+                        "is_selected": str(preview_track.get("primary_id", "")).strip() == highlight_for_area,
+                    }
+                    for preview_track in preview_tracks
+                ],
             ]
             st.plotly_chart(
                 build_unobstructed_altitude_area_plot(
@@ -4325,6 +4785,15 @@ def render_detail_panel(
                 ),
                 use_container_width=True,
                 key="detail_unobstructed_area_plot",
+            )
+            render_target_recommendations(
+                catalog,
+                prefs,
+                active_preview_list_ids=active_preview_list_ids,
+                window_start=window_start,
+                window_end=window_end,
+                tzinfo=tzinfo,
+                use_12_hour=use_12_hour,
             )
         with tips_col:
             summary_ids = {
