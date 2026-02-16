@@ -171,6 +171,9 @@ WEATHER_ALERT_RAIN_PRIORITY = ["❄️", "⛈️", "☔", "🚨", "⚠️"]
 WEATHER_ALERT_RAIN_INTERVAL_SECONDS = 5 * 60
 WEATHER_ALERT_RAIN_DURATION_SECONDS = 30
 WEATHER_ALERT_RAIN_BUCKET_STATE_KEY = "weather_alert_rain_last_bucket"
+WEATHER_FORECAST_PERIOD_STATE_KEY = "weather_forecast_period"
+WEATHER_FORECAST_PERIOD_TONIGHT = "tonight"
+WEATHER_FORECAST_PERIOD_TOMORROW = "tomorrow"
 OBJECT_TYPE_GROUP_COLOR_DEFAULT = "#94A3B8"
 OBJECT_TYPE_GROUP_COLOR_RANGE_THEMES: dict[str, dict[str, tuple[str, str]]] = {
     "default": {
@@ -226,6 +229,18 @@ HOUR12_COUNTRY_CODES = {
     "PK",
     "SA",
     "SV",
+    "US",
+}
+MONTH_DAY_COUNTRY_CODES = {
+    "BS",
+    "BZ",
+    "CA",
+    "FM",
+    "KY",
+    "LR",
+    "MH",
+    "PH",
+    "PW",
     "US",
 }
 EVENT_LABELS: list[tuple[str, str]] = [
@@ -606,6 +621,128 @@ def tonight_window(lat: float, lon: float) -> tuple[datetime, datetime, ZoneInfo
         end = start + timedelta(hours=12)
 
     return start, end, tzinfo
+
+
+def normalize_weather_forecast_period(value: Any) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate == WEATHER_FORECAST_PERIOD_TOMORROW:
+        return WEATHER_FORECAST_PERIOD_TOMORROW
+    return WEATHER_FORECAST_PERIOD_TONIGHT
+
+
+def resolve_weather_forecast_period() -> str:
+    state_period = normalize_weather_forecast_period(st.session_state.get(WEATHER_FORECAST_PERIOD_STATE_KEY, ""))
+    period = state_period
+    st.session_state[WEATHER_FORECAST_PERIOD_STATE_KEY] = period
+    return period
+
+
+def weather_forecast_window(
+    lat: float,
+    lon: float,
+    *,
+    day_offset: int = 0,
+) -> tuple[datetime, datetime, ZoneInfo]:
+    tonight_start, tonight_end, tzinfo = tonight_window(lat, lon)
+    if day_offset <= 0:
+        return tonight_start, tonight_end, tzinfo
+
+    tz_name = tzinfo.key
+    sunset_date = tonight_start.date() + timedelta(days=day_offset)
+    try:
+        loc = LocationInfo(latitude=lat, longitude=lon, timezone=tz_name)
+        sun_on_day = sun(loc.observer, date=sunset_date, tzinfo=tzinfo)
+        sun_next_day = sun(loc.observer, date=sunset_date + timedelta(days=1), tzinfo=tzinfo)
+        start = sun_on_day["sunset"]
+        end = sun_next_day["sunrise"]
+    except Exception:
+        start = datetime.combine(sunset_date, time(18, 0), tzinfo=tzinfo)
+        end = datetime.combine(sunset_date + timedelta(days=1), time(6, 0), tzinfo=tzinfo)
+
+    if end <= start:
+        end = start + timedelta(hours=12)
+    return start, end, tzinfo
+
+
+def infer_month_day_order_from_locale(locale_value: str | None) -> str:
+    if not locale_value:
+        return "md"
+
+    normalized = str(locale_value).replace("-", "_")
+    parts = [part for part in normalized.split("_") if part]
+    country = ""
+    if len(parts) >= 2:
+        candidate = parts[-1].upper()
+        if len(candidate) == 2 and candidate.isalpha():
+            country = candidate
+
+    if country in MONTH_DAY_COUNTRY_CODES:
+        return "md"
+    return "dm"
+
+
+def parse_browser_month_day_pattern(value: Any) -> tuple[str, str] | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    order: list[str] = []
+    separator = "/"
+    for token in raw.split("|"):
+        if ":" not in token:
+            continue
+        token_type, token_value = token.split(":", 1)
+        normalized_type = token_type.strip().lower()
+        if normalized_type == "month":
+            order.append("month")
+            continue
+        if normalized_type == "day":
+            order.append("day")
+            continue
+        if normalized_type == "literal":
+            literal = token_value
+            if literal and len(literal) <= 3:
+                separator = literal
+
+    if order[:2] == ["month", "day"]:
+        return "md", separator
+    if order[:2] == ["day", "month"]:
+        return "dm", separator
+    return None
+
+
+def format_weather_forecast_date(
+    value: datetime,
+    *,
+    browser_locale: str | None = None,
+    browser_month_day_pattern: str | None = None,
+) -> str:
+    local_date = pd.Timestamp(value).date()
+    parsed_pattern = parse_browser_month_day_pattern(browser_month_day_pattern)
+    if parsed_pattern is not None:
+        month_day_order, separator = parsed_pattern
+    else:
+        month_day_order = infer_month_day_order_from_locale(browser_locale)
+        separator = "/"
+
+    date_part = (
+        f"{local_date.month}{separator}{local_date.day}"
+        if month_day_order == "md"
+        else f"{local_date.day}{separator}{local_date.month}"
+    )
+    return f"{local_date.strftime('%A')}, {date_part}"
+
+
+def resolve_location_display_name(location: dict[str, Any]) -> str:
+    label = str(location.get("label") or "").strip()
+    if label:
+        return label
+    try:
+        lat = float(location.get("lat"))
+        lon = float(location.get("lon"))
+    except (TypeError, ValueError):
+        return "your location"
+    return f"{lat:.4f}, {lon:.4f}"
 
 
 def compute_track(
@@ -1804,6 +1941,38 @@ def _interpolate_cloud_cover_color(cloud_cover_percent: float) -> str:
 
 def _interpolate_temperature_color_f(temp_f: float) -> str:
     return _interpolate_color_stops(temp_f, TEMPERATURE_COLOR_STOPS_F)
+
+
+def cloud_cover_color_legend_html() -> str:
+    # One swatch per configured interval in CLOUD_COVER_COLOR_STOPS.
+    legend_stops: list[tuple[str, float]] = []
+    for idx in range(max(0, len(CLOUD_COVER_COLOR_STOPS) - 1)):
+        lower_value = float(CLOUD_COVER_COLOR_STOPS[idx][0])
+        upper_value = float(CLOUD_COVER_COLOR_STOPS[idx + 1][0])
+        mid_value = (lower_value + upper_value) / 2.0
+        label = f"{int(round(lower_value))}-{int(round(upper_value))}%"
+        legend_stops.append((label, mid_value))
+
+    if not legend_stops:
+        legend_stops = [("0-100%", 50.0)]
+
+    swatches: list[str] = []
+    for label, percent in legend_stops:
+        color = _interpolate_cloud_cover_color(percent)
+        swatches.append(
+            "<span style='display:inline-flex; align-items:center; margin-right:0.4rem;'>"
+            f"<span style='display:inline-block; width:0.58rem; height:0.58rem; border-radius:2px; "
+            f"margin-right:0.18rem; border:1px solid rgba(17,24,39,0.28); background:{color};'></span>"
+            f"{html.escape(label)}"
+            "</span>"
+        )
+
+    return (
+        "<div style='font-size:0.68rem; color:#6b7280; margin:0.08rem 0 0.12rem;'>"
+        "☁️: "
+        f"{''.join(swatches)}"
+        "</div>"
+    )
 
 
 def cloud_cover_cell_style(raw_value: Any) -> str:
@@ -4049,6 +4218,7 @@ def render_detail_panel(
     temperature_unit: str,
     use_12_hour: bool,
     detail_stack_vertical: bool,
+    weather_forecast_day_offset: int = 0,
 ) -> None:
     def clean_text(value: Any) -> str:
         if value is None:
@@ -4079,6 +4249,15 @@ def render_detail_panel(
         if not np.isfinite(numeric):
             return None
         return numeric
+
+    try:
+        normalized_forecast_day_offset = int(weather_forecast_day_offset)
+    except (TypeError, ValueError):
+        normalized_forecast_day_offset = 0
+    if normalized_forecast_day_offset < 0:
+        normalized_forecast_day_offset = 0
+    if normalized_forecast_day_offset > 1:
+        normalized_forecast_day_offset = 1
 
     if selected is None:
         with st.container(border=True):
@@ -4520,9 +4699,17 @@ def render_detail_panel(
         with forecast_container:
             forecast_placeholder = st.empty()
             forecast_legend_placeholder = st.empty()
+            forecast_cloud_cover_legend_placeholder = st.empty()
 
     location = prefs["location"]
-    window_start, window_end, tzinfo = tonight_window(location["lat"], location["lon"])
+    location_lat = float(location["lat"])
+    location_lon = float(location["lon"])
+    window_start, window_end, tzinfo = tonight_window(location_lat, location_lon)
+    forecast_window_start, forecast_window_end, _ = weather_forecast_window(
+        location_lat,
+        location_lon,
+        day_offset=normalized_forecast_day_offset,
+    )
     selected_common_name = str(selected.get("common_name") or "").strip()
     selected_label = f"{target_id} - {selected_common_name}" if selected_common_name else target_id
     selected_group = str(selected.get("object_type_group") or "").strip() or "other"
@@ -4562,8 +4749,8 @@ def render_detail_panel(
             preview_track = compute_track(
                 ra_deg=preview_ra,
                 dec_deg=preview_dec,
-                lat=float(location["lat"]),
-                lon=float(location["lon"]),
+                lat=location_lat,
+                lon=location_lon,
                 start_local=window_start,
                 end_local=window_end,
                 obstructions=prefs["obstructions"],
@@ -4628,21 +4815,45 @@ def render_detail_panel(
     track = compute_track(
         ra_deg=selected_ra,
         dec_deg=selected_dec,
-        lat=float(location["lat"]),
-        lon=float(location["lon"]),
+        lat=location_lat,
+        lon=location_lon,
         start_local=window_start,
         end_local=window_end,
         obstructions=prefs["obstructions"],
     )
+    forecast_track = track
+    if normalized_forecast_day_offset > 0:
+        try:
+            forecast_track = compute_track(
+                ra_deg=selected_ra,
+                dec_deg=selected_dec,
+                lat=location_lat,
+                lon=location_lon,
+                start_local=forecast_window_start,
+                end_local=forecast_window_end,
+                obstructions=prefs["obstructions"],
+            )
+        except Exception:
+            forecast_track = track
     events = extract_events(track)
     hourly_weather_rows = fetch_hourly_weather(
-        lat=float(location["lat"]),
-        lon=float(location["lon"]),
+        lat=location_lat,
+        lon=location_lon,
         tz_name=tzinfo.key,
         start_local_iso=window_start.isoformat(),
         end_local_iso=window_end.isoformat(),
         hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
     )
+    forecast_hourly_weather_rows = hourly_weather_rows
+    if normalized_forecast_day_offset > 0:
+        forecast_hourly_weather_rows = fetch_hourly_weather(
+            lat=location_lat,
+            lon=location_lon,
+            tz_name=tzinfo.key,
+            start_local_iso=forecast_window_start.isoformat(),
+            end_local_iso=forecast_window_end.isoformat(),
+            hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+        )
     nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit)
 
     with st.container(border=True):
@@ -4854,7 +5065,7 @@ def render_detail_panel(
     temperatures: dict[str, float] = {}
     cloud_cover_by_hour: dict[str, float] = {}
     weather_by_hour: dict[str, dict[str, Any]] = {}
-    for weather_row in hourly_weather_rows:
+    for weather_row in forecast_hourly_weather_rows:
         time_iso = str(weather_row.get("time_iso", "")).strip()
         if not time_iso:
             continue
@@ -4872,7 +5083,7 @@ def render_detail_panel(
 
     forecast_placeholder.plotly_chart(
         build_night_plot(
-            track=track,
+            track=forecast_track,
             temperature_by_hour=temperatures,
             cloud_cover_by_hour=cloud_cover_by_hour,
             weather_by_hour=weather_by_hour,
@@ -4884,6 +5095,7 @@ def render_detail_panel(
         key="detail_night_plot",
     )
     forecast_legend_placeholder.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
+    forecast_cloud_cover_legend_placeholder.markdown(cloud_cover_color_legend_html(), unsafe_allow_html=True)
 
 
 def render_explorer_page(
@@ -4893,6 +5105,8 @@ def render_explorer_page(
     temperature_unit: str,
     use_12_hour: bool,
     detail_stack_vertical: bool,
+    browser_locale: str | None = None,
+    browser_month_day_pattern: str | None = None,
 ) -> None:
     persistence_notice = st.session_state.get("prefs_persistence_notice", "")
     if persistence_notice:
@@ -4927,6 +5141,7 @@ def render_explorer_page(
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
+    weather_forecast_period = resolve_weather_forecast_period()
     listed_ids = all_listed_ids_in_order(prefs)
     top_cols = st.columns([3, 2], gap="medium")
     with top_cols[0]:
@@ -4939,14 +5154,56 @@ def render_explorer_page(
             listed_ids=listed_ids,
         )
     with top_cols[1]:
-        st.caption("Tonight weather by hour")
-        window_start, window_end, tzinfo = tonight_window(location_lat, location_lon)
+        weather_forecast_day_offset = 1 if weather_forecast_period == WEATHER_FORECAST_PERIOD_TOMORROW else 0
+        weather_window_start, weather_window_end, weather_tzinfo = weather_forecast_window(
+            location_lat,
+            location_lon,
+            day_offset=weather_forecast_day_offset,
+        )
+        forecast_title_label = "Tomorrow" if weather_forecast_day_offset > 0 else "Tonight"
+        forecast_date_text = format_weather_forecast_date(
+            weather_window_start,
+            browser_locale=browser_locale,
+            browser_month_day_pattern=browser_month_day_pattern,
+        )
+        toggle_period = (
+            WEATHER_FORECAST_PERIOD_TONIGHT
+            if weather_forecast_day_offset > 0
+            else WEATHER_FORECAST_PERIOD_TOMORROW
+        )
+        toggle_text = (
+            "return to tonight's forecast"
+            if weather_forecast_day_offset > 0
+            else "preview tomorrow's forecast"
+        )
+        header_cols = st.columns([4, 2], gap="small")
+        header_placeholder = header_cols[0].empty()
+        with header_cols[1]:
+            if st.button(toggle_text, key="hourly_weather_period_toggle", use_container_width=True):
+                weather_forecast_period = toggle_period
+                st.session_state[WEATHER_FORECAST_PERIOD_STATE_KEY] = weather_forecast_period
+                weather_forecast_day_offset = 1 if weather_forecast_period == WEATHER_FORECAST_PERIOD_TOMORROW else 0
+                weather_window_start, weather_window_end, weather_tzinfo = weather_forecast_window(
+                    location_lat,
+                    location_lon,
+                    day_offset=weather_forecast_day_offset,
+                )
+                forecast_title_label = "Tomorrow" if weather_forecast_day_offset > 0 else "Tonight"
+                forecast_date_text = format_weather_forecast_date(
+                    weather_window_start,
+                    browser_locale=browser_locale,
+                    browser_month_day_pattern=browser_month_day_pattern,
+                )
+        header_placeholder.markdown(
+            f"Hourly weather for {resolve_location_display_name(location)} "
+            f"for {forecast_title_label}, {forecast_date_text}."
+        )
         hourly_weather_rows = fetch_hourly_weather(
             lat=location_lat,
             lon=location_lon,
-            tz_name=tzinfo.key,
-            start_local_iso=window_start.isoformat(),
-            end_local_iso=window_end.isoformat(),
+            tz_name=weather_tzinfo.key,
+            start_local_iso=weather_window_start.isoformat(),
+            end_local_iso=weather_window_end.isoformat(),
             hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
         )
         weather_matrix, weather_tooltips, weather_indicators = build_hourly_weather_matrix(
@@ -4964,6 +5221,7 @@ def render_explorer_page(
             indicator_frame=weather_indicator_display,
         )
         st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
+        st.markdown(cloud_cover_color_legend_html(), unsafe_allow_html=True)
 
     selected_row = resolve_selected_row(catalog, prefs)
     active_preview_list_ids = get_list_ids(prefs, get_active_preview_list_id(prefs))
@@ -4975,6 +5233,7 @@ def render_explorer_page(
             temperature_unit=temperature_unit,
             use_12_hour=use_12_hour,
             detail_stack_vertical=detail_stack_vertical,
+            weather_forecast_day_offset=weather_forecast_day_offset,
         )
 
 
@@ -5024,6 +5283,18 @@ def main() -> None:
     if isinstance(browser_hour_cycle_raw, str) and browser_hour_cycle_raw.strip():
         st.session_state["browser_hour_cycle"] = browser_hour_cycle_raw.strip()
     browser_hour_cycle = st.session_state.get("browser_hour_cycle")
+    browser_month_day_pattern_raw = streamlit_js_eval(
+        js_expressions=(
+            "new Intl.DateTimeFormat(window.navigator.language, {month: 'numeric', day: 'numeric'})"
+            ".formatToParts(new Date(2024, 1, 15))"
+            ".map((part) => `${part.type}:${part.value}`)"
+            ".join('|')"
+        ),
+        key="browser_month_day_pattern_pref",
+    )
+    if isinstance(browser_month_day_pattern_raw, str) and browser_month_day_pattern_raw.strip():
+        st.session_state["browser_month_day_pattern"] = browser_month_day_pattern_raw.strip()
+    browser_month_day_pattern = st.session_state.get("browser_month_day_pattern")
     use_12_hour = resolve_12_hour_clock(browser_language, browser_hour_cycle)
     viewport_width_raw = streamlit_js_eval(
         js_expressions="window.innerWidth",
@@ -5066,6 +5337,8 @@ def main() -> None:
             temperature_unit=effective_temperature_unit,
             use_12_hour=use_12_hour,
             detail_stack_vertical=detail_stack_vertical,
+            browser_locale=browser_language,
+            browser_month_day_pattern=browser_month_day_pattern,
         )
 
     def settings_page() -> None:
