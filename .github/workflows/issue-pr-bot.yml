@@ -1,0 +1,49 @@
+name: Issue/PR Automation Bot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: issue-pr-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run issue/pr bot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5-mini' }}
+          BOT_BASE_BRANCH: ${{ vars.BOT_BASE_BRANCH || 'main' }}
+          BOT_PRIORITY_LABELS: ${{ vars.BOT_PRIORITY_LABELS || 'p:1,p:2,p:3' }}
+          BOT_READY_LABEL: ${{ vars.BOT_READY_LABEL || 'status:ready' }}
+          BOT_MAX_ISSUES_PER_RUN: ${{ vars.BOT_MAX_ISSUES_PER_RUN || '3' }}
+          BOT_MAX_FEEDBACK_PER_PR: ${{ vars.BOT_MAX_FEEDBACK_PER_PR || '1' }}
+          BOT_MAX_PATCH_RETRIES: ${{ vars.BOT_MAX_PATCH_RETRIES || '2' }}
+          BOT_TEST_COMMANDS: ${{ vars.BOT_TEST_COMMANDS || '' }}
+        run: python3 scripts/issue_pr_bot.py
