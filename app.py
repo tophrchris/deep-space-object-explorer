@@ -65,7 +65,6 @@ try:
 except Exception:
     let_it_rain = None
 from streamlit_js_eval import (
-    get_browser_language,
     get_geolocation,
     get_local_storage,
     set_local_storage,
@@ -153,6 +152,9 @@ ENABLE_COOKIE_BACKUP = True
 PREFS_BOOTSTRAP_MAX_RUNS = 6
 PREFS_BOOTSTRAP_RETRY_INTERVAL_MS = 250
 SETTINGS_EXPORT_FORMAT_VERSION = 2
+UI_THEME_LIGHT = "light"
+UI_THEME_DARK = "dark"
+UI_THEME_OPTIONS = {UI_THEME_LIGHT, UI_THEME_DARK}
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -337,6 +339,7 @@ def default_preferences() -> dict[str, Any]:
         "obstructions": {direction: 20.0 for direction in WIND16},
         "location": copy.deepcopy(DEFAULT_LOCATION),
         "temperature_unit": "auto",
+        "ui_theme": UI_THEME_LIGHT,
     }
 
 
@@ -347,6 +350,9 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
 
         temp_unit = str(raw.get("temperature_unit", "auto")).strip().lower()
         prefs["temperature_unit"] = temp_unit if temp_unit in {"auto", "f", "c"} else "auto"
+
+        ui_theme = str(raw.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
+        prefs["ui_theme"] = ui_theme if ui_theme in UI_THEME_OPTIONS else UI_THEME_LIGHT
 
         obs = raw.get("obstructions", {})
         if isinstance(obs, dict):
@@ -392,8 +398,8 @@ def decode_preferences_from_storage(raw_value: str) -> dict[str, Any] | None:
 def load_preferences() -> tuple[dict[str, Any], bool]:
     retry_needed = False
     raw_local = get_local_storage(BROWSER_PREFS_STORAGE_KEY, component_key="browser_prefs_read")
-    local_exists_probe = streamlit_js_eval(
-        js_expressions=(
+    local_exists_probe = eval_js_hidden(
+        (
             "Object.prototype.hasOwnProperty.call(window.localStorage, "
             + json.dumps(BROWSER_PREFS_STORAGE_KEY)
             + ")"
@@ -503,6 +509,200 @@ def persist_and_rerun(prefs: dict[str, Any]) -> None:
     st.session_state["prefs"] = prefs
     save_preferences(prefs)
     st.rerun()
+
+
+def eval_js_hidden(js_expression: str, *, key: str, want_output: bool = True) -> Any:
+    # Keep streamlit_js_eval utility probes from reserving visible layout height.
+    wrapped_expression = "(setFrameHeight(0), (" + str(js_expression) + "))"
+    return streamlit_js_eval(js_expressions=wrapped_expression, key=key, want_output=want_output)
+
+
+def apply_ui_theme_css(theme_name: str) -> None:
+    theme = str(theme_name or "").strip().lower()
+    is_dark = theme == UI_THEME_DARK
+    if is_dark:
+        st.markdown(
+            """
+            <style>
+                :root {
+                    --dso-text-color: #e5e7eb;
+                    --dso-muted-text-color: #94a3b8;
+                    --dso-app-bg: #0b1220;
+                    --dso-panel-bg: #111827;
+                    --dso-border-color: rgba(148, 163, 184, 0.35);
+                }
+                iframe[title^="streamlit_js_eval"] {
+                    height: 0 !important;
+                    min-height: 0 !important;
+                    border: 0 !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    display: block !important;
+                }
+                [data-testid="stAppViewContainer"] {
+                    background: var(--dso-app-bg);
+                }
+                [data-testid="stHeader"] {
+                    background: rgba(11, 18, 32, 0.92);
+                }
+                [data-testid="stSidebar"] {
+                    background: #0f172a;
+                    border-right: 1px solid var(--dso-border-color);
+                }
+                [data-testid="stSidebar"] * {
+                    color: var(--dso-text-color);
+                }
+                [data-testid="stMainBlockContainer"] * {
+                    color: var(--dso-text-color);
+                }
+                [data-testid="stCaptionContainer"], .small-note {
+                    color: var(--dso-muted-text-color) !important;
+                }
+                .small-note {
+                    font-size: 0.9rem;
+                }
+                [data-testid="stDataFrame"] {
+                    border: 1px solid var(--dso-border-color);
+                    border-radius: 0.5rem;
+                    /* Glide Data Grid theme tokens used by st.dataframe. */
+                    --gdg-accent-color: #38bdf8;
+                    --gdg-accent-fg: #0b1220;
+                    --gdg-text-dark: #e5e7eb;
+                    --gdg-text-medium: #cbd5e1;
+                    --gdg-text-light: #94a3b8;
+                    --gdg-text-header: #e2e8f0;
+                    --gdg-text-group-header: #cbd5e1;
+                    --gdg-bg-icon-header: #111827;
+                    --gdg-fg-icon-header: #e5e7eb;
+                    --gdg-bg-cell: #0f172a;
+                    --gdg-bg-cell-medium: #111827;
+                    --gdg-bg-header: #111827;
+                    --gdg-bg-header-has-focus: #1e293b;
+                    --gdg-bg-header-hovered: #1e293b;
+                    --gdg-bg-bubble: #1e293b;
+                    --gdg-bg-bubble-selected: #334155;
+                    --gdg-bg-search-result: rgba(56, 189, 248, 0.20);
+                    --gdg-border-color: rgba(148, 163, 184, 0.35);
+                    --gdg-horizontal-border-color: rgba(148, 163, 184, 0.24);
+                    --gdg-drilldown-border: rgba(148, 163, 184, 0.45);
+                    --gdg-link-color: #7dd3fc;
+                }
+                [data-testid="stDataFrame"] div[role="grid"] {
+                    background: #0f172a;
+                }
+                [data-testid="stDataFrame"] [data-baseweb="input"] > div {
+                    background: #0f172a;
+                    color: var(--dso-text-color);
+                    border-color: var(--dso-border-color);
+                }
+                [data-testid="stDataFrame"] button {
+                    color: var(--dso-text-color);
+                }
+                [data-testid="stVerticalBlockBorderWrapper"] > div {
+                    background: var(--dso-panel-bg);
+                    border: 1px solid var(--dso-border-color);
+                }
+                [data-testid="stTextInputRootElement"] > div,
+                [data-testid="stSelectbox"] > div,
+                [data-testid="stNumberInput"] > div {
+                    background: #0f172a;
+                }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        """
+        <style>
+            .small-note {
+                font-size: 0.9rem;
+                color: #666;
+            }
+            iframe[title^="streamlit_js_eval"] {
+                height: 0 !important;
+                min-height: 0 !important;
+                border: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                display: block !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def resolve_ui_theme(theme_name: str | None = None) -> str:
+    candidate = str(theme_name or "").strip().lower()
+    if candidate in UI_THEME_OPTIONS:
+        return candidate
+
+    prefs = st.session_state.get("prefs")
+    if isinstance(prefs, dict):
+        candidate = str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
+        if candidate in UI_THEME_OPTIONS:
+            return candidate
+    return UI_THEME_LIGHT
+
+
+def resolve_plot_theme_colors(theme_name: str | None = None) -> dict[str, str]:
+    theme = resolve_ui_theme(theme_name)
+    if theme == UI_THEME_DARK:
+        return {
+            "text": "#E5E7EB",
+            "muted_text": "#CBD5E1",
+            # Keep only the plotting area tinted; leave figure chrome transparent.
+            "paper_bg": "rgba(0,0,0,0)",
+            "plot_bg": "#0F172A",
+            "grid": "rgba(148, 163, 184, 0.22)",
+            "annotation_bg": "rgba(15, 23, 42, 0.86)",
+            "annotation_border": "rgba(148, 163, 184, 0.55)",
+            "obstruction_fill": "rgba(71, 85, 105, 0.40)",
+            "obstruction_line": "rgba(148, 163, 184, 0.95)",
+            "cardinal_grid": "rgba(148, 163, 184, 0.35)",
+        }
+    return {
+        "text": "#111111",
+        "muted_text": "#334155",
+        # Keep only the plotting area tinted; leave figure chrome transparent.
+        "paper_bg": "rgba(0,0,0,0)",
+        "plot_bg": PATH_PLOT_BACKGROUND_COLOR,
+        "grid": PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        "annotation_bg": "rgba(255, 255, 255, 0.45)",
+        "annotation_border": "rgba(148, 163, 184, 0.35)",
+        "obstruction_fill": OBSTRUCTION_FILL_COLOR,
+        "obstruction_line": OBSTRUCTION_LINE_COLOR,
+        "cardinal_grid": CARDINAL_GRIDLINE_COLOR,
+    }
+
+
+def apply_dataframe_styler_theme(styler: Any, *, theme_name: str | None = None) -> Any:
+    if resolve_ui_theme(theme_name) != UI_THEME_DARK:
+        return styler
+
+    return styler.set_table_styles(
+        [
+            {
+                "selector": "th",
+                "props": [
+                    ("background-color", "#111827"),
+                    ("color", "#E2E8F0"),
+                    ("border-color", "rgba(148, 163, 184, 0.35)"),
+                ],
+            },
+            {
+                "selector": "td",
+                "props": [
+                    ("background-color", "#0F172A"),
+                    ("color", "#E5E7EB"),
+                    ("border-color", "rgba(148, 163, 184, 0.24)"),
+                ],
+            },
+        ],
+        overwrite=False,
+    )
 
 
 def infer_12_hour_clock_from_locale(locale_value: str | None) -> bool:
@@ -1118,9 +1318,11 @@ def render_sky_position_summary_table(
             "list_action": "List",
         }
     )
+    is_dark_theme = resolve_ui_theme() == UI_THEME_DARK
 
     def _style_summary_row(row: pd.Series) -> list[str]:
-        styles = ["" for _ in row]
+        base_cell_style = "background-color: #0F172A; color: #E5E7EB;" if is_dark_theme else ""
+        styles = [base_cell_style for _ in row]
         color = str(summary_df.loc[row.name, "line_color"]).strip()
         row_primary_id = str(summary_df.loc[row.name, "primary_id"]).strip()
         selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
@@ -1135,7 +1337,10 @@ def render_sky_position_summary_table(
         if row_is_selected:
             selected_bg = _muted_rgba_from_hex(color, alpha=0.16)
             for idx in range(len(styles)):
-                styles[idx] = f"background-color: {selected_bg};"
+                base_style = styles[idx]
+                if base_style and not base_style.endswith(";"):
+                    base_style = f"{base_style};"
+                styles[idx] = f"{base_style} background-color: {selected_bg};"
         if color:
             line_idx = row.index.get_loc("Line")
             base_style = styles[line_idx]
@@ -1144,7 +1349,7 @@ def render_sky_position_summary_table(
             styles[line_idx] = f"{base_style} color: {color}; font-weight: 700;"
         return styles
 
-    styled = display.style.apply(_style_summary_row, axis=1)
+    styled = apply_dataframe_styler_theme(display.style.apply(_style_summary_row, axis=1))
 
     column_config: dict[str, Any] = {
         "Line": st.column_config.TextColumn(width="small"),
@@ -1721,6 +1926,7 @@ def render_target_recommendations(
     if query_hour:
         query_hour_label = hour_labels.get(query_hour, query_hour)
         st.caption(f"Results for {query_hour_label} | {query_groups_display}")
+    is_dark_theme = resolve_ui_theme() == UI_THEME_DARK
 
     selected_groups_for_compare = [str(value).strip() for value in selected_group_options if str(value).strip()]
     if query_hour != selected_hour_option or query_groups != selected_groups_for_compare:
@@ -1739,8 +1945,11 @@ def render_target_recommendations(
                 "Direction",
             ],
         )
+        empty_table_styler: Any = empty_table.style
+        if is_dark_theme:
+            empty_table_styler = apply_dataframe_styler_theme(empty_table_styler)
         st.dataframe(
-            empty_table,
+            empty_table_styler,
             hide_index=True,
             use_container_width=True,
             key="target_recommendations_table_empty",
@@ -1806,7 +2015,8 @@ def render_target_recommendations(
     )
 
     def _style_recommendation_row(row: pd.Series) -> list[str]:
-        styles = ["" for _ in row]
+        base_cell_style = "background-color: #0F172A; color: #E5E7EB;" if is_dark_theme else ""
+        styles = [base_cell_style for _ in row]
         source_row = recommendation_df.loc[row.name]
         color = str(source_row.get("line_color", "")).strip()
         row_primary_id = str(source_row.get("primary_id", "")).strip()
@@ -1814,7 +2024,10 @@ def render_target_recommendations(
         if row_primary_id and selected_detail_id and row_primary_id == selected_detail_id:
             selected_bg = _muted_rgba_from_hex(color, alpha=0.16)
             for idx in range(len(styles)):
-                styles[idx] = f"background-color: {selected_bg};"
+                base_style = styles[idx]
+                if base_style and not base_style.endswith(";"):
+                    base_style = f"{base_style};"
+                styles[idx] = f"{base_style} background-color: {selected_bg};"
         if color:
             target_idx = row.index.get_loc("Target")
             base_style = styles[target_idx]
@@ -1824,7 +2037,7 @@ def render_target_recommendations(
         return styles
 
     recommendation_event = st.dataframe(
-        display_table.style.apply(_style_recommendation_row, axis=1),
+        apply_dataframe_styler_theme(display_table.style.apply(_style_recommendation_row, axis=1)),
         hide_index=True,
         use_container_width=True,
         on_select="rerun",
@@ -2236,7 +2449,7 @@ def render_hourly_weather_matrix(
             aligned_indicators["Element"] = ""
 
     header_cells = "".join(
-        f'<th style="padding: 6px 8px; border: 1px solid #d1d5db; '
+        f'<th style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
         f'background: #f3f4f6; color: #6b7280; text-align: left; white-space: nowrap;">'
         f"{html.escape(str(column))}</th>"
         for column in frame.columns
@@ -2248,7 +2461,7 @@ def render_hourly_weather_matrix(
         element_key = element.lower()
         row_cells = [
             (
-                '<td style="padding: 6px 8px; border: 1px solid #d1d5db; '
+                '<td style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
                 'font-weight: 600; white-space: nowrap; text-align: left;">'
                 f"{html.escape(element) if element else '&nbsp;'}</td>"
             )
@@ -2263,7 +2476,7 @@ def render_hourly_weather_matrix(
             display_value = html.escape(text_value) if text_value else "&nbsp;"
 
             cell_style = (
-                "padding: 6px 8px; border: 1px solid #d1d5db; "
+                "padding: 6px 8px; border-bottom: 1px solid #d1d5db; "
                 "white-space: nowrap; text-align: center;"
             )
             if element_key == "cloud cover":
@@ -2636,6 +2849,7 @@ def build_unobstructed_altitude_area_plot(
     *,
     use_12_hour: bool,
 ) -> go.Figure:
+    theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
     plotted_any = False
     plotted_times: list[pd.Timestamp] = []
@@ -2650,7 +2864,7 @@ def build_unobstructed_altitude_area_plot(
         x1=1.0,
         y0=0.0,
         y1=obstruction_ceiling,
-        fillcolor=OBSTRUCTION_FILL_COLOR,
+        fillcolor=theme_colors["obstruction_fill"],
         line={"width": 0},
         layer="below",
     )
@@ -2662,7 +2876,7 @@ def build_unobstructed_altitude_area_plot(
         x1=1.0,
         y0=obstruction_ceiling,
         y1=obstruction_ceiling,
-        line={"width": 1, "color": OBSTRUCTION_LINE_COLOR},
+        line={"width": 1, "color": theme_colors["obstruction_line"]},
         layer="below",
     )
 
@@ -2758,7 +2972,7 @@ def build_unobstructed_altitude_area_plot(
             xref="paper",
             yref="paper",
             showarrow=False,
-            font={"size": 13, "color": "#334155"},
+            font={"size": 13, "color": theme_colors["muted_text"]},
         )
     else:
         anchored_altitudes = [float(candidate["anchor_altitude"]) for candidate in label_candidates]
@@ -2819,8 +3033,8 @@ def build_unobstructed_altitude_area_plot(
                     "size": 11 if is_selected_label else 10,
                     "color": candidate_color if is_selected_label else _muted_rgba_from_hex(candidate_color, alpha=0.86),
                 },
-                bgcolor="rgba(255, 255, 255, 0.45)",
-                bordercolor="rgba(148, 163, 184, 0.35)",
+                bgcolor=theme_colors["annotation_bg"],
+                bordercolor=theme_colors["annotation_border"],
                 borderwidth=1,
                 borderpad=2,
             )
@@ -2830,7 +3044,9 @@ def build_unobstructed_altitude_area_plot(
         height=360,
         margin={"l": 10, "r": 170, "t": 70, "b": 10},
         showlegend=False,
-        plot_bgcolor=PATH_PLOT_BACKGROUND_COLOR,
+        plot_bgcolor=theme_colors["plot_bg"],
+        paper_bgcolor=theme_colors["paper_bg"],
+        font={"color": theme_colors["text"]},
         xaxis_title="Time",
         yaxis_title="Altitude (deg)",
     )
@@ -2838,7 +3054,7 @@ def build_unobstructed_altitude_area_plot(
     x_axis_settings: dict[str, Any] = {
         "type": "date",
         "showgrid": True,
-        "gridcolor": PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        "gridcolor": theme_colors["grid"],
         "gridwidth": 1,
         "dtick": 60 * 60 * 1000,
     }
@@ -2870,7 +3086,7 @@ def build_unobstructed_altitude_area_plot(
         range=[0, 90],
         tickvals=[0, 15, 30, 45, 60, 75, 90],
         showgrid=True,
-        gridcolor=PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        gridcolor=theme_colors["grid"],
         gridwidth=1,
     )
     return fig
@@ -2887,6 +3103,7 @@ def build_path_plot(
     use_12_hour: bool,
     overlay_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
+    theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
 
     for azimuth in (90.0, 180.0, 270.0):
@@ -2898,7 +3115,7 @@ def build_path_plot(
             y1=90.0,
             xref="x",
             yref="y",
-            line={"color": CARDINAL_GRIDLINE_COLOR, "width": 1, "dash": "dot"},
+            line={"color": theme_colors["cardinal_grid"], "width": 1, "dash": "dot"},
             layer="below",
         )
 
@@ -2909,9 +3126,9 @@ def build_path_plot(
             y=obstruction_y,
             mode="lines",
             name="Obstructed region",
-            line={"width": 1, "color": OBSTRUCTION_LINE_COLOR},
+            line={"width": 1, "color": theme_colors["obstruction_line"]},
             fill="tozeroy",
-            fillcolor=OBSTRUCTION_FILL_COLOR,
+            fillcolor=theme_colors["obstruction_fill"],
             hoverinfo="skip",
         )
     )
@@ -3046,7 +3263,9 @@ def build_path_plot(
         height=330,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
-        plot_bgcolor=PATH_PLOT_BACKGROUND_COLOR,
+        plot_bgcolor=theme_colors["plot_bg"],
+        paper_bgcolor=theme_colors["paper_bg"],
+        font={"color": theme_colors["text"]},
         xaxis_title="Azimuth",
         yaxis_title="Altitude (deg)",
     )
@@ -3054,7 +3273,7 @@ def build_path_plot(
     fig.update_yaxes(
         range=[0, 90],
         showgrid=True,
-        gridcolor=PATH_PLOT_HORIZONTAL_GRID_COLOR,
+        gridcolor=theme_colors["grid"],
         gridwidth=1,
     )
     return fig
@@ -3072,6 +3291,7 @@ def build_path_plot_radial(
     use_12_hour: bool,
     overlay_tracks: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
+    theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
 
     obstruction_theta, obstruction_alt = obstruction_step_profile(obstructions)
@@ -3094,7 +3314,7 @@ def build_path_plot_radial(
             theta=obstruction_theta,
             r=obstruction_boundary_r,
             mode="lines",
-            line={"width": 1, "color": OBSTRUCTION_LINE_COLOR},
+            line={"width": 1, "color": theme_colors["obstruction_line"]},
             showlegend=False,
             hoverinfo="skip",
         )
@@ -3107,7 +3327,7 @@ def build_path_plot_radial(
             name="Obstructed region",
             line={"width": 0},
             fill="tonext",
-            fillcolor=OBSTRUCTION_FILL_COLOR,
+            fillcolor=theme_colors["obstruction_fill"],
             hoverinfo="skip",
         )
     )
@@ -3118,7 +3338,7 @@ def build_path_plot_radial(
                 theta=[azimuth, azimuth],
                 r=[0.0, 90.0],
                 mode="lines",
-                line={"color": CARDINAL_GRIDLINE_COLOR, "width": 1, "dash": "dot"},
+                line={"color": theme_colors["cardinal_grid"], "width": 1, "dash": "dot"},
                 showlegend=False,
                 hoverinfo="skip",
             )
@@ -3283,14 +3503,19 @@ def build_path_plot_radial(
         height=660,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
+        paper_bgcolor=theme_colors["paper_bg"],
+        font={"color": theme_colors["text"]},
         polar={
-            "bgcolor": PATH_PLOT_BACKGROUND_COLOR,
+            "bgcolor": theme_colors["plot_bg"],
             "angularaxis": {
                 "rotation": 90,
                 "direction": "clockwise",
                 "tickmode": "array",
                 "tickvals": [i * 22.5 for i in range(16)],
                 "ticktext": WIND16,
+                "gridcolor": theme_colors["grid"],
+                "linecolor": theme_colors["grid"],
+                "tickfont": {"color": theme_colors["text"]},
             },
             "radialaxis": {
                 "range": [0, 90],
@@ -3298,7 +3523,9 @@ def build_path_plot_radial(
                 "tickvals": [0, 30, 60, 90],
                 "ticktext": radial_ticktext,
                 "title": radial_title,
-                "gridcolor": PATH_PLOT_HORIZONTAL_GRID_COLOR,
+                "gridcolor": theme_colors["grid"],
+                "linecolor": theme_colors["grid"],
+                "tickfont": {"color": theme_colors["text"]},
             },
         },
     )
@@ -3314,6 +3541,7 @@ def build_night_plot(
     target_label: str | None = None,
     use_12_hour: bool = False,
 ) -> go.Figure:
+    theme_colors = resolve_plot_theme_colors()
     if track.empty:
         return go.Figure()
 
@@ -3367,7 +3595,7 @@ def build_night_plot(
         temp_str = format_temperature(temp_value, temperature_unit)
         temp_labels.append(temp_str)
         if temp_value is None or pd.isna(temp_value):
-            temp_label_colors.append("#6B7280")
+            temp_label_colors.append(theme_colors["muted_text"])
         else:
             temp_f = (float(temp_value) * 9.0 / 5.0) + 32.0
             temp_label_colors.append(_interpolate_temperature_color_f(temp_f))
@@ -3416,8 +3644,8 @@ def build_night_plot(
             hovertemplate="%{hovertext}<extra></extra>",
             name="Obstructed",
             marker={
-                "color": OBSTRUCTION_FILL_COLOR,
-                "line": {"color": OBSTRUCTION_LINE_COLOR, "width": 1},
+                "color": theme_colors["obstruction_fill"],
+                "line": {"color": theme_colors["obstruction_line"], "width": 1},
             },
         )
     )
@@ -3428,7 +3656,7 @@ def build_night_plot(
             mode="text",
             text=wind_labels,
             textposition="top center",
-            textfont={"color": "#111111"},
+            textfont={"color": theme_colors["text"]},
             showlegend=False,
             hoverinfo="skip",
         )
@@ -3496,6 +3724,9 @@ def build_night_plot(
             "xanchor": "left",
             "x": 0.0,
         },
+        plot_bgcolor=theme_colors["plot_bg"],
+        paper_bgcolor=theme_colors["paper_bg"],
+        font={"color": theme_colors["text"]},
         yaxis_title="Altitude (deg)",
     )
     fig.update_xaxes(
@@ -3504,7 +3735,7 @@ def build_night_plot(
         categoryarray=frame["hour_label"].tolist(),
         showgrid=True,
         gridwidth=1,
-        gridcolor="rgba(148, 163, 184, 0.35)",
+        gridcolor=theme_colors["grid"],
     )
     max_altitude = float(frame["max_alt"].max()) if "max_alt" in frame.columns and not frame["max_alt"].empty else 0.0
     if not np.isfinite(max_altitude):
@@ -5117,26 +5348,14 @@ def render_explorer_page(
         st.caption(cookie_backup_notice)
 
     now_utc = datetime.now(timezone.utc)
-    st.markdown(
-        """
-        <style>
-            .small-note {font-size: 0.9rem; color: #666;}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    refresh_status_html = (
+        "<p class='small-note' style='text-align: right;'>Alt/Az auto-refresh 60s<br>"
+        f"Updated: {now_utc.strftime('%Y-%m-%d')} "
+        f"{format_display_time(now_utc, use_12_hour=use_12_hour, include_seconds=True)} UTC"
+        "</p>"
     )
 
-    header_cols = st.columns([3, 1])
-    header_cols[0].title("DSO Explorer")
-    header_cols[1].markdown(
-        (
-            "<p class='small-note'>Alt/Az auto-refresh 60s<br>"
-            f"Updated: {now_utc.strftime('%Y-%m-%d')} "
-            f"{format_display_time(now_utc, use_12_hour=use_12_hour, include_seconds=True)} UTC"
-            "</p>"
-        ),
-        unsafe_allow_html=True,
-    )
+    st.title("DSO Explorer")
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
     location = prefs["location"]
     location_lat = float(location["lat"])
@@ -5235,6 +5454,7 @@ def render_explorer_page(
             detail_stack_vertical=detail_stack_vertical,
             weather_forecast_day_offset=weather_forecast_day_offset,
         )
+    st.markdown(refresh_status_html, unsafe_allow_html=True)
 
 
 def main() -> None:
@@ -5269,12 +5489,24 @@ def main() -> None:
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
 
-    browser_language_raw = get_browser_language(component_key="browser_language_pref")
+    with st.sidebar:
+        dark_mode_enabled = st.toggle(
+            "Dark Mode",
+            value=str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower() == UI_THEME_DARK,
+            key="ui_dark_mode_toggle",
+        )
+    selected_ui_theme = UI_THEME_DARK if dark_mode_enabled else UI_THEME_LIGHT
+    if selected_ui_theme != str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower():
+        prefs["ui_theme"] = selected_ui_theme
+        persist_and_rerun(prefs)
+    apply_ui_theme_css(selected_ui_theme)
+
+    browser_language_raw = eval_js_hidden("window.navigator.language", key="browser_language_pref")
     if isinstance(browser_language_raw, str) and browser_language_raw.strip():
         st.session_state["browser_language"] = browser_language_raw.strip()
     browser_language = st.session_state.get("browser_language")
-    browser_hour_cycle_raw = streamlit_js_eval(
-        js_expressions=(
+    browser_hour_cycle_raw = eval_js_hidden(
+        (
             "new Intl.DateTimeFormat(window.navigator.language, "
             "{hour: 'numeric', minute: '2-digit'}).resolvedOptions().hourCycle"
         ),
@@ -5283,8 +5515,8 @@ def main() -> None:
     if isinstance(browser_hour_cycle_raw, str) and browser_hour_cycle_raw.strip():
         st.session_state["browser_hour_cycle"] = browser_hour_cycle_raw.strip()
     browser_hour_cycle = st.session_state.get("browser_hour_cycle")
-    browser_month_day_pattern_raw = streamlit_js_eval(
-        js_expressions=(
+    browser_month_day_pattern_raw = eval_js_hidden(
+        (
             "new Intl.DateTimeFormat(window.navigator.language, {month: 'numeric', day: 'numeric'})"
             ".formatToParts(new Date(2024, 1, 15))"
             ".map((part) => `${part.type}:${part.value}`)"
@@ -5296,10 +5528,7 @@ def main() -> None:
         st.session_state["browser_month_day_pattern"] = browser_month_day_pattern_raw.strip()
     browser_month_day_pattern = st.session_state.get("browser_month_day_pattern")
     use_12_hour = resolve_12_hour_clock(browser_language, browser_hour_cycle)
-    viewport_width_raw = streamlit_js_eval(
-        js_expressions="window.innerWidth",
-        key="browser_viewport_width_probe",
-    )
+    viewport_width_raw = eval_js_hidden("window.innerWidth", key="browser_viewport_width_probe")
     if isinstance(viewport_width_raw, (int, float)) and float(viewport_width_raw) > 0:
         st.session_state["browser_viewport_width"] = int(float(viewport_width_raw))
     elif isinstance(viewport_width_raw, str):
