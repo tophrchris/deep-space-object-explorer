@@ -36,8 +36,8 @@ MAX_FEEDBACK_PER_PR = int(os.getenv("BOT_MAX_FEEDBACK_PER_PR", "1"))
 BOT_MAX_PATCH_RETRIES = int(os.getenv("BOT_MAX_PATCH_RETRIES", "2"))
 
 DEFAULT_TEST_COMMAND = (
-    "python -m compileall app.py catalog_ingestion.py catalog_service.py "
-    "list_search.py list_settings_ui.py list_subsystem.py weather_service.py scripts target_tips"
+    "python -m compileall app.py dso_enricher/catalog_ingestion.py dso_enricher/catalog_service.py "
+    "lists/list_search.py lists/list_settings_ui.py lists/list_subsystem.py weather_service.py scripts target_tips"
 )
 RAW_TEST_COMMANDS = os.getenv("BOT_TEST_COMMANDS", "").strip()
 TEST_COMMAND_SOURCE = RAW_TEST_COMMANDS if RAW_TEST_COMMANDS else DEFAULT_TEST_COMMAND

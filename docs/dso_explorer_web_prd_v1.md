@@ -40,7 +40,7 @@
 - `emission_lines`
 
 - Catalog loading behavior:
-- App loader is mediated through `catalog_service.load_catalog_data(...)` with feature modes:
+- App loader is mediated through `dso_enricher.catalog_service.load_catalog_data(...)` with feature modes:
 - `legacy` (active default)
 - `curated_parquet` (available fallback mode)
 - Legacy path now passes `data/DSO_CATALOG_ENRICHED.CSV` into ingestion.

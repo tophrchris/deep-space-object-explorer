@@ -22,10 +22,12 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 ## Project structure
 
 - `app.py`: Streamlit app entry point
-- `catalog_ingestion.py`: catalog ingest + normalization + cache metadata
+- `dso_enricher/catalog_ingestion.py`: catalog ingest + normalization + cache metadata
+- `lists/`: list management/search/ui modules
 - `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
 - `specs/`: technical specs for catalog cache and Wikipedia enrichment scripts
-- `catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
+- `docs/`: project notes, backlog, and product planning docs
+- `docs/catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
 - `TODO.md`: prioritized build backlog
 
 ## Specifications
@@ -84,6 +86,12 @@ streamlit run app.py
 python scripts/ingest_catalog.py
 ```
 
+5. Clean local generated artifacts (optional):
+
+```bash
+./scripts/clean_local_artifacts.sh
+```
+
 ## Deploy to Streamlit Community Cloud
 
 1. Push this repo to GitHub (private is fine).
@@ -111,7 +119,7 @@ Notes:
 - Layout refactor and interaction flow cleanup (`#27`)
 - Location UX/robustness improvements (`#28`, `#17`, `#2`)
 - Additional catalog quality and enrichment follow-ups
-- Catalog issue drafts to file as GitHub issues: [`catalog_issue_backlog.md`](catalog_issue_backlog.md)
+- Catalog issue drafts to file as GitHub issues: [`docs/catalog_issue_backlog.md`](docs/catalog_issue_backlog.md)
 - Next-pass UI/UX polish after core behavior stabilizes
 - main planning workflow ideas:
   - start with "Tonight at a glance"

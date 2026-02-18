@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from catalog_ingestion import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, load_unified_catalog
+from dso_enricher.catalog_ingestion import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, load_unified_catalog
 
 CATALOG_MODE_LEGACY = "legacy"
 CATALOG_MODE_CURATED_PARQUET = "curated_parquet"

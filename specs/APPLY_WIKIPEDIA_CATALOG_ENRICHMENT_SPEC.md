@@ -297,7 +297,7 @@ Soft row-level failures (count-and-continue):
 
 ## 16. Normative Code References
 
-- Schema column constants source: `catalog_ingestion.py:15`, `catalog_ingestion.py:24`, `catalog_ingestion.py:33`
+- Schema column constants source: `dso_enricher/catalog_ingestion.py:15`, `dso_enricher/catalog_ingestion.py:24`, `dso_enricher/catalog_ingestion.py:33`
 - Cache column/type setup in apply script: `scripts/apply_wikipedia_catalog_enrichment.py:20`
 - Enrichment row parsing and fallback behavior: `scripts/apply_wikipedia_catalog_enrichment.py:107`
 - Payload eligibility predicate: `scripts/apply_wikipedia_catalog_enrichment.py:149`
@@ -309,4 +309,4 @@ Soft row-level failures (count-and-continue):
 - Summary payload fields: `scripts/apply_wikipedia_catalog_enrichment.py:363`
 - Parquet write path: `scripts/apply_wikipedia_catalog_enrichment.py:383`
 - Metadata merge/write behavior: `scripts/apply_wikipedia_catalog_enrichment.py:387`
-- Baseline catalog normalization for comparison: `catalog_ingestion.py:311`
+- Baseline catalog normalization for comparison: `dso_enricher/catalog_ingestion.py:311`

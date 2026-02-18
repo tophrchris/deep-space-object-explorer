@@ -5,7 +5,7 @@ from typing import Any, Callable
 import pandas as pd
 import streamlit as st
 
-from list_subsystem import (
+from lists.list_subsystem import (
     create_list,
     delete_list,
     editable_list_ids_in_order,
