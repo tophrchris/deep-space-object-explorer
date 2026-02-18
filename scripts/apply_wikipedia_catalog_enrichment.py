@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from catalog_ingestion import ENRICHED_OPTIONAL_COLUMNS, OPTIONAL_COLUMNS, REQUIRED_COLUMNS
+from dso_enricher.catalog_ingestion import ENRICHED_OPTIONAL_COLUMNS, OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 
 CACHE_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ENRICHED_OPTIONAL_COLUMNS
 NUMERIC_COLUMNS = {

@@ -3,7 +3,7 @@
 Status: normative for cache creation and maintenance.
 
 This document defines the expected structure and field behavior for `data/dso_catalog_cache.parquet`.
-It is derived from the active normalization and write paths in `catalog_ingestion.py` and `scripts/apply_wikipedia_catalog_enrichment.py`.
+It is derived from the active normalization and write paths in `dso_enricher/catalog_ingestion.py` and `scripts/apply_wikipedia_catalog_enrichment.py`.
 
 ## 1. Artifact Contract
 
@@ -360,11 +360,11 @@ Recommended quality warnings (non-fatal but should be reported):
 
 ## 8. Code References (Normative)
 
-- Schema lists and ingestion constants: `catalog_ingestion.py:15`, `catalog_ingestion.py:24`, `catalog_ingestion.py:33`.
-- Normalization and hard row filters: `catalog_ingestion.py:311`.
-- Object type grouping and default fallback: `catalog_ingestion.py:186`, `catalog_ingestion.py:262`.
-- ID canonicalization behavior: `catalog_ingestion.py:397`, `catalog_ingestion.py:521`.
-- Ingestion mappings for enriched/OpenNGC/popular supplement: `catalog_ingestion.py:906`, `catalog_ingestion.py:989`, `catalog_ingestion.py:1073`.
-- Merge precedence with cache-only additions: `catalog_ingestion.py:1150`.
-- Unified write path (`to_parquet`): `catalog_ingestion.py:1367`.
+- Schema lists and ingestion constants: `dso_enricher/catalog_ingestion.py:15`, `dso_enricher/catalog_ingestion.py:24`, `dso_enricher/catalog_ingestion.py:33`.
+- Normalization and hard row filters: `dso_enricher/catalog_ingestion.py:311`.
+- Object type grouping and default fallback: `dso_enricher/catalog_ingestion.py:186`, `dso_enricher/catalog_ingestion.py:262`.
+- ID canonicalization behavior: `dso_enricher/catalog_ingestion.py:397`, `dso_enricher/catalog_ingestion.py:521`.
+- Ingestion mappings for enriched/OpenNGC/popular supplement: `dso_enricher/catalog_ingestion.py:906`, `dso_enricher/catalog_ingestion.py:989`, `dso_enricher/catalog_ingestion.py:1073`.
+- Merge precedence with cache-only additions: `dso_enricher/catalog_ingestion.py:1150`.
+- Unified write path (`to_parquet`): `dso_enricher/catalog_ingestion.py:1367`.
 - Wikipedia merge constraints and insert/update behavior: `scripts/apply_wikipedia_catalog_enrichment.py:20`, `scripts/apply_wikipedia_catalog_enrichment.py:244`, `scripts/apply_wikipedia_catalog_enrichment.py:279`, `scripts/apply_wikipedia_catalog_enrichment.py:325`, `scripts/apply_wikipedia_catalog_enrichment.py:384`.

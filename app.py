@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import copy
 import hashlib
 import html
 import json
@@ -21,33 +19,45 @@ from astral import LocationInfo
 from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
-from catalog_service import (
-    CATALOG_MODE_CURATED_PARQUET,
-    CATALOG_MODE_LEGACY,
+from app_constants import UI_THEME_DARK, UI_THEME_LIGHT, WIND16, WIND16_ARROWS
+from app_preferences import (
+    PREFS_BOOTSTRAP_MAX_RUNS,
+    PREFS_BOOTSTRAP_RETRY_INTERVAL_MS,
+    build_settings_export_payload,
+    default_preferences,
+    ensure_preferences_shape,
+    load_preferences,
+    parse_settings_import_payload,
+    persist_and_rerun,
+    save_preferences,
+)
+from app_theme import (
+    apply_dataframe_styler_theme,
+    apply_ui_theme_css,
+    resolve_plot_theme_colors,
+    resolve_ui_theme,
+)
+from dso_enricher.catalog_service import (
     get_object_by_id,
-    load_catalog_data,
+    load_catalog_from_cache,
     search_catalog,
 )
-from list_subsystem import (
+from lists.list_subsystem import (
     AUTO_RECENT_LIST_ID,
     all_listed_ids_in_order,
     clean_primary_id_list,
-    default_list_meta,
-    default_list_order,
-    default_lists_payload,
     editable_list_ids_in_order,
     get_active_preview_list_id,
     get_list_ids,
     get_list_name,
     is_system_list,
     list_ids_in_order,
-    normalize_list_preferences,
     push_target_to_auto_recent_list,
     set_active_preview_list_id,
     toggle_target_in_list,
 )
-from list_search import searchbox_target_options, subset_by_id_list
-from list_settings_ui import render_lists_settings_section
+from lists.list_search import searchbox_target_options, subset_by_id_list
+from lists.list_settings_ui import render_lists_settings_section
 from geopy.geocoders import ArcGIS, Nominatim, Photon
 try:
     from streamlit_searchbox import st_searchbox
@@ -64,20 +74,8 @@ try:
     from streamlit_extras.let_it_rain import rain as let_it_rain
 except Exception:
     let_it_rain = None
-from streamlit_js_eval import (
-    get_geolocation,
-    get_local_storage,
-    set_local_storage,
-    streamlit_js_eval,
-)
+from streamlit_js_eval import get_geolocation, streamlit_js_eval
 from streamlit_autorefresh import st_autorefresh
-from prefs_cookie_backup import (
-    bootstrap_cookie_backup,
-    get_cookie_backup_notice,
-    read_preferences_cookie_backup,
-    set_cookie_backup_runtime_enabled,
-    write_preferences_cookie_backup,
-)
 from target_tips.ui import render_target_tips_panel
 from timezonefinder import TimezoneFinder
 from weather_service import (
@@ -92,69 +90,7 @@ from weather_service import (
 
 st.set_page_config(page_title="DSO Explorer", page_icon="✨", layout="wide")
 
-WIND16 = [
-    "N",
-    "NNE",
-    "NE",
-    "ENE",
-    "E",
-    "ESE",
-    "SE",
-    "SSE",
-    "S",
-    "SSW",
-    "SW",
-    "WSW",
-    "W",
-    "WNW",
-    "NW",
-    "NNW",
-]
-WIND16_ARROWS = {
-    "N": "↑",
-    "NNE": "↑",
-    "NE": "↗",
-    "ENE": "↗",
-    "E": "→",
-    "ESE": "↘",
-    "SE": "↘",
-    "SSE": "↓",
-    "S": "↓",
-    "SSW": "↓",
-    "SW": "↙",
-    "WSW": "↙",
-    "W": "←",
-    "WNW": "↖",
-    "NW": "↖",
-    "NNW": "↑",
-}
-
-DEFAULT_LOCATION = {
-    "lat": 40.3573,
-    "lon": -74.6672,
-    "label": "Princeton, NJ",
-    "source": "default",
-    "resolved_at": "",
-}
-
-CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
-CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
-CURATED_CATALOG_PATH = Path("data/dso_catalog_curated.parquet")
-CATALOG_ENRICHED_PATH = Path("data/DSO_CATALOG_ENRICHED.CSV")
-# Catalog rollout feature flag:
-# - "legacy": current loader (`catalog_ingestion.load_unified_catalog`)
-# - "curated_parquet": read directly from `CURATED_CATALOG_PATH` and fallback to legacy on validation/load errors
-CATALOG_LOADER_MODES = (CATALOG_MODE_LEGACY, CATALOG_MODE_CURATED_PARQUET)
-CATALOG_LOADER_MODE = CATALOG_MODE_LEGACY
-BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v2"
-ENABLE_COOKIE_BACKUP = True
-PREFS_BOOTSTRAP_MAX_RUNS = 6
-PREFS_BOOTSTRAP_RETRY_INTERVAL_MS = 250
-SETTINGS_EXPORT_FORMAT_VERSION = 2
-UI_THEME_LIGHT = "light"
-UI_THEME_DARK = "dark"
-UI_THEME_OPTIONS = {UI_THEME_LIGHT, UI_THEME_DARK}
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -262,13 +198,8 @@ PATH_LINE_COLORS = [
     "#7f7f7f",
     "#bcbd22",
 ]
-OBSTRUCTION_FILL_COLOR = "rgba(181, 186, 192, 0.40)"
-OBSTRUCTION_LINE_COLOR = "rgba(148, 163, 184, 0.95)"
 UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG = 20.0
-CARDINAL_GRIDLINE_COLOR = "rgba(100, 116, 139, 0.45)"
 DETAIL_PANE_STACK_BREAKPOINT_PX = 800
-PATH_PLOT_BACKGROUND_COLOR = "#E2F0FB"
-PATH_PLOT_HORIZONTAL_GRID_COLOR = "rgba(255, 255, 255, 0.95)"
 PATH_DIRECTION_ARROW_COLOR = "#111111"
 PATH_DIRECTION_ARROW_SIZE_PRIMARY = 10
 PATH_DIRECTION_ARROW_SIZE_OVERLAY = 9
@@ -330,379 +261,10 @@ def target_line_color(primary_id: str) -> str:
     return PATH_LINE_COLORS[palette_index]
 
 
-def default_preferences() -> dict[str, Any]:
-    return {
-        "lists": default_lists_payload(),
-        "list_order": default_list_order(),
-        "list_meta": default_list_meta(),
-        "active_preview_list_id": AUTO_RECENT_LIST_ID,
-        "obstructions": {direction: 20.0 for direction in WIND16},
-        "location": copy.deepcopy(DEFAULT_LOCATION),
-        "temperature_unit": "auto",
-        "ui_theme": UI_THEME_LIGHT,
-    }
-
-
-def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
-    prefs = default_preferences()
-    if isinstance(raw, dict):
-        prefs.update(normalize_list_preferences(raw))
-
-        temp_unit = str(raw.get("temperature_unit", "auto")).strip().lower()
-        prefs["temperature_unit"] = temp_unit if temp_unit in {"auto", "f", "c"} else "auto"
-
-        ui_theme = str(raw.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
-        prefs["ui_theme"] = ui_theme if ui_theme in UI_THEME_OPTIONS else UI_THEME_LIGHT
-
-        obs = raw.get("obstructions", {})
-        if isinstance(obs, dict):
-            for key in WIND16:
-                value = obs.get(key, 20.0)
-                try:
-                    prefs["obstructions"][key] = float(value)
-                except (TypeError, ValueError):
-                    prefs["obstructions"][key] = 20.0
-
-        loc = raw.get("location", {})
-        if isinstance(loc, dict):
-            merged = copy.deepcopy(DEFAULT_LOCATION)
-            merged.update({k: loc.get(k, merged[k]) for k in merged})
-            prefs["location"] = merged
-
-    return prefs
-
-
-def encode_preferences_for_storage(prefs: dict[str, Any]) -> str:
-    compact_json = json.dumps(ensure_preferences_shape(prefs), separators=(",", ":"), ensure_ascii=True)
-    return base64.urlsafe_b64encode(compact_json.encode("utf-8")).decode("ascii")
-
-
-def decode_preferences_from_storage(raw_value: str) -> dict[str, Any] | None:
-    try:
-        decoded_json = base64.urlsafe_b64decode(str(raw_value).encode("ascii")).decode("utf-8")
-        payload = json.loads(decoded_json)
-        if not isinstance(payload, dict):
-            return None
-        return ensure_preferences_shape(payload)
-    except Exception:
-        return None
-
-
-# Optional cookie backup is isolated in `prefs_cookie_backup.py`.
-# Toggle `ENABLE_COOKIE_BACKUP` above to disable it without code removal.
-# Full removal later: delete the `prefs_cookie_backup` import, remove the
-# integration calls below, remove `extra-streamlit-components` from requirements,
-# and delete `prefs_cookie_backup.py`.
-
-
-def load_preferences() -> tuple[dict[str, Any], bool]:
-    retry_needed = False
-    raw_local = get_local_storage(BROWSER_PREFS_STORAGE_KEY, component_key="browser_prefs_read")
-    local_exists_probe = eval_js_hidden(
-        (
-            "Object.prototype.hasOwnProperty.call(window.localStorage, "
-            + json.dumps(BROWSER_PREFS_STORAGE_KEY)
-            + ")"
-        ),
-        key="browser_prefs_local_exists_probe",
-    )
-
-    if raw_local is None and local_exists_probe is None:
-        retry_needed = True
-
-    if isinstance(raw_local, str) and raw_local.strip():
-        decoded = decode_preferences_from_storage(raw_local)
-        if decoded is not None:
-            st.session_state.pop("prefs_persistence_notice", None)
-            return decoded, False
-    elif local_exists_probe is True:
-        # Local key appears to exist but returned value is unavailable in this pass.
-        retry_needed = True
-
-    raw_cookie = read_preferences_cookie_backup()
-    if isinstance(raw_cookie, str) and raw_cookie.strip():
-        decoded_cookie = decode_preferences_from_storage(raw_cookie)
-        if decoded_cookie is not None:
-            try:
-                payload_hash = hashlib.sha1(raw_cookie.encode("ascii")).hexdigest()[:12]
-                set_local_storage(
-                    BROWSER_PREFS_STORAGE_KEY,
-                    raw_cookie,
-                    component_key=f"browser_prefs_rehydrate_{payload_hash}",
-                )
-            except Exception:
-                pass
-
-            st.session_state.pop("prefs_persistence_notice", None)
-            return decoded_cookie, False
-
-    return default_preferences(), retry_needed
-
-
-def save_preferences(prefs: dict[str, Any]) -> bool:
-    try:
-        encoded = encode_preferences_for_storage(prefs)
-    except Exception:
-        st.session_state["prefs_persistence_notice"] = (
-            "Browser-local preference storage is unavailable. Using session-only preferences."
-        )
-        return False
-
-    payload_hash = hashlib.sha1(encoded.encode("ascii")).hexdigest()[:12]
-    local_saved = False
-    try:
-        set_local_storage(
-            BROWSER_PREFS_STORAGE_KEY,
-            encoded,
-            component_key=f"browser_prefs_write_{payload_hash}",
-        )
-        local_saved = True
-    except Exception:
-        local_saved = False
-
-    cookie_saved = write_preferences_cookie_backup(encoded)
-
-    if local_saved:
-        st.session_state.pop("prefs_persistence_notice", None)
-        return True
-
-    if cookie_saved:
-        st.session_state["prefs_persistence_notice"] = (
-            "Browser-local preference storage is unavailable. Using cookie backup preferences."
-        )
-        return True
-
-    st.session_state["prefs_persistence_notice"] = (
-        "Browser-local preference storage is unavailable. Using session-only preferences."
-    )
-    return False
-
-
-def build_settings_export_payload(prefs: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "format": "dso_explorer_settings",
-        "version": SETTINGS_EXPORT_FORMAT_VERSION,
-        "exported_at_utc": datetime.now(timezone.utc).isoformat(),
-        "preferences": ensure_preferences_shape(prefs),
-    }
-
-
-def parse_settings_import_payload(raw_text: str) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-
-    candidate = payload
-    if isinstance(payload.get("preferences"), dict):
-        candidate = payload["preferences"]
-
-    if not isinstance(candidate, dict):
-        return None
-    return ensure_preferences_shape(candidate)
-
-
-def persist_and_rerun(prefs: dict[str, Any]) -> None:
-    st.session_state["prefs"] = prefs
-    save_preferences(prefs)
-    st.rerun()
-
-
 def eval_js_hidden(js_expression: str, *, key: str, want_output: bool = True) -> Any:
     # Keep streamlit_js_eval utility probes from reserving visible layout height.
     wrapped_expression = "(setFrameHeight(0), (" + str(js_expression) + "))"
     return streamlit_js_eval(js_expressions=wrapped_expression, key=key, want_output=want_output)
-
-
-def apply_ui_theme_css(theme_name: str) -> None:
-    theme = str(theme_name or "").strip().lower()
-    is_dark = theme == UI_THEME_DARK
-    if is_dark:
-        st.markdown(
-            """
-            <style>
-                :root {
-                    --dso-text-color: #e5e7eb;
-                    --dso-muted-text-color: #94a3b8;
-                    --dso-app-bg: #0b1220;
-                    --dso-panel-bg: #111827;
-                    --dso-border-color: rgba(148, 163, 184, 0.35);
-                }
-                iframe[title^="streamlit_js_eval"] {
-                    height: 0 !important;
-                    min-height: 0 !important;
-                    border: 0 !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    display: block !important;
-                }
-                [data-testid="stAppViewContainer"] {
-                    background: var(--dso-app-bg);
-                }
-                [data-testid="stHeader"] {
-                    background: rgba(11, 18, 32, 0.92);
-                }
-                [data-testid="stSidebar"] {
-                    background: #0f172a;
-                    border-right: 1px solid var(--dso-border-color);
-                }
-                [data-testid="stSidebar"] * {
-                    color: var(--dso-text-color);
-                }
-                [data-testid="stMainBlockContainer"] * {
-                    color: var(--dso-text-color);
-                }
-                [data-testid="stCaptionContainer"], .small-note {
-                    color: var(--dso-muted-text-color) !important;
-                }
-                .small-note {
-                    font-size: 0.9rem;
-                }
-                [data-testid="stDataFrame"] {
-                    border: 1px solid var(--dso-border-color);
-                    border-radius: 0.5rem;
-                    /* Glide Data Grid theme tokens used by st.dataframe. */
-                    --gdg-accent-color: #38bdf8;
-                    --gdg-accent-fg: #0b1220;
-                    --gdg-text-dark: #e5e7eb;
-                    --gdg-text-medium: #cbd5e1;
-                    --gdg-text-light: #94a3b8;
-                    --gdg-text-header: #e2e8f0;
-                    --gdg-text-group-header: #cbd5e1;
-                    --gdg-bg-icon-header: #111827;
-                    --gdg-fg-icon-header: #e5e7eb;
-                    --gdg-bg-cell: #0f172a;
-                    --gdg-bg-cell-medium: #111827;
-                    --gdg-bg-header: #111827;
-                    --gdg-bg-header-has-focus: #1e293b;
-                    --gdg-bg-header-hovered: #1e293b;
-                    --gdg-bg-bubble: #1e293b;
-                    --gdg-bg-bubble-selected: #334155;
-                    --gdg-bg-search-result: rgba(56, 189, 248, 0.20);
-                    --gdg-border-color: rgba(148, 163, 184, 0.35);
-                    --gdg-horizontal-border-color: rgba(148, 163, 184, 0.24);
-                    --gdg-drilldown-border: rgba(148, 163, 184, 0.45);
-                    --gdg-link-color: #7dd3fc;
-                }
-                [data-testid="stDataFrame"] div[role="grid"] {
-                    background: #0f172a;
-                }
-                [data-testid="stDataFrame"] [data-baseweb="input"] > div {
-                    background: #0f172a;
-                    color: var(--dso-text-color);
-                    border-color: var(--dso-border-color);
-                }
-                [data-testid="stDataFrame"] button {
-                    color: var(--dso-text-color);
-                }
-                [data-testid="stVerticalBlockBorderWrapper"] > div {
-                    background: var(--dso-panel-bg);
-                    border: 1px solid var(--dso-border-color);
-                }
-                [data-testid="stTextInputRootElement"] > div,
-                [data-testid="stSelectbox"] > div,
-                [data-testid="stNumberInput"] > div {
-                    background: #0f172a;
-                }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    st.markdown(
-        """
-        <style>
-            .small-note {
-                font-size: 0.9rem;
-                color: #666;
-            }
-            iframe[title^="streamlit_js_eval"] {
-                height: 0 !important;
-                min-height: 0 !important;
-                border: 0 !important;
-                margin: 0 !important;
-                padding: 0 !important;
-                display: block !important;
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def resolve_ui_theme(theme_name: str | None = None) -> str:
-    candidate = str(theme_name or "").strip().lower()
-    if candidate in UI_THEME_OPTIONS:
-        return candidate
-
-    prefs = st.session_state.get("prefs")
-    if isinstance(prefs, dict):
-        candidate = str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
-        if candidate in UI_THEME_OPTIONS:
-            return candidate
-    return UI_THEME_LIGHT
-
-
-def resolve_plot_theme_colors(theme_name: str | None = None) -> dict[str, str]:
-    theme = resolve_ui_theme(theme_name)
-    if theme == UI_THEME_DARK:
-        return {
-            "text": "#E5E7EB",
-            "muted_text": "#CBD5E1",
-            # Keep only the plotting area tinted; leave figure chrome transparent.
-            "paper_bg": "rgba(0,0,0,0)",
-            "plot_bg": "#0F172A",
-            "grid": "rgba(148, 163, 184, 0.22)",
-            "annotation_bg": "rgba(15, 23, 42, 0.86)",
-            "annotation_border": "rgba(148, 163, 184, 0.55)",
-            "obstruction_fill": "rgba(71, 85, 105, 0.40)",
-            "obstruction_line": "rgba(148, 163, 184, 0.95)",
-            "cardinal_grid": "rgba(148, 163, 184, 0.35)",
-        }
-    return {
-        "text": "#111111",
-        "muted_text": "#334155",
-        # Keep only the plotting area tinted; leave figure chrome transparent.
-        "paper_bg": "rgba(0,0,0,0)",
-        "plot_bg": PATH_PLOT_BACKGROUND_COLOR,
-        "grid": PATH_PLOT_HORIZONTAL_GRID_COLOR,
-        "annotation_bg": "rgba(255, 255, 255, 0.45)",
-        "annotation_border": "rgba(148, 163, 184, 0.35)",
-        "obstruction_fill": OBSTRUCTION_FILL_COLOR,
-        "obstruction_line": OBSTRUCTION_LINE_COLOR,
-        "cardinal_grid": CARDINAL_GRIDLINE_COLOR,
-    }
-
-
-def apply_dataframe_styler_theme(styler: Any, *, theme_name: str | None = None) -> Any:
-    if resolve_ui_theme(theme_name) != UI_THEME_DARK:
-        return styler
-
-    return styler.set_table_styles(
-        [
-            {
-                "selector": "th",
-                "props": [
-                    ("background-color", "#111827"),
-                    ("color", "#E2E8F0"),
-                    ("border-color", "rgba(148, 163, 184, 0.35)"),
-                ],
-            },
-            {
-                "selector": "td",
-                "props": [
-                    ("background-color", "#0F172A"),
-                    ("color", "#E5E7EB"),
-                    ("border-color", "rgba(148, 163, 184, 0.24)"),
-                ],
-            },
-        ],
-        overwrite=False,
-    )
 
 
 def infer_12_hour_clock_from_locale(locale_value: str | None) -> bool:
@@ -4176,10 +3738,6 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     if persistence_notice:
         st.warning(persistence_notice)
 
-    cookie_backup_notice = get_cookie_backup_notice()
-    if cookie_backup_notice:
-        st.caption(cookie_backup_notice)
-
     location_notice = st.session_state.pop("location_notice", "")
     if location_notice:
         st.info(location_notice)
@@ -4259,13 +3817,9 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
 
     st.divider()
     st.subheader("Catalog")
-    requested_mode = str(catalog_meta.get("feature_mode_requested", CATALOG_LOADER_MODE))
-    active_mode = str(catalog_meta.get("feature_mode_active", catalog_meta.get("load_mode", "unknown")))
-    st.caption(f"Loader mode: requested `{requested_mode}` | active `{active_mode}`")
-    st.caption(f"Available loader modes: {', '.join(CATALOG_LOADER_MODES)}")
     st.caption(
         f"Rows: {int(catalog_meta.get('row_count', 0))} | "
-        f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
+        f"Source: {catalog_meta.get('source', str(CATALOG_CACHE_PATH))}"
     )
     catalog_counts = catalog_meta.get("catalog_counts", {})
     if isinstance(catalog_counts, dict) and catalog_counts:
@@ -4299,9 +3853,6 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
                 warning_text = str(warning).strip()
                 if warning_text:
                     st.warning(warning_text)
-    if st.button("Refresh catalog cache", use_container_width=True):
-        st.session_state["force_catalog_refresh"] = True
-        st.rerun()
 
     st.divider()
     st.subheader("Obstructions")
@@ -5343,10 +4894,6 @@ def render_explorer_page(
     if persistence_notice:
         st.warning(persistence_notice)
 
-    cookie_backup_notice = get_cookie_backup_notice()
-    if cookie_backup_notice:
-        st.caption(cookie_backup_notice)
-
     now_utc = datetime.now(timezone.utc)
     refresh_status_html = (
         "<p class='small-note' style='text-align: right;'>Alt/Az auto-refresh 60s<br>"
@@ -5459,8 +5006,6 @@ def render_explorer_page(
 
 def main() -> None:
     st_autorefresh(interval=60_000, key="altaz_refresh")
-    set_cookie_backup_runtime_enabled(ENABLE_COOKIE_BACKUP)
-    bootstrap_cookie_backup()
 
     if "prefs_bootstrap_runs" not in st.session_state:
         st.session_state["prefs_bootstrap_runs"] = 0
@@ -5546,16 +5091,7 @@ def main() -> None:
         browser_language,
     )
 
-    force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
-    catalog, catalog_meta = load_catalog_data(
-        seed_path=CATALOG_SEED_PATH,
-        cache_path=CATALOG_CACHE_PATH,
-        metadata_path=CATALOG_META_PATH,
-        enriched_path=CATALOG_ENRICHED_PATH,
-        force_refresh=force_catalog_refresh,
-        mode=CATALOG_LOADER_MODE,
-        curated_path=CURATED_CATALOG_PATH,
-    )
+    catalog, catalog_meta = load_catalog_from_cache(cache_path=CATALOG_CACHE_PATH)
     sanitize_saved_lists(catalog=catalog, prefs=prefs)
 
     def explorer_page() -> None:

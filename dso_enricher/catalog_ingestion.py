@@ -45,11 +45,12 @@ ENRICHED_OPTIONAL_COLUMNS = [
 INGESTION_VERSION = 9
 OPENNGC_SOURCE_URL = "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
 OPENNGC_TIMEOUT_SECONDS = 45
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 POPULAR_DSO_SUPPLEMENT_PATH = (
-    Path(__file__).resolve().parent / "data" / "1000_popular_deep_sky_objects_missing_from_parquet.csv"
+    PROJECT_ROOT / "data" / "1000_popular_deep_sky_objects_missing_from_parquet.csv"
 )
-SIMBAD_OTYPE_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "simbad_otype_mapping.csv"
-OBJECT_TYPE_GROUP_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "object_type_groups.csv"
+SIMBAD_OTYPE_MAPPING_PATH = PROJECT_ROOT / "data" / "simbad_otype_mapping.csv"
+OBJECT_TYPE_GROUP_MAPPING_PATH = PROJECT_ROOT / "data" / "object_type_groups.csv"
 OBJECT_TYPE_GROUP_DEFAULT = "other"
 SIMBAD_OTYPE_DESCRIPTION_PREFIX = "SIMBAD object type: "
 SIMBAD_TAP_SYNC_ENDPOINTS = [

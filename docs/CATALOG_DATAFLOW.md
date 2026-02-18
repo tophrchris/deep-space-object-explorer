@@ -100,7 +100,7 @@ flowchart TD
 ## 5) Key Files
 
 - Loader entry: `app.py`
-- Loader orchestration: `catalog_service.py`
-- Ingest/cache logic: `catalog_ingestion.py`
+- Loader orchestration: `dso_enricher/catalog_service.py`
+- Ingest/cache logic: `dso_enricher/catalog_ingestion.py`
 - Force-rebuild CLI: `scripts/ingest_catalog.py`
 - Wikipedia enrichment (reads parquet, optionally calls web): `scripts/build_wikipedia_catalog_enrichment.py`

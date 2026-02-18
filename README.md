@@ -22,10 +22,12 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 ## Project structure
 
 - `app.py`: Streamlit app entry point
-- `catalog_ingestion.py`: catalog ingest + normalization + cache metadata
+- `dso_enricher/catalog_ingestion.py`: catalog ingest + normalization + cache metadata
+- `lists/`: list management/search/ui modules
 - `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
 - `specs/`: technical specs for catalog cache and Wikipedia enrichment scripts
-- `catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
+- `docs/`: project notes, backlog, and product planning docs
+- `docs/catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
 - `TODO.md`: prioritized build backlog
 
 ## Specifications
@@ -33,29 +35,6 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - [`specs/DSO_CATALOG_CACHE_SPEC.md`](specs/DSO_CATALOG_CACHE_SPEC.md): canonical schema and constraints for `dso_catalog_cache.parquet`
 - [`specs/WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md`](specs/WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md): producer spec for `scripts/build_wikipedia_catalog_enrichment.py`
 - [`specs/APPLY_WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md`](specs/APPLY_WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md): merge/apply spec for `scripts/apply_wikipedia_catalog_enrichment.py`
-
-## Issue/PR automation bot
-
-- Workflow: `.github/workflows/issue-pr-bot.yml` (runs every 15 minutes and on manual dispatch)
-- Script: `scripts/issue_pr_bot.py`
-- Behavior:
-  - Scans open priority issues (`p:1`, `p:2`, `p:3`)
-  - Posts an implementation plan on issues that have not yet been planned
-  - If `status:ready` is present, creates `issue/<number>-<slug>`, implements, runs tests, opens a ready-for-review PR, and posts test results
-  - Monitors bot-managed open PRs, replies to feedback, and can push follow-up commits
-
-Required repository secret:
-- `OPENAI_API_KEY`: API key used to generate plans and code patches
-
-Optional repository variables:
-- `OPENAI_MODEL` (default `gpt-5-mini`)
-- `BOT_BASE_BRANCH` (default `main`)
-- `BOT_PRIORITY_LABELS` (default `p:1,p:2,p:3`)
-- `BOT_READY_LABEL` (default `status:ready`)
-- `BOT_MAX_ISSUES_PER_RUN` (default `3`)
-- `BOT_MAX_FEEDBACK_PER_PR` (default `1`)
-- `BOT_MAX_PATCH_RETRIES` (default `2`)
-- `BOT_TEST_COMMANDS` (default script-internal compile command; use `;;` to separate multiple commands)
 
 ## Local setup
 
@@ -82,6 +61,12 @@ streamlit run app.py
 
 ```bash
 python scripts/ingest_catalog.py
+```
+
+5. Clean local generated artifacts (optional):
+
+```bash
+./scripts/clean_local_artifacts.sh
 ```
 
 ## Deploy to Streamlit Community Cloud
@@ -111,7 +96,7 @@ Notes:
 - Layout refactor and interaction flow cleanup (`#27`)
 - Location UX/robustness improvements (`#28`, `#17`, `#2`)
 - Additional catalog quality and enrichment follow-ups
-- Catalog issue drafts to file as GitHub issues: [`catalog_issue_backlog.md`](catalog_issue_backlog.md)
+- Catalog issue drafts to file as GitHub issues: [`docs/catalog_issue_backlog.md`](docs/catalog_issue_backlog.md)
 - Next-pass UI/UX polish after core behavior stabilizes
 - main planning workflow ideas:
   - start with "Tonight at a glance"

@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from catalog_ingestion import load_unified_catalog
+from dso_enricher.catalog_ingestion import load_unified_catalog
 
 
 def main() -> None:
