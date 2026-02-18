@@ -21,7 +21,6 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from app_constants import UI_THEME_DARK, UI_THEME_LIGHT, WIND16, WIND16_ARROWS
 from app_preferences import (
-    ENABLE_COOKIE_BACKUP,
     PREFS_BOOTSTRAP_MAX_RUNS,
     PREFS_BOOTSTRAP_RETRY_INTERVAL_MS,
     build_settings_export_payload,
@@ -39,10 +38,8 @@ from app_theme import (
     resolve_ui_theme,
 )
 from dso_enricher.catalog_service import (
-    CATALOG_MODE_CURATED_PARQUET,
-    CATALOG_MODE_LEGACY,
     get_object_by_id,
-    load_catalog_data,
+    load_catalog_from_cache,
     search_catalog,
 )
 from lists.list_subsystem import (
@@ -79,11 +76,6 @@ except Exception:
     let_it_rain = None
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
 from streamlit_autorefresh import st_autorefresh
-from prefs_cookie_backup import (
-    bootstrap_cookie_backup,
-    get_cookie_backup_notice,
-    set_cookie_backup_runtime_enabled,
-)
 from target_tips.ui import render_target_tips_panel
 from timezonefinder import TimezoneFinder
 from weather_service import (
@@ -98,16 +90,7 @@ from weather_service import (
 
 st.set_page_config(page_title="DSO Explorer", page_icon="✨", layout="wide")
 
-CATALOG_SEED_PATH = Path("data/dso_catalog_seed.csv")
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
-CATALOG_META_PATH = Path("data/dso_catalog_cache_meta.json")
-CURATED_CATALOG_PATH = Path("data/dso_catalog_curated.parquet")
-CATALOG_ENRICHED_PATH = Path("data/DSO_CATALOG_ENRICHED.CSV")
-# Catalog rollout feature flag:
-# - "legacy": current loader (`dso_enricher.catalog_ingestion.load_unified_catalog`)
-# - "curated_parquet": read directly from `CURATED_CATALOG_PATH` and fallback to legacy on validation/load errors
-CATALOG_LOADER_MODES = (CATALOG_MODE_LEGACY, CATALOG_MODE_CURATED_PARQUET)
-CATALOG_LOADER_MODE = CATALOG_MODE_LEGACY
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -3755,10 +3738,6 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     if persistence_notice:
         st.warning(persistence_notice)
 
-    cookie_backup_notice = get_cookie_backup_notice()
-    if cookie_backup_notice:
-        st.caption(cookie_backup_notice)
-
     location_notice = st.session_state.pop("location_notice", "")
     if location_notice:
         st.info(location_notice)
@@ -3838,13 +3817,9 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
 
     st.divider()
     st.subheader("Catalog")
-    requested_mode = str(catalog_meta.get("feature_mode_requested", CATALOG_LOADER_MODE))
-    active_mode = str(catalog_meta.get("feature_mode_active", catalog_meta.get("load_mode", "unknown")))
-    st.caption(f"Loader mode: requested `{requested_mode}` | active `{active_mode}`")
-    st.caption(f"Available loader modes: {', '.join(CATALOG_LOADER_MODES)}")
     st.caption(
         f"Rows: {int(catalog_meta.get('row_count', 0))} | "
-        f"Mode: {catalog_meta.get('load_mode', 'unknown')}"
+        f"Source: {catalog_meta.get('source', str(CATALOG_CACHE_PATH))}"
     )
     catalog_counts = catalog_meta.get("catalog_counts", {})
     if isinstance(catalog_counts, dict) and catalog_counts:
@@ -3878,9 +3853,6 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
                 warning_text = str(warning).strip()
                 if warning_text:
                     st.warning(warning_text)
-    if st.button("Refresh catalog cache", use_container_width=True):
-        st.session_state["force_catalog_refresh"] = True
-        st.rerun()
 
     st.divider()
     st.subheader("Obstructions")
@@ -4922,10 +4894,6 @@ def render_explorer_page(
     if persistence_notice:
         st.warning(persistence_notice)
 
-    cookie_backup_notice = get_cookie_backup_notice()
-    if cookie_backup_notice:
-        st.caption(cookie_backup_notice)
-
     now_utc = datetime.now(timezone.utc)
     refresh_status_html = (
         "<p class='small-note' style='text-align: right;'>Alt/Az auto-refresh 60s<br>"
@@ -5038,8 +5006,6 @@ def render_explorer_page(
 
 def main() -> None:
     st_autorefresh(interval=60_000, key="altaz_refresh")
-    set_cookie_backup_runtime_enabled(ENABLE_COOKIE_BACKUP)
-    bootstrap_cookie_backup()
 
     if "prefs_bootstrap_runs" not in st.session_state:
         st.session_state["prefs_bootstrap_runs"] = 0
@@ -5125,16 +5091,7 @@ def main() -> None:
         browser_language,
     )
 
-    force_catalog_refresh = bool(st.session_state.pop("force_catalog_refresh", False))
-    catalog, catalog_meta = load_catalog_data(
-        seed_path=CATALOG_SEED_PATH,
-        cache_path=CATALOG_CACHE_PATH,
-        metadata_path=CATALOG_META_PATH,
-        enriched_path=CATALOG_ENRICHED_PATH,
-        force_refresh=force_catalog_refresh,
-        mode=CATALOG_LOADER_MODE,
-        curated_path=CURATED_CATALOG_PATH,
-    )
+    catalog, catalog_meta = load_catalog_from_cache(cache_path=CATALOG_CACHE_PATH)
     sanitize_saved_lists(catalog=catalog, prefs=prefs)
 
     def explorer_page() -> None:

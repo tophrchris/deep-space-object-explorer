@@ -17,11 +17,9 @@ from lists.list_subsystem import (
     default_lists_payload,
     normalize_list_preferences,
 )
-from prefs_cookie_backup import read_preferences_cookie_backup, write_preferences_cookie_backup
 from streamlit_js_eval import get_local_storage, set_local_storage, streamlit_js_eval
 
 BROWSER_PREFS_STORAGE_KEY = "dso_explorer_prefs_v2"
-ENABLE_COOKIE_BACKUP = True
 PREFS_BOOTSTRAP_MAX_RUNS = 6
 PREFS_BOOTSTRAP_RETRY_INTERVAL_MS = 250
 SETTINGS_EXPORT_FORMAT_VERSION = 2
@@ -91,11 +89,6 @@ def _eval_js_hidden(js_expression: str, *, key: str, want_output: bool = True) -
     return streamlit_js_eval(js_expressions=wrapped_expression, key=key, want_output=want_output)
 
 
-# Optional cookie backup is isolated in `prefs_cookie_backup.py`.
-# Toggle `ENABLE_COOKIE_BACKUP` above to disable it without code removal.
-# Full removal later: delete the `prefs_cookie_backup` import, remove the
-# integration calls below, remove `extra-streamlit-components` from requirements,
-# and delete `prefs_cookie_backup.py`.
 def load_preferences() -> tuple[dict[str, Any], bool]:
     retry_needed = False
     raw_local = get_local_storage(BROWSER_PREFS_STORAGE_KEY, component_key="browser_prefs_read")
@@ -119,23 +112,6 @@ def load_preferences() -> tuple[dict[str, Any], bool]:
     elif local_exists_probe is True:
         # Local key appears to exist but returned value is unavailable in this pass.
         retry_needed = True
-
-    raw_cookie = read_preferences_cookie_backup()
-    if isinstance(raw_cookie, str) and raw_cookie.strip():
-        decoded_cookie = decode_preferences_from_storage(raw_cookie)
-        if decoded_cookie is not None:
-            try:
-                payload_hash = hashlib.sha1(raw_cookie.encode("ascii")).hexdigest()[:12]
-                set_local_storage(
-                    BROWSER_PREFS_STORAGE_KEY,
-                    raw_cookie,
-                    component_key=f"browser_prefs_rehydrate_{payload_hash}",
-                )
-            except Exception:
-                pass
-
-            st.session_state.pop("prefs_persistence_notice", None)
-            return decoded_cookie, False
 
     return default_preferences(), retry_needed
 
@@ -161,16 +137,8 @@ def save_preferences(prefs: dict[str, Any]) -> bool:
     except Exception:
         local_saved = False
 
-    cookie_saved = write_preferences_cookie_backup(encoded)
-
     if local_saved:
         st.session_state.pop("prefs_persistence_notice", None)
-        return True
-
-    if cookie_saved:
-        st.session_state["prefs_persistence_notice"] = (
-            "Browser-local preference storage is unavailable. Using cookie backup preferences."
-        )
         return True
 
     st.session_state["prefs_persistence_notice"] = (

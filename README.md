@@ -36,29 +36,6 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - [`specs/WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md`](specs/WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md): producer spec for `scripts/build_wikipedia_catalog_enrichment.py`
 - [`specs/APPLY_WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md`](specs/APPLY_WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md): merge/apply spec for `scripts/apply_wikipedia_catalog_enrichment.py`
 
-## Issue/PR automation bot
-
-- Workflow: `.github/workflows/issue-pr-bot.yml` (runs every 15 minutes and on manual dispatch)
-- Script: `scripts/issue_pr_bot.py`
-- Behavior:
-  - Scans open priority issues (`p:1`, `p:2`, `p:3`)
-  - Posts an implementation plan on issues that have not yet been planned
-  - If `status:ready` is present, creates `issue/<number>-<slug>`, implements, runs tests, opens a ready-for-review PR, and posts test results
-  - Monitors bot-managed open PRs, replies to feedback, and can push follow-up commits
-
-Required repository secret:
-- `OPENAI_API_KEY`: API key used to generate plans and code patches
-
-Optional repository variables:
-- `OPENAI_MODEL` (default `gpt-5-mini`)
-- `BOT_BASE_BRANCH` (default `main`)
-- `BOT_PRIORITY_LABELS` (default `p:1,p:2,p:3`)
-- `BOT_READY_LABEL` (default `status:ready`)
-- `BOT_MAX_ISSUES_PER_RUN` (default `3`)
-- `BOT_MAX_FEEDBACK_PER_PR` (default `1`)
-- `BOT_MAX_PATCH_RETRIES` (default `2`)
-- `BOT_TEST_COMMANDS` (default script-internal compile command; use `;;` to separate multiple commands)
-
 ## Local setup
 
 1. Create a virtual environment with Python 3.11:

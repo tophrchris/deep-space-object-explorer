@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +121,23 @@ def _build_search_tokens(query: str, canonical: str) -> list[str]:
         tokens.add("sii")
 
     return [token for token in tokens if token]
+
+
+def load_catalog_from_cache(*, cache_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    indexed = _build_search_index(pd.read_parquet(cache_path))
+    validation = validate_catalog(indexed)
+    catalog_counts = indexed["catalog"].value_counts().to_dict() if "catalog" in indexed.columns else {}
+    metadata = {
+        "load_mode": "cache_parquet",
+        "source": str(cache_path),
+        "cache": str(cache_path),
+        "loaded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "row_count": int(len(indexed)),
+        "catalog_counts": catalog_counts,
+        "validation": validation,
+        "filters": list_catalog_filters(indexed),
+    }
+    return indexed, metadata
 
 
 def load_catalog_data(
