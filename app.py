@@ -19,7 +19,15 @@ from astral import LocationInfo
 from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
-from app_constants import UI_THEME_DARK, UI_THEME_LIGHT, WIND16, WIND16_ARROWS
+from app_constants import (
+    UI_THEME_AURA_DRACULA,
+    UI_THEME_BLUE_LIGHT,
+    UI_THEME_DARK,
+    UI_THEME_LIGHT,
+    UI_THEME_MONOKAI_ST3,
+    WIND16,
+    WIND16_ARROWS,
+)
 from app_preferences import (
     PREFS_BOOTSTRAP_MAX_RUNS,
     PREFS_BOOTSTRAP_RETRY_INTERVAL_MS,
@@ -34,8 +42,9 @@ from app_preferences import (
 from app_theme import (
     apply_dataframe_styler_theme,
     apply_ui_theme_css,
+    is_dark_ui_theme,
+    resolve_theme_palette,
     resolve_plot_theme_colors,
-    resolve_ui_theme,
 )
 from condition_tips.ui import render_condition_tips_panel
 from dso_enricher.catalog_service import (
@@ -1209,10 +1218,14 @@ def render_sky_position_summary_table(
             "list_action": "List",
         }
     )
-    is_dark_theme = resolve_ui_theme() == UI_THEME_DARK
+    is_dark_theme = is_dark_ui_theme()
+    theme_palette = resolve_theme_palette()
+    dark_table_styles = theme_palette.get("dataframe_styler", {})
+    dark_td_bg = str(dark_table_styles.get("td_bg", "#0F172A"))
+    dark_td_text = str(dark_table_styles.get("td_text", "#E5E7EB"))
 
     def _style_summary_row(row: pd.Series) -> list[str]:
-        base_cell_style = "background-color: #0F172A; color: #E5E7EB;" if is_dark_theme else ""
+        base_cell_style = f"background-color: {dark_td_bg}; color: {dark_td_text};" if is_dark_theme else ""
         styles = [base_cell_style for _ in row]
         color = str(summary_df.loc[row.name, "line_color"]).strip()
         row_primary_id = str(summary_df.loc[row.name, "primary_id"]).strip()
@@ -1817,7 +1830,11 @@ def render_target_recommendations(
     if query_hour:
         query_hour_label = hour_labels.get(query_hour, query_hour)
         st.caption(f"Results for {query_hour_label} | {query_groups_display}")
-    is_dark_theme = resolve_ui_theme() == UI_THEME_DARK
+    is_dark_theme = is_dark_ui_theme()
+    theme_palette = resolve_theme_palette()
+    dark_table_styles = theme_palette.get("dataframe_styler", {})
+    dark_td_bg = str(dark_table_styles.get("td_bg", "#0F172A"))
+    dark_td_text = str(dark_table_styles.get("td_text", "#E5E7EB"))
 
     selected_groups_for_compare = [str(value).strip() for value in selected_group_options if str(value).strip()]
     if query_hour != selected_hour_option or query_groups != selected_groups_for_compare:
@@ -1906,7 +1923,7 @@ def render_target_recommendations(
     )
 
     def _style_recommendation_row(row: pd.Series) -> list[str]:
-        base_cell_style = "background-color: #0F172A; color: #E5E7EB;" if is_dark_theme else ""
+        base_cell_style = f"background-color: {dark_td_bg}; color: {dark_td_text};" if is_dark_theme else ""
         styles = [base_cell_style for _ in row]
         source_row = recommendation_df.loc[row.name]
         color = str(source_row.get("line_color", "")).strip()
@@ -5944,13 +5961,26 @@ def main() -> None:
                     "Location not set. Open the Site page to set it manually or via browser geolocation (IP estimate is fallback)."
                 )
 
+    theme_label_to_id = {
+        "Light": UI_THEME_LIGHT,
+        "Blue Light": UI_THEME_BLUE_LIGHT,
+        "Dark": UI_THEME_DARK,
+        "Aura Dracula": UI_THEME_AURA_DRACULA,
+        "Monokai ST3": UI_THEME_MONOKAI_ST3,
+    }
+    theme_id_to_label = {value: key for key, value in theme_label_to_id.items()}
+    current_theme = str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
+    if current_theme not in theme_id_to_label:
+        current_theme = UI_THEME_LIGHT
+
     with st.sidebar:
-        dark_mode_enabled = st.toggle(
-            "Dark Mode",
-            value=str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower() == UI_THEME_DARK,
-            key="ui_dark_mode_toggle",
+        selected_theme_label = st.selectbox(
+            "Theme",
+            options=list(theme_label_to_id.keys()),
+            index=list(theme_label_to_id.values()).index(current_theme),
+            key="ui_theme_selector",
         )
-    selected_ui_theme = UI_THEME_DARK if dark_mode_enabled else UI_THEME_LIGHT
+    selected_ui_theme = theme_label_to_id[selected_theme_label]
     if selected_ui_theme != str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower():
         prefs["ui_theme"] = selected_ui_theme
         persist_and_rerun(prefs)

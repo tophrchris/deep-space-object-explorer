@@ -32,6 +32,9 @@
 
 ## Phase 5: UI/UX Polish (Deferred by request)
 - [x] Refine responsive desktop/tablet split behavior.
+- [x] Add VS Code-inspired Aura Dracula theme preset (base variant).
+- [x] Add VS Code-inspired Blue Light theme preset.
+- [x] Add VS Code-inspired Monokai ST3 theme preset.
 - [ ] Implement phone-style detail bottom sheet interactions.
 - [ ] Improve typography, spacing, and hierarchy for scanability.
 - [ ] Render 5-night forecast with custom HTML table styling while preserving in-place row-click selection (no URL navigation).
