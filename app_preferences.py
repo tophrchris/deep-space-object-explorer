@@ -62,6 +62,10 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
         if isinstance(loc, dict):
             merged = copy.deepcopy(DEFAULT_LOCATION)
             merged.update({k: loc.get(k, merged[k]) for k in merged})
+            # Migrate legacy built-in default location payloads (source=default)
+            # to the new explicit "unset" state.
+            if str(merged.get("source", "")).strip().lower() == "default":
+                merged = copy.deepcopy(DEFAULT_LOCATION)
             prefs["location"] = merged
 
     return prefs

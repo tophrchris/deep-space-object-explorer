@@ -41,10 +41,10 @@ WIND16_ARROWS = {
 }
 
 DEFAULT_LOCATION: dict[str, Any] = {
-    "lat": 40.3573,
-    "lon": -74.6672,
-    "label": "Princeton, NJ",
-    "source": "default",
+    "lat": 0.0,
+    "lon": 0.0,
+    "label": "Location not set",
+    "source": "unset",
     "resolved_at": "",
 }
 

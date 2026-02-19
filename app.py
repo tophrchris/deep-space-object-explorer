@@ -61,6 +61,15 @@ from lists.list_search import searchbox_target_options, subset_by_id_list
 from lists.list_settings_ui import render_lists_settings_section
 from geopy.geocoders import ArcGIS, Nominatim, Photon
 try:
+    import folium
+    from branca.element import MacroElement, Template
+    from streamlit_folium import st_folium
+except Exception:
+    folium = None
+    MacroElement = None
+    Template = None
+    st_folium = None
+try:
     from streamlit_searchbox import st_searchbox
 except Exception:
     st_searchbox = None
@@ -215,6 +224,15 @@ PATH_HIGHLIGHT_WIDTH_MULTIPLIER = 5.0
 PATH_LINE_WIDTH_PRIMARY_DEFAULT = 3.0
 PATH_LINE_WIDTH_OVERLAY_DEFAULT = 2.2
 PATH_LINE_WIDTH_SELECTION_MULTIPLIER = 3.0
+CARDINAL_DIRECTIONS = ("N", "E", "S", "W")
+OBSTRUCTION_INPUT_MODE_NESW = "N/E/S/W (4 sliders)"
+OBSTRUCTION_INPUT_MODE_WIND16 = "WIND16 (16 sliders)"
+OBSTRUCTION_INPUT_MODE_HRZ = "Import .hrz file"
+OBSTRUCTION_INPUT_MODES = [
+    OBSTRUCTION_INPUT_MODE_NESW,
+    OBSTRUCTION_INPUT_MODE_WIND16,
+    OBSTRUCTION_INPUT_MODE_HRZ,
+]
 
 
 def resolve_object_type_group_color_ranges(theme_name: str | None = None) -> dict[str, tuple[str, str]]:
@@ -625,6 +643,191 @@ def resolve_location_display_name(location: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         return "your location"
     return f"{lat:.4f}, {lon:.4f}"
+
+
+def is_location_configured(location: dict[str, Any] | None) -> bool:
+    if not isinstance(location, dict):
+        return False
+
+    source = str(location.get("source", "")).strip().lower()
+    if source in {"", "unset", "default"}:
+        return False
+
+    try:
+        lat = float(location.get("lat"))
+        lon = float(location.get("lon"))
+    except (TypeError, ValueError):
+        return False
+    return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+
+
+def is_default_site_name(label: Any) -> bool:
+    normalized = str(label or "").strip().lower()
+    return normalized in {"", "location not set", "observation site"}
+
+
+def resolve_location_source_badge(source: Any) -> tuple[str, str] | None:
+    normalized = str(source or "").strip().lower()
+    if normalized == "manual":
+        return ("found", "manual")
+    if normalized == "browser":
+        return ("Browser", "browser")
+    if normalized == "ip":
+        return ("IP", "ip")
+    return None
+
+
+def clamp_obstruction_altitude(value: Any, *, default: float = 20.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = float(default)
+    return float(max(0.0, min(90.0, numeric)))
+
+
+def expand_cardinal_obstructions_to_wind16(cardinal_values: dict[str, Any]) -> dict[str, float]:
+    north = clamp_obstruction_altitude(cardinal_values.get("N"), default=20.0)
+    east = clamp_obstruction_altitude(cardinal_values.get("E"), default=20.0)
+    south = clamp_obstruction_altitude(cardinal_values.get("S"), default=20.0)
+    west = clamp_obstruction_altitude(cardinal_values.get("W"), default=20.0)
+
+    def _lerp(start: float, end: float, t: float) -> float:
+        return start + ((end - start) * t)
+
+    expanded: dict[str, float] = {}
+    for direction in WIND16:
+        angle = wind_bin_center(direction)
+        if angle < 90.0:
+            fraction = angle / 90.0
+            raw_value = _lerp(north, east, fraction)
+        elif angle < 180.0:
+            fraction = (angle - 90.0) / 90.0
+            raw_value = _lerp(east, south, fraction)
+        elif angle < 270.0:
+            fraction = (angle - 180.0) / 90.0
+            raw_value = _lerp(south, west, fraction)
+        else:
+            fraction = (angle - 270.0) / 90.0
+            raw_value = _lerp(west, north, fraction)
+        expanded[direction] = clamp_obstruction_altitude(raw_value, default=20.0)
+    return expanded
+
+
+def parse_hrz_obstruction_points(raw_text: str) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for raw_line in str(raw_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#") or line.startswith(";") or line.startswith("//"):
+            continue
+
+        numeric_tokens = re.findall(r"[-+]?\d+(?:\.\d+)?", line)
+        if len(numeric_tokens) < 2:
+            continue
+
+        try:
+            azimuth = float(numeric_tokens[0]) % 360.0
+            altitude = clamp_obstruction_altitude(numeric_tokens[1], default=0.0)
+        except (TypeError, ValueError):
+            continue
+        points.append((azimuth, altitude))
+    return points
+
+
+def reduce_hrz_points_to_wind16(
+    points: list[tuple[float, float]],
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> tuple[dict[str, float], list[str]]:
+    maxima_by_direction: dict[str, float | None] = {direction: None for direction in WIND16}
+    for azimuth, altitude in points:
+        direction = az_to_wind16(float(azimuth))
+        clamped_altitude = clamp_obstruction_altitude(altitude, default=0.0)
+        previous = maxima_by_direction.get(direction)
+        if previous is None or clamped_altitude > previous:
+            maxima_by_direction[direction] = clamped_altitude
+
+    reduced: dict[str, float] = {}
+    missing_directions: list[str] = []
+    fallback_values = fallback or {}
+    for direction in WIND16:
+        maximum = maxima_by_direction.get(direction)
+        if maximum is None:
+            missing_directions.append(direction)
+            reduced[direction] = clamp_obstruction_altitude(fallback_values.get(direction), default=20.0)
+        else:
+            reduced[direction] = float(maximum)
+    return reduced, missing_directions
+
+
+def sync_slider_state_value(state_key: str, target_value: float) -> None:
+    rounded_target = int(round(clamp_obstruction_altitude(target_value, default=20.0)))
+    sync_key = f"{state_key}_synced"
+    if int(st.session_state.get(sync_key, -1)) != rounded_target:
+        st.session_state[state_key] = rounded_target
+        st.session_state[sync_key] = rounded_target
+
+
+def build_location_selection_map(lat: float, lon: float, *, zoom_start: int) -> Any | None:
+    if folium is None or MacroElement is None or Template is None:
+        return None
+
+    map_obj = folium.Map(
+        location=[float(lat), float(lon)],
+        zoom_start=int(zoom_start),
+        control_scale=True,
+    )
+    folium.Marker(
+        [float(lat), float(lon)],
+        tooltip="Current site location",
+    ).add_to(map_obj)
+    bridge = MacroElement()
+    bridge._template = Template(
+        """
+        {% macro script(this, kwargs) %}
+        const map = {{ this._parent.get_name() }};
+        let dsoRightClickMarker = null;
+
+        map.on("contextmenu", function(evt) {
+            if (dsoRightClickMarker) {
+                map.removeLayer(dsoRightClickMarker);
+            }
+            dsoRightClickMarker = L.marker(evt.latlng).addTo(map);
+            map.fire("click", { latlng: evt.latlng });
+        });
+        {% endmacro %}
+        """
+    )
+    map_obj.add_child(bridge)
+    return map_obj
+
+
+def apply_resolved_location(prefs: dict[str, Any], resolved_location: dict[str, Any]) -> tuple[str, bool]:
+    current_location = prefs.get("location", {})
+    current_label = str(current_location.get("label") or "").strip() if isinstance(current_location, dict) else ""
+    resolved_label = str(resolved_location.get("label") or "").strip()
+
+    keep_existing_site_name = bool(current_label) and not is_default_site_name(current_label)
+    next_label = current_label if keep_existing_site_name else resolved_label
+    if not next_label:
+        next_label = current_label or resolved_label or "Observation Site"
+
+    lat = float(resolved_location["lat"])
+    lon = float(resolved_location["lon"])
+    source = str(resolved_location.get("source") or "manual").strip() or "manual"
+    resolved_at = str(resolved_location.get("resolved_at") or datetime.now(timezone.utc).isoformat()).strip()
+
+    prefs["location"] = {
+        "lat": lat,
+        "lon": lon,
+        "label": next_label,
+        "source": source,
+        "resolved_at": resolved_at,
+    }
+
+    result_label = resolved_label or f"{lat:.4f}, {lon:.4f}"
+    return result_label, keep_existing_site_name
 
 
 def compute_track(
@@ -3831,16 +4034,23 @@ def apply_browser_geolocation_payload(prefs: dict[str, Any], payload: Any) -> No
                 if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
                     raise ValueError("Coordinates out of range")
 
-                prefs["location"] = {
-                    "lat": lat,
-                    "lon": lon,
-                    "label": reverse_geocode_label(lat, lon),
-                    "source": "browser",
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }
+                resolved_label, kept_site_name = apply_resolved_location(
+                    prefs,
+                    {
+                        "lat": lat,
+                        "lon": lon,
+                        "label": reverse_geocode_label(lat, lon),
+                        "source": "browser",
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                st.session_state["location_notice"] = (
+                    f"Browser geolocation applied: {resolved_label}. Site name unchanged."
+                    if kept_site_name
+                    else f"Browser geolocation applied: {resolved_label}."
+                )
                 st.session_state["prefs"] = prefs
                 save_preferences(prefs)
-                st.session_state["location_notice"] = "Browser geolocation applied."
                 return
 
             error = payload.get("error")
@@ -4125,44 +4335,101 @@ def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Ser
     return enriched.iloc[0]
 
 
-def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
-    st.title("Settings")
-    st.caption("Manage location, display preferences, catalog cache, obstructions, and settings backup.")
-
-    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
-    if persistence_notice:
-        st.warning(persistence_notice)
-
-    location_notice = st.session_state.pop("location_notice", "")
-    if location_notice:
-        st.info(location_notice)
-
+def render_location_settings_section(prefs: dict[str, Any]) -> None:
     st.subheader("Location")
+    st.caption("Set location manually or with browser geolocation first. IP-based location is used only as fallback.")
     location = prefs["location"]
-    st.markdown(f"**{location['label']}**")
-    st.caption(f"Lat {location['lat']:.4f}, Lon {location['lon']:.4f} ({location['source']})")
-    st.map(
-        pd.DataFrame({"lat": [float(location["lat"])], "lon": [float(location["lon"])]}),
-        zoom=8,
-        height=300,
-        use_container_width=True,
-    )
+    location_label = str(location.get("label") or "").strip() or "Observation Site"
+    label_editor_key = "location_name_inline_edit"
+    label_editor_sync_key = "location_name_inline_edit_synced_label"
 
-    manual_location = st.text_input("Manual ZIP / place", key="manual_location")
-    if st.button("Resolve location", use_container_width=True):
-        if not manual_location.strip():
-            st.warning("Enter a ZIP, place, or coordinates (lat, lon).")
+    if str(st.session_state.get(label_editor_sync_key, "")).strip() != location_label:
+        st.session_state[label_editor_key] = location_label
+        st.session_state[label_editor_sync_key] = location_label
+
+    def _apply_location_label_edit() -> None:
+        edited_value = str(st.session_state.get(label_editor_key, "")).strip()
+        if not edited_value:
+            st.session_state[label_editor_key] = location_label
+            return
+        if edited_value == location_label:
+            return
+        prefs["location"]["label"] = edited_value
+        st.session_state["location_notice"] = f"Site name updated: {edited_value}."
+        persist_and_rerun(prefs)
+
+    name_weight = max(2.0, min(8.0, len(location_label) / 4.0))
+    name_col, glyph_col, _name_spacer_col = st.columns([name_weight, 0.8, 12.0], gap="small")
+    with name_col:
+        st.markdown(f"**{location_label}**")
+    with glyph_col:
+        if hasattr(st, "popover"):
+            with st.popover("✏️", help="Edit site name", use_container_width=True):
+                st.text_input(
+                    "Site name",
+                    key=label_editor_key,
+                    label_visibility="collapsed",
+                    on_change=_apply_location_label_edit,
+                )
+                st.caption("Press Enter to save.")
         else:
-            resolved = resolve_manual_location(manual_location)
+            st.text_input(
+                "Site name",
+                key=label_editor_key,
+                label_visibility="collapsed",
+                on_change=_apply_location_label_edit,
+            )
+
+    lat_lon_text = f"Lat {location['lat']:.4f}, Lon {location['lon']:.4f}"
+    source_badge = resolve_location_source_badge(location.get("source"))
+    if source_badge is None:
+        st.caption(lat_lon_text)
+    else:
+        badge_label, badge_kind = source_badge
+        st.markdown(
+            (
+                "<div class='dso-location-meta'>"
+                f"<span>{html.escape(lat_lon_text)}</span>"
+                f"<span class='dso-location-source-badge dso-location-source-badge--{badge_kind}'>"
+                f"{html.escape(badge_label)}"
+                "</span>"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+    form_col, _form_spacer_col = st.columns([3, 7], gap="large")
+    with form_col:
+        with st.form("site_location_search_form"):
+            manual_location = st.text_input(
+                "Location",
+                key="manual_location",
+                placeholder="enter an address, zip code, or landmark",
+            )
+            search_col, browser_col = st.columns(2, gap="small")
+            with search_col:
+                search_submitted = st.form_submit_button("Search", use_container_width=True)
+            with browser_col:
+                browser_geo_submitted = st.form_submit_button("🧭", use_container_width=True)
+
+    if search_submitted:
+        location_query = manual_location.strip()
+        if not location_query:
+            st.warning("Enter an address, zip code, or landmark.")
+        else:
+            resolved = resolve_manual_location(location_query)
             if resolved:
-                prefs["location"] = resolved
-                st.session_state["location_notice"] = f"Location resolved: {resolved['label']}."
+                resolved_label, kept_site_name = apply_resolved_location(prefs, resolved)
+                st.session_state["location_notice"] = (
+                    f"Location resolved: {resolved_label}. Site name unchanged."
+                    if kept_site_name
+                    else f"Location resolved: {resolved_label}."
+                )
                 persist_and_rerun(prefs)
             else:
                 st.warning("Couldn't find that location - keeping previous location.")
 
-    location_cols = st.columns(2)
-    if location_cols[0].button("Use browser location (permission)", use_container_width=True):
+    if browser_geo_submitted:
         st.session_state["request_browser_geo"] = True
         st.session_state["browser_geo_request_id"] = int(st.session_state.get("browser_geo_request_id", 0)) + 1
 
@@ -4176,16 +4443,305 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
             st.session_state["request_browser_geo"] = False
             st.rerun()
 
-    if location_cols[1].button("Use my location (IP fallback)", use_container_width=True):
-        resolved = approximate_location_from_ip()
-        if resolved:
-            prefs["location"] = resolved
-            st.session_state["location_notice"] = f"Approximate location applied: {resolved['label']}."
-            persist_and_rerun(prefs)
-        else:
-            st.warning("Location unavailable - keeping previous location.")
+    try:
+        current_map_lat = float(location.get("lat", 0.0))
+    except (TypeError, ValueError):
+        current_map_lat = 0.0
+    try:
+        current_map_lon = float(location.get("lon", 0.0))
+    except (TypeError, ValueError):
+        current_map_lon = 0.0
+    current_map_lat = float(max(-90.0, min(90.0, current_map_lat)))
+    current_map_lon = float(max(-180.0, min(180.0, current_map_lon)))
 
-    st.divider()
+    interactive_map = build_location_selection_map(
+        current_map_lat,
+        current_map_lon,
+        zoom_start=8 if is_location_configured(location) else 2,
+    )
+    if interactive_map is not None and st_folium is not None:
+        st.caption("Right-click any point on the map to set the site location.")
+        map_event = st_folium(
+            interactive_map,
+            height=320,
+            use_container_width=True,
+            key="site_location_selector_map",
+        )
+        clicked = map_event.get("last_clicked") if isinstance(map_event, dict) else None
+        if isinstance(clicked, dict):
+            clicked_lat_raw = clicked.get("lat")
+            clicked_lon_raw = clicked.get("lng")
+            try:
+                clicked_lat = float(clicked_lat_raw)
+                clicked_lon = float(clicked_lon_raw)
+            except (TypeError, ValueError):
+                clicked_lat = current_map_lat
+                clicked_lon = current_map_lon
+            clicked_lat = float(max(-90.0, min(90.0, clicked_lat)))
+            clicked_lon = float(max(-180.0, min(180.0, clicked_lon)))
+
+            if abs(clicked_lat - current_map_lat) > 1e-6 or abs(clicked_lon - current_map_lon) > 1e-6:
+                before_location = dict(prefs["location"])
+                resolved_label, kept_site_name = apply_resolved_location(
+                    prefs,
+                    {
+                        "lat": clicked_lat,
+                        "lon": clicked_lon,
+                        "label": reverse_geocode_label(clicked_lat, clicked_lon),
+                        "source": "manual",
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                if prefs["location"] != before_location:
+                    st.session_state["location_notice"] = (
+                        f"Location set from map: {resolved_label}. Site name unchanged."
+                        if kept_site_name
+                        else f"Location set from map: {resolved_label}."
+                    )
+                    persist_and_rerun(prefs)
+    else:
+        if is_location_configured(location):
+            st.map(
+                pd.DataFrame({"lat": [current_map_lat], "lon": [current_map_lon]}),
+                zoom=8,
+                height=320,
+                use_container_width=True,
+            )
+        else:
+            st.info("No location set yet. Enter one manually or use browser geolocation; IP-based estimate is fallback.")
+
+
+def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
+    st.subheader("Obstructions")
+    st.caption("Choose an input method. All obstruction data is normalized and stored as WIND16.")
+    current_obstructions = {
+        direction: clamp_obstruction_altitude(prefs["obstructions"].get(direction), default=20.0)
+        for direction in WIND16
+    }
+
+    def _apply_wind16_obstructions(next_values: dict[str, Any], *, success_message: str) -> None:
+        normalized = {
+            direction: clamp_obstruction_altitude(next_values.get(direction), default=current_obstructions[direction])
+            for direction in WIND16
+        }
+        if normalized != prefs["obstructions"]:
+            prefs["obstructions"] = normalized
+            save_preferences(prefs)
+            st.success(success_message)
+        else:
+            st.info("No obstruction changes detected.")
+
+    input_mode = st.radio(
+        "Obstruction input method",
+        options=OBSTRUCTION_INPUT_MODES,
+        horizontal=True,
+        key="obstruction_input_mode",
+    )
+
+    if input_mode == OBSTRUCTION_INPUT_MODE_NESW:
+        st.caption("Use coarse cardinal values; the app expands them to all 16 wind directions.")
+        wind16_average = float(
+            np.mean([clamp_obstruction_altitude(current_obstructions.get(direction), default=20.0) for direction in WIND16])
+        )
+        for direction in CARDINAL_DIRECTIONS:
+            sync_slider_state_value(
+                f"obstruction_cardinal_slider_{direction}",
+                wind16_average,
+            )
+
+        with st.form("obstruction_cardinal_form"):
+            slider_cols = st.columns(len(CARDINAL_DIRECTIONS), gap="small")
+            cardinal_values: dict[str, float] = {}
+            for idx, direction in enumerate(CARDINAL_DIRECTIONS):
+                with slider_cols[idx]:
+                    cardinal_values[direction] = float(
+                        st.slider(
+                            direction,
+                            min_value=0,
+                            max_value=90,
+                            step=1,
+                            key=f"obstruction_cardinal_slider_{direction}",
+                        )
+                    )
+            apply_cardinals = st.form_submit_button("Apply N/E/S/W to WIND16", use_container_width=True)
+
+        if apply_cardinals:
+            expanded = expand_cardinal_obstructions_to_wind16(cardinal_values)
+            _apply_wind16_obstructions(
+                expanded,
+                success_message="Applied cardinal obstructions and expanded to WIND16.",
+            )
+        return
+
+    if input_mode == OBSTRUCTION_INPUT_MODE_HRZ:
+        st.caption("Upload a horizon file (.hrz, APCC/N.I.N.A compatible).")
+        uploaded_hrz = st.file_uploader(
+            "Horizon file (.hrz)",
+            type=["hrz"],
+            accept_multiple_files=False,
+            key="obstruction_hrz_file",
+        )
+        apply_hrz = st.button(
+            "Apply .hrz to WIND16",
+            use_container_width=False,
+            disabled=uploaded_hrz is None,
+            key="obstruction_hrz_apply_button",
+        )
+
+        if apply_hrz and uploaded_hrz is not None:
+            raw_bytes = uploaded_hrz.getvalue()
+            try:
+                raw_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                raw_text = raw_bytes.decode("latin-1", errors="ignore")
+
+            points = parse_hrz_obstruction_points(raw_text)
+            if not points:
+                st.warning("No valid azimuth/altitude points were found in that .hrz file.")
+                return
+
+            reduced, missing_directions = reduce_hrz_points_to_wind16(
+                points,
+                fallback=current_obstructions,
+            )
+            _apply_wind16_obstructions(
+                reduced,
+                success_message="Applied .hrz horizon profile and reduced it to WIND16 maxima.",
+            )
+            st.caption(f"Parsed {len(points)} horizon points from `{uploaded_hrz.name}`.")
+            if missing_directions:
+                missing_list = ", ".join(missing_directions)
+                st.warning(
+                    f"No samples mapped to: {missing_list}. Existing WIND16 values were kept for those directions."
+                )
+        return
+
+    if vertical_slider is None:
+        st.warning(
+            "`streamlit-vertical-slider` is required for the vertical WIND16 sliders. "
+            "Falling back to table editor."
+        )
+        obstruction_frame = pd.DataFrame(
+            {
+                "Direction": WIND16,
+                "Min Altitude (deg)": [current_obstructions.get(direction, 20.0) for direction in WIND16],
+            }
+        )
+        edited = st.data_editor(
+            obstruction_frame,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            disabled=["Direction"],
+            key="obstruction_editor",
+        )
+
+        edited_values = edited["Min Altitude (deg)"].tolist()
+        next_obstructions = {
+            direction: clamp_obstruction_altitude(edited_values[idx], default=current_obstructions[direction])
+            for idx, direction in enumerate(WIND16)
+        }
+        if next_obstructions != prefs["obstructions"]:
+            prefs["obstructions"] = next_obstructions
+            save_preferences(prefs)
+        return
+
+    mobile_obstruction_layout = int(st.session_state.get("browser_viewport_width", 1920)) < 900
+    with st.container():
+        st.markdown('<div id="obstruction-slider-scroll-anchor"></div>', unsafe_allow_html=True)
+        if mobile_obstruction_layout:
+            st.markdown(
+                """
+                <style>
+                @media (max-width: 900px) {
+                  div[data-testid="stVerticalBlock"]:has(#obstruction-slider-scroll-anchor) {
+                    overflow-x: auto;
+                    overflow-y: visible;
+                    -webkit-overflow-scrolling: touch;
+                    padding-bottom: 0.4rem;
+                  }
+                  div[data-testid="stVerticalBlock"]:has(#obstruction-slider-scroll-anchor) > div[data-testid="stHorizontalBlock"] {
+                    min-width: 950px;
+                  }
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption("Swipe horizontally to adjust all direction sliders.")
+        st.caption("Minimum altitude by direction (deg)")
+        header_cols = st.columns(len(WIND16), gap="small")
+        for idx, direction in enumerate(WIND16):
+            header_cols[idx].markdown(
+                f"<div style='text-align:center; font-size:0.8rem;'><strong>{direction}</strong></div>",
+                unsafe_allow_html=True,
+            )
+
+        slider_cols = st.columns(len(WIND16), gap="small")
+        value_cols = st.columns(len(WIND16), gap="small")
+        next_obstructions: dict[str, float] = {}
+        for idx, direction in enumerate(WIND16):
+            default_val = int(round(current_obstructions.get(direction, 20.0)))
+            state_key = f"obstruction_slider_{direction}"
+            sync_slider_state_value(state_key, default_val)
+            preview_value_raw = st.session_state.get(state_key, default_val)
+            try:
+                preview_value = float(preview_value_raw)
+            except (TypeError, ValueError):
+                preview_value = float(default_val)
+            preview_clamped = clamp_obstruction_altitude(preview_value, default=float(default_val))
+            slider_color = _interpolate_color_stops(preview_clamped, OBSTRUCTION_SLIDER_COLOR_STOPS)
+            with slider_cols[idx]:
+                raw_value = vertical_slider(
+                    key=state_key,
+                    default_value=default_val,
+                    min_value=0,
+                    max_value=90,
+                    step=1,
+                    height=220,
+                    track_color="#E2E8F0",
+                    slider_color=slider_color,
+                    thumb_color=slider_color,
+                )
+            clamped_value = clamp_obstruction_altitude(raw_value, default=float(default_val))
+            next_obstructions[direction] = clamped_value
+            with value_cols[idx]:
+                st.markdown(
+                    f"<div style='text-align:center; font-size:0.8rem; color:#64748b;'>{int(round(clamped_value))} deg</div>",
+                    unsafe_allow_html=True,
+                )
+
+        if next_obstructions != prefs["obstructions"]:
+            prefs["obstructions"] = next_obstructions
+            save_preferences(prefs)
+
+
+def render_site_page(prefs: dict[str, Any]) -> None:
+    st.title("Observation Site")
+    st.caption("Manage site name, location, and obstructions. Manual/browser location is primary; IP is fallback.")
+
+    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+    if persistence_notice:
+        st.warning(persistence_notice)
+
+    location_notice = st.session_state.pop("location_notice", "")
+    if location_notice:
+        st.info(location_notice)
+
+    with st.container(border=True):
+        render_location_settings_section(prefs)
+
+    with st.container(border=True):
+        render_obstructions_settings_section(prefs)
+
+
+def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
+    st.title("Settings")
+    st.caption("Manage display preferences, lists, catalog metadata, and settings backup.")
+
+    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+    if persistence_notice:
+        st.warning(persistence_notice)
     st.subheader("Display")
     labels = list(TEMPERATURE_UNIT_OPTIONS.keys())
     reverse_options = {value: label for label, value in TEMPERATURE_UNIT_OPTIONS.items()}
@@ -4248,108 +4804,6 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
                 warning_text = str(warning).strip()
                 if warning_text:
                     st.warning(warning_text)
-
-    st.divider()
-    st.subheader("Obstructions")
-    if vertical_slider is None:
-        st.warning(
-            "`streamlit-vertical-slider` is required for the vertical obstruction sliders. "
-            "Falling back to table editor."
-        )
-        obstruction_frame = pd.DataFrame(
-            {
-                "Direction": WIND16,
-                "Min Altitude (deg)": [prefs["obstructions"].get(direction, 20.0) for direction in WIND16],
-            }
-        )
-        edited = st.data_editor(
-            obstruction_frame,
-            hide_index=True,
-            use_container_width=True,
-            num_rows="fixed",
-            disabled=["Direction"],
-            key="obstruction_editor",
-        )
-
-        edited_values = edited["Min Altitude (deg)"].tolist()
-        next_obstructions = {
-            direction: float(max(0.0, min(90.0, edited_values[idx]))) for idx, direction in enumerate(WIND16)
-        }
-        if next_obstructions != prefs["obstructions"]:
-            prefs["obstructions"] = next_obstructions
-            save_preferences(prefs)
-    else:
-        mobile_obstruction_layout = int(st.session_state.get("browser_viewport_width", 1920)) < 900
-        with st.container():
-            st.markdown('<div id="obstruction-slider-scroll-anchor"></div>', unsafe_allow_html=True)
-            if mobile_obstruction_layout:
-                st.markdown(
-                    """
-                    <style>
-                    @media (max-width: 900px) {
-                      div[data-testid="stVerticalBlock"]:has(#obstruction-slider-scroll-anchor) {
-                        overflow-x: auto;
-                        overflow-y: visible;
-                        -webkit-overflow-scrolling: touch;
-                        padding-bottom: 0.4rem;
-                      }
-                      div[data-testid="stVerticalBlock"]:has(#obstruction-slider-scroll-anchor) > div[data-testid="stHorizontalBlock"] {
-                        min-width: 950px;
-                      }
-                    }
-                    </style>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                st.caption("Swipe horizontally to adjust all direction sliders.")
-            st.caption("Minimum altitude by direction (deg)")
-            header_cols = st.columns(len(WIND16), gap="small")
-            for idx, direction in enumerate(WIND16):
-                header_cols[idx].markdown(
-                    f"<div style='text-align:center; font-size:0.8rem;'><strong>{direction}</strong></div>",
-                    unsafe_allow_html=True,
-                )
-
-            slider_cols = st.columns(len(WIND16), gap="small")
-            value_cols = st.columns(len(WIND16), gap="small")
-            next_obstructions: dict[str, float] = {}
-            for idx, direction in enumerate(WIND16):
-                default_val = int(round(float(prefs["obstructions"].get(direction, 20.0))))
-                state_key = f"obstruction_slider_{direction}"
-                preview_value_raw = st.session_state.get(state_key, default_val)
-                try:
-                    preview_value = float(preview_value_raw)
-                except (TypeError, ValueError):
-                    preview_value = float(default_val)
-                preview_clamped = float(max(0.0, min(90.0, preview_value)))
-                slider_color = _interpolate_color_stops(preview_clamped, OBSTRUCTION_SLIDER_COLOR_STOPS)
-                with slider_cols[idx]:
-                    raw_value = vertical_slider(
-                        key=state_key,
-                        default_value=default_val,
-                        min_value=0,
-                        max_value=90,
-                        step=1,
-                        height=220,
-                        track_color="#E2E8F0",
-                        slider_color=slider_color,
-                        thumb_color=slider_color,
-                    )
-                try:
-                    slider_value = float(raw_value)
-                except (TypeError, ValueError):
-                    slider_value = float(default_val)
-                clamped_value = float(max(0.0, min(90.0, slider_value)))
-                next_obstructions[direction] = clamped_value
-                with value_cols[idx]:
-                    st.markdown(
-                        f"<div style='text-align:center; font-size:0.8rem; color:#64748b;'>{int(round(clamped_value))} deg</div>",
-                        unsafe_allow_html=True,
-                    )
-
-            if next_obstructions != prefs["obstructions"]:
-                prefs["obstructions"] = next_obstructions
-                save_preferences(prefs)
 
     st.divider()
     st.subheader("Settings Backup / Restore")
@@ -5315,6 +5769,9 @@ def render_explorer_page(
     st.title("DSO Explorer")
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
     location = prefs["location"]
+    if not is_location_configured(location):
+        st.warning("Observation site location is not set. Open the Site page to set location and obstructions.")
+        return
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
     weather_forecast_day_offset = resolve_weather_forecast_day_offset(
@@ -5469,6 +5926,24 @@ def main() -> None:
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     st.session_state["prefs"] = prefs
 
+    if not is_location_configured(prefs.get("location")):
+        if not bool(st.session_state.get("initial_location_fallback_attempted", False)):
+            st.session_state["initial_location_fallback_attempted"] = True
+            resolved = approximate_location_from_ip()
+            if resolved:
+                resolved_label, kept_site_name = apply_resolved_location(prefs, resolved)
+                st.session_state["prefs"] = prefs
+                save_preferences(prefs)
+                st.session_state["location_notice"] = (
+                    f"Approximate location applied: {resolved_label}. Site name unchanged."
+                    if kept_site_name
+                    else f"Approximate location applied: {resolved_label}."
+                )
+            else:
+                st.session_state["location_notice"] = (
+                    "Location not set. Open the Site page to set it manually or via browser geolocation (IP estimate is fallback)."
+                )
+
     with st.sidebar:
         dark_mode_enabled = st.toggle(
             "Dark Mode",
@@ -5541,6 +6016,9 @@ def main() -> None:
             browser_month_day_pattern=browser_month_day_pattern,
         )
 
+    def site_page() -> None:
+        render_site_page(prefs=prefs)
+
     def settings_page() -> None:
         render_settings_page(
             catalog_meta=catalog_meta,
@@ -5552,13 +6030,17 @@ def main() -> None:
         navigation = st.navigation(
             [
                 st.Page(explorer_page, title="Explorer", icon="✨", default=True),
+                st.Page(site_page, title="Site", icon="📍"),
                 st.Page(settings_page, title="Settings", icon="⚙️"),
             ]
         )
         navigation.run()
         return
 
-    selected_page = st.sidebar.radio("Page", ["Explorer", "Settings"], key="app_page_selector")
+    selected_page = st.sidebar.radio("Page", ["Explorer", "Site", "Settings"], key="app_page_selector")
+    if selected_page == "Site":
+        site_page()
+        return
     if selected_page == "Settings":
         settings_page()
         return
