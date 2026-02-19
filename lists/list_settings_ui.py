@@ -22,8 +22,10 @@ def render_lists_settings_section(
     prefs: dict[str, Any],
     *,
     persist_and_rerun_fn: Callable[[dict[str, Any]], None],
+    show_subheader: bool = True,
 ) -> None:
-    st.subheader("Lists")
+    if show_subheader:
+        st.subheader("Lists")
     ordered_list_ids = list_ids_in_order(prefs, include_auto_recent=True)
     if ordered_list_ids:
         list_rows: list[dict[str, Any]] = []
