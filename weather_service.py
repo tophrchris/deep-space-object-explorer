@@ -13,6 +13,7 @@ OPEN_METEO_TIMEOUT_SECONDS = 12
 DEFAULT_HOURLY_FIELDS = ("temperature_2m",)
 EXTENDED_FORECAST_HOURLY_FIELDS = (
     "temperature_2m",
+    "dew_point_2m",
     "relative_humidity_2m",
     "precipitation_probability",
     "rain",

@@ -33,6 +33,7 @@
 - [x] Refine responsive desktop/tablet split behavior.
 - [ ] Implement phone-style detail bottom sheet interactions.
 - [ ] Improve typography, spacing, and hierarchy for scanability.
+- [ ] Render 5-night forecast with custom HTML table styling while preserving in-place row-click selection (no URL navigation).
 - [ ] Add onboarding guidance for first-time users.
 
 ## Phase 6: Release Engineering
