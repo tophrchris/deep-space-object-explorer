@@ -57,6 +57,42 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 .small-note {
                     font-size: 0.9rem;
                 }
+                .dso-location-meta {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.4rem;
+                    flex-wrap: wrap;
+                    margin: 0.125rem 0 0.35rem 0;
+                    color: var(--dso-muted-text-color);
+                    font-size: 0.88rem;
+                    line-height: 1.2rem;
+                }
+                .dso-location-source-badge {
+                    display: inline-flex;
+                    align-items: center;
+                    padding: 0.05rem 0.5rem;
+                    border-radius: 999px;
+                    border: 1px solid transparent;
+                    font-size: 0.72rem;
+                    font-weight: 600;
+                    letter-spacing: 0.01em;
+                    line-height: 1.1rem;
+                }
+                .dso-location-source-badge--manual {
+                    background: rgba(34, 197, 94, 0.22);
+                    color: #bbf7d0;
+                    border-color: rgba(34, 197, 94, 0.45);
+                }
+                .dso-location-source-badge--browser {
+                    background: rgba(59, 130, 246, 0.22);
+                    color: #bfdbfe;
+                    border-color: rgba(59, 130, 246, 0.45);
+                }
+                .dso-location-source-badge--ip {
+                    background: rgba(245, 158, 11, 0.22);
+                    color: #fde68a;
+                    border-color: rgba(245, 158, 11, 0.45);
+                }
                 [data-testid="stDataFrame"] {
                     border: 1px solid var(--dso-border-color);
                     border-radius: 0.5rem;
@@ -115,6 +151,42 @@ def apply_ui_theme_css(theme_name: str) -> None:
             .small-note {
                 font-size: 0.9rem;
                 color: #666;
+            }
+            .dso-location-meta {
+                display: flex;
+                align-items: center;
+                gap: 0.4rem;
+                flex-wrap: wrap;
+                margin: 0.125rem 0 0.35rem 0;
+                color: #64748b;
+                font-size: 0.88rem;
+                line-height: 1.2rem;
+            }
+            .dso-location-source-badge {
+                display: inline-flex;
+                align-items: center;
+                padding: 0.05rem 0.5rem;
+                border-radius: 999px;
+                border: 1px solid transparent;
+                font-size: 0.72rem;
+                font-weight: 600;
+                letter-spacing: 0.01em;
+                line-height: 1.1rem;
+            }
+            .dso-location-source-badge--manual {
+                background: #dcfce7;
+                color: #166534;
+                border-color: #86efac;
+            }
+            .dso-location-source-badge--browser {
+                background: #dbeafe;
+                color: #1e40af;
+                border-color: #93c5fd;
+            }
+            .dso-location-source-badge--ip {
+                background: #fef3c7;
+                color: #92400e;
+                border-color: #fcd34d;
             }
             iframe[title^="streamlit_js_eval"] {
                 height: 0 !important;

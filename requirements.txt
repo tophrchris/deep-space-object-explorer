@@ -12,3 +12,5 @@ requests>=2.31
 streamlit-js-eval>=1.0.0
 streamlit-vertical-slider>=2.5.5
 streamlit-extras>=0.4.0
+folium>=0.17
+streamlit-folium>=0.23

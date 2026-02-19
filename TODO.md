@@ -15,6 +15,7 @@
 - [x] Improve reverse-geocode labels (city/state/country quality checks).
 - [ ] Add explicit permission-state messaging and retry flow.
 - [ ] Add location source badges (`default`, `manual`, `browser`, `ip`).
+- [ ] Add multi-site data model support (no UI yet): each site should store `name`, `location`, and `obstructions`, plus an active site pointer.
 
 ## Phase 3: Core Product Loop
 - [x] Search + results + target detail wired to live Alt/Az calculations.
