@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import streamlit as st
@@ -310,6 +311,32 @@ def is_dark_ui_theme(theme_name: str | None = None) -> bool:
     return bool(resolve_theme_palette(theme_name).get("is_dark", False))
 
 
+def normalize_plotly_color(value: Any, fallback: str) -> str:
+    raw = str(value if value is not None else fallback).strip()
+    if not raw:
+        raw = fallback
+
+    eight_digit_hex_match = re.fullmatch(r"#([0-9a-fA-F]{8})", raw)
+    if eight_digit_hex_match:
+        payload = eight_digit_hex_match.group(1)
+        red = int(payload[0:2], 16)
+        green = int(payload[2:4], 16)
+        blue = int(payload[4:6], 16)
+        alpha = int(payload[6:8], 16) / 255.0
+        return f"rgba({red},{green},{blue},{alpha:.3f})"
+
+    four_digit_hex_match = re.fullmatch(r"#([0-9a-fA-F]{4})", raw)
+    if four_digit_hex_match:
+        payload = four_digit_hex_match.group(1)
+        red = int(payload[0] * 2, 16)
+        green = int(payload[1] * 2, 16)
+        blue = int(payload[2] * 2, 16)
+        alpha = int(payload[3] * 2, 16) / 255.0
+        return f"rgba({red},{green},{blue},{alpha:.3f})"
+
+    return raw
+
+
 def apply_ui_theme_css(theme_name: str) -> None:
     palette = resolve_theme_palette(theme_name)
     badges = palette.get("location_badges", {})
@@ -599,16 +626,16 @@ def resolve_plot_theme_colors(theme_name: str | None = None) -> dict[str, str]:
     palette = resolve_theme_palette(theme_name)
     plot_colors = palette.get("plot", {})
     return {
-        "text": str(plot_colors.get("text", "#111111")),
-        "muted_text": str(plot_colors.get("muted_text", "#334155")),
-        "paper_bg": str(plot_colors.get("paper_bg", "rgba(0,0,0,0)")),
-        "plot_bg": str(plot_colors.get("plot_bg", PATH_PLOT_BACKGROUND_COLOR)),
-        "grid": str(plot_colors.get("grid", PATH_PLOT_HORIZONTAL_GRID_COLOR)),
-        "annotation_bg": str(plot_colors.get("annotation_bg", "rgba(255, 255, 255, 0.45)")),
-        "annotation_border": str(plot_colors.get("annotation_border", "rgba(148, 163, 184, 0.35)")),
-        "obstruction_fill": str(plot_colors.get("obstruction_fill", OBSTRUCTION_FILL_COLOR)),
-        "obstruction_line": str(plot_colors.get("obstruction_line", OBSTRUCTION_LINE_COLOR)),
-        "cardinal_grid": str(plot_colors.get("cardinal_grid", CARDINAL_GRIDLINE_COLOR)),
+        "text": normalize_plotly_color(plot_colors.get("text"), "#111111"),
+        "muted_text": normalize_plotly_color(plot_colors.get("muted_text"), "#334155"),
+        "paper_bg": normalize_plotly_color(plot_colors.get("paper_bg"), "rgba(0,0,0,0)"),
+        "plot_bg": normalize_plotly_color(plot_colors.get("plot_bg"), PATH_PLOT_BACKGROUND_COLOR),
+        "grid": normalize_plotly_color(plot_colors.get("grid"), PATH_PLOT_HORIZONTAL_GRID_COLOR),
+        "annotation_bg": normalize_plotly_color(plot_colors.get("annotation_bg"), "rgba(255, 255, 255, 0.45)"),
+        "annotation_border": normalize_plotly_color(plot_colors.get("annotation_border"), "rgba(148, 163, 184, 0.35)"),
+        "obstruction_fill": normalize_plotly_color(plot_colors.get("obstruction_fill"), OBSTRUCTION_FILL_COLOR),
+        "obstruction_line": normalize_plotly_color(plot_colors.get("obstruction_line"), OBSTRUCTION_LINE_COLOR),
+        "cardinal_grid": normalize_plotly_color(plot_colors.get("cardinal_grid"), CARDINAL_GRIDLINE_COLOR),
     }
 
 
