@@ -4752,9 +4752,25 @@ def render_site_page(prefs: dict[str, Any]) -> None:
         render_obstructions_settings_section(prefs)
 
 
+def render_lists_page(prefs: dict[str, Any]) -> None:
+    st.title("Lists")
+    st.caption("Manage target lists used across explorer search, overlays, and detail actions.")
+
+    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+    if persistence_notice:
+        st.warning(persistence_notice)
+
+    with st.container(border=True):
+        render_lists_settings_section(
+            prefs,
+            persist_and_rerun_fn=persist_and_rerun,
+            show_subheader=False,
+        )
+
+
 def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
     st.title("Settings")
-    st.caption("Manage display preferences, lists, catalog metadata, and settings backup.")
+    st.caption("Manage display preferences, catalog metadata, and settings backup.")
 
     persistence_notice = st.session_state.get("prefs_persistence_notice", "")
     if persistence_notice:
@@ -4779,9 +4795,6 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     effective_unit = resolve_temperature_unit(selected_pref, browser_locale)
     source_note = "browser locale" if selected_pref == "auto" else "manual setting"
     st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
-
-    st.divider()
-    render_lists_settings_section(prefs, persist_and_rerun_fn=persist_and_rerun)
 
     st.divider()
     st.subheader("Catalog")
@@ -6049,6 +6062,9 @@ def main() -> None:
     def site_page() -> None:
         render_site_page(prefs=prefs)
 
+    def lists_page() -> None:
+        render_lists_page(prefs=prefs)
+
     def settings_page() -> None:
         render_settings_page(
             catalog_meta=catalog_meta,
@@ -6061,15 +6077,19 @@ def main() -> None:
             [
                 st.Page(explorer_page, title="Explorer", icon="✨", default=True),
                 st.Page(site_page, title="Site", icon="📍"),
+                st.Page(lists_page, title="Lists", icon="📚"),
                 st.Page(settings_page, title="Settings", icon="⚙️"),
             ]
         )
         navigation.run()
         return
 
-    selected_page = st.sidebar.radio("Page", ["Explorer", "Site", "Settings"], key="app_page_selector")
+    selected_page = st.sidebar.radio("Page", ["Explorer", "Site", "Lists", "Settings"], key="app_page_selector")
     if selected_page == "Site":
         site_page()
+        return
+    if selected_page == "Lists":
+        lists_page()
         return
     if selected_page == "Settings":
         settings_page()
