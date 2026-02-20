@@ -47,6 +47,8 @@ DEFAULT_LOCATION: dict[str, Any] = {
     "source": "unset",
     "resolved_at": "",
 }
+DEFAULT_SITE_ID = "site_1"
+DEFAULT_SITE_NAME = "Observation Site"
 
 UI_THEME_LIGHT = "light"
 UI_THEME_DARK = "dark"

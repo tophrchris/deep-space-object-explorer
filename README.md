@@ -6,9 +6,11 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 
 - Unified search across M/NGC/IC/Sh2 IDs and common names
 - Desktop split layout and phone-style stacked layout preview
-- Location controls (default Princeton, manual geocode, browser geolocation permission flow, IP fallback)
-- 16-bin obstruction editor (default 20 deg)
-- Generic Lists (including `Auto (Recent)` + editable custom lists) with browser-local persistence
+- Sites page with multi-site management (active site, duplicate, delete, edit)
+- Location controls per site (search, browser geolocation, map right-click selection, IP fallback)
+- Obstruction controls per site (N/E/S/W, WIND16 sliders, or `.hrz` upload reduced to WIND16)
+- Generic Lists page (including `Auto (Recent)` + editable custom lists) with browser-local persistence
+- Equipment page (store/display selections) driven by runtime JSON at `data/equipment/equipment_catalog.json`
 - Settings export/import via JSON for backup or migration to another machine
 - Catalog ingestion module with normalized schema + disk cache + metadata
 - Target detail panel with:
@@ -25,6 +27,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - `dso_enricher/catalog_ingestion.py`: catalog ingest + normalization + cache metadata
 - `lists/`: list management/search/ui modules
 - `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
+- `data/equipment/equipment_catalog.json`: runtime-editable equipment catalog definitions
 - `specs/`: technical specs for catalog cache and Wikipedia enrichment scripts
 - `docs/`: project notes, backlog, and product planning docs
 - `docs/catalog_issue_backlog.md`: draft catalog issues to open later on GitHub

@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "telescopes",
+      "label": "Telescopes",
+      "description": "Popular EAA telescopes.",
+      "display_columns": [
+        {
+          "field": "fov_maj_deg",
+          "label": "FOV Maj (deg)"
+        },
+        {
+          "field": "fov_min_deg",
+          "label": "FOV Min (deg)"
+        },
+        {
+          "field": "filter_bands",
+          "label": "Filter Bands"
+        }
+      ],
+      "items": [
+        {
+          "id": "zwo-seestar-s50",
+          "name": "ZWO Seestar S50",
+          "fov_maj_deg": 1.29,
+          "fov_min_deg": 0.73,
+          "filter_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "zwo-seestar-s30-pro",
+          "name": "ZWO Seestar S30 Pro",
+          "fov_maj_deg": 4.3,
+          "fov_min_deg": 2.4,
+          "filter_bands": []
+        },
+        {
+          "id": "zwo-seestar-s30",
+          "name": "zwo Seestar S30",
+          "fov_maj_deg": 2.14,
+          "fov_min_deg": 1.21,
+          "filter_bands": []
+        },
+        {
+          "id": "dwarflab-dwarf-3",
+          "name": "Dwarflab Dwarf 3",
+          "fov_maj_deg": 2.0,
+          "fov_min_deg": 2.0,
+          "filter_bands": []
+        },
+        {
+          "id": "vaonis-vespera",
+          "name": "vaonis vespera",
+          "fov_maj_deg": 1.6,
+          "fov_min_deg": 0.9,
+          "filter_bands": []
+        },
+        {
+          "id": "vaonis-vespera-ii",
+          "name": "vaonis vespera II",
+          "fov_maj_deg": 2.5,
+          "fov_min_deg": 1.4,
+          "filter_bands": []
+        },
+        {
+          "id": "vaonis-vespera-pro",
+          "name": "Vaonis vespera pro",
+          "fov_maj_deg": 1.6,
+          "fov_min_deg": 1.6,
+          "filter_bands": []
+        },
+        {
+          "id": "unistellar-evscope-2",
+          "name": "unistellar evscope 2",
+          "fov_maj_deg": 0.57,
+          "fov_min_deg": 0.76,
+          "filter_bands": []
+        }
+      ]
+    },
+    {
+      "id": "accessories",
+      "label": "Other accessories",
+      "description": "Common accessories you have available.",
+      "display_columns": [],
+      "items": [
+        {
+          "id": "equatorial-mount",
+          "name": "Equatorial Mount"
+        },
+        {
+          "id": "dew-shield",
+          "name": "Dew Shield"
+        },
+        {
+          "id": "dew-heater",
+          "name": "Dew Heater"
+        },
+        {
+          "id": "external-battery",
+          "name": "External Battery"
+        },
+        {
+          "id": "bahtinov-mask",
+          "name": "Bahtinov mask"
+        }
+      ]
+    },
+    {
+      "id": "filters",
+      "label": "Filters",
+      "description": "Filters you own.",
+      "display_columns": [
+        {
+          "field": "emission_bands",
+          "label": "Emission Bands"
+        }
+      ],
+      "items": [
+        {
+          "id": "uv-ir-cut",
+          "name": "UV/IR-Cut",
+          "emission_bands": []
+        },
+        {
+          "id": "broadband-lp",
+          "name": "Broadband LP",
+          "emission_bands": []
+        },
+        {
+          "id": "cls",
+          "name": "CLS",
+          "emission_bands": []
+        },
+        {
+          "id": "uhc",
+          "name": "UHC",
+          "emission_bands": []
+        },
+        {
+          "id": "dual-band-duo-narrowband",
+          "name": "Dual Band/Duo Narroband",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "tri-band-multiband",
+          "name": "Tri-band/Multiband",
+          "emission_bands": [
+            "HA",
+            "OIII",
+            "HB"
+          ]
+        },
+        {
+          "id": "line-filter-oiii",
+          "name": "Line Filter -OIII",
+          "emission_bands": [
+            "OIII"
+          ]
+        },
+        {
+          "id": "line-filter-ha",
+          "name": "Line Filter - HA",
+          "emission_bands": [
+            "HA"
+          ]
+        },
+        {
+          "id": "moon-skyglow",
+          "name": "Moon/Skyglow",
+          "emission_bands": []
+        }
+      ]
+    }
+  ]
+}
