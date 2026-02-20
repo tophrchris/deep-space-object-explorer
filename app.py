@@ -2283,6 +2283,20 @@ def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_u
     return []
 
 
+def normalize_hour_key(value: Any) -> str | None:
+    try:
+        timestamp = pd.Timestamp(value).floor("h")
+    except Exception:
+        return None
+
+    if timestamp.tzinfo is not None:
+        try:
+            timestamp = timestamp.tz_convert("UTC")
+        except Exception:
+            pass
+    return timestamp.isoformat()
+
+
 def build_hourly_weather_maps(
     rows: list[dict[str, Any]],
 ) -> tuple[dict[str, float], dict[str, float], dict[str, dict[str, Any]]]:
@@ -2293,10 +2307,9 @@ def build_hourly_weather_maps(
         time_iso = str(weather_row.get("time_iso", "")).strip()
         if not time_iso:
             continue
-        try:
-            hour_key = pd.Timestamp(time_iso).floor("h").isoformat()
-        except Exception:
-            hour_key = time_iso
+        hour_key = normalize_hour_key(time_iso)
+        if not hour_key:
+            continue
 
         temperature_value = weather_row.get("temperature_2m")
         if temperature_value is not None and not pd.isna(temperature_value):
@@ -3318,7 +3331,7 @@ def build_unobstructed_altitude_area_plot(
             if max_plot_time is not None and hour_timestamp > (max_plot_time.ceil("h") + pd.Timedelta(hours=1)):
                 continue
 
-            hour_key = hour_timestamp.isoformat()
+            hour_key = normalize_hour_key(hour_timestamp) or hour_timestamp.isoformat()
             temp_value = None if not temperature_by_hour else temperature_by_hour.get(hour_key)
             if temp_value is not None and not pd.isna(temp_value):
                 temp_x.append(hour_timestamp)
@@ -3963,7 +3976,7 @@ def build_night_plot(
             continue
 
         max_row = chunk.loc[chunk["alt"].idxmax()]
-        hour_iso = hour.isoformat()
+        hour_iso = normalize_hour_key(hour) or pd.Timestamp(hour).floor("h").isoformat()
         temp = temperature_by_hour.get(hour_iso)
         cloud_cover = cloud_cover_by_hour.get(hour_iso) if cloud_cover_by_hour else None
         weather_hour_row = weather_by_hour.get(hour_iso, {}) if weather_by_hour else {}
