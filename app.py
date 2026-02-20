@@ -3348,7 +3348,7 @@ def build_unobstructed_altitude_area_plot(
             emoji, tooltip_text = resolve_weather_alert_indicator(weather_row, temperature_unit)
             if emoji:
                 alert_x.append(hour_timestamp)
-                alert_y.append(-8.0)
+                alert_y.append(-9.0)
                 alert_text.append(emoji)
                 if tooltip_text:
                     alert_hover.append(
