@@ -343,6 +343,25 @@ def apply_ui_theme_css(theme_name: str) -> None:
     manual_badge = badges.get("manual", {})
     browser_badge = badges.get("browser", {})
     ip_badge = badges.get("ip", {})
+    collapsed_sidebar_css = """
+                [data-testid="stSidebar"][aria-expanded="false"] {{
+                    min-width: 4.5rem !important;
+                    max-width: 4.5rem !important;
+                    margin-left: 0 !important;
+                    transform: none !important;
+                }}
+                [data-testid="stSidebar"][aria-expanded="false"] > div:first-child {{
+                    width: 4.5rem !important;
+                }}
+                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] a {{
+                    justify-content: center;
+                    padding-left: 0.25rem !important;
+                    padding-right: 0.25rem !important;
+                }}
+                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] p {{
+                    display: none;
+                }}
+    """
 
     if palette.get("is_dark", False):
         dataframe_tokens = palette.get("dataframe_tokens", {})
@@ -378,6 +397,7 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 [data-testid="stSidebar"] * {{
                     color: var(--dso-text-color);
                 }}
+{collapsed_sidebar_css}
                 [data-testid="stMainBlockContainer"],
                 [data-testid="stAppViewBlockContainer"] {{
                     padding-top: 1.15rem !important;
@@ -492,6 +512,7 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 [data-testid="stSidebar"] * {{
                     color: var(--dso-text-color);
                 }}
+{collapsed_sidebar_css}
                 [data-testid="stMainBlockContainer"],
                 [data-testid="stAppViewBlockContainer"] {{
                     padding-top: 1.15rem !important;
@@ -580,6 +601,7 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 font-size: 0.9rem;
                 color: {palette.get("small_note_color", "#666666")};
             }}
+{collapsed_sidebar_css}
             [data-testid="stMainBlockContainer"],
             [data-testid="stAppViewBlockContainer"] {{
                 padding-top: 1.15rem !important;
