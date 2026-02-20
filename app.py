@@ -865,6 +865,34 @@ def duplicate_site(prefs: dict[str, Any], site_id: str) -> str | None:
     return new_site_id
 
 
+def create_site(prefs: dict[str, Any], name: str | None = None) -> str | None:
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        sites = {}
+
+    base_name = str(name or "").strip() or DEFAULT_SITE_NAME
+    existing_names = {
+        str(site.get("name") or "").strip().lower()
+        for site in sites.values()
+        if isinstance(site, dict) and str(site.get("name") or "").strip()
+    }
+    candidate_name = base_name
+    suffix = 2
+    while candidate_name.strip().lower() in existing_names:
+        candidate_name = f"{base_name} {suffix}"
+        suffix += 1
+
+    new_site_id = f"site_{uuid.uuid4().hex[:8]}"
+    sites[new_site_id] = default_site_definition(candidate_name)
+    prefs["sites"] = sites
+
+    ordered = site_ids_in_order(prefs)
+    if new_site_id not in ordered:
+        ordered.append(new_site_id)
+    prefs["site_order"] = ordered
+    return new_site_id
+
+
 def delete_site(prefs: dict[str, Any], site_id: str) -> bool:
     ordered = site_ids_in_order(prefs)
     if site_id not in ordered or len(ordered) <= 1:
@@ -5327,6 +5355,10 @@ def render_sites_page(prefs: dict[str, Any]) -> None:
         st.dataframe(site_frame, hide_index=True, use_container_width=True, height=table_height)
 
         select_key = "sites_selected_site_id"
+        pending_select_key = "sites_selected_site_id_pending"
+        pending_selected = str(st.session_state.pop(pending_select_key, "")).strip()
+        if pending_selected in site_ids:
+            st.session_state[select_key] = pending_selected
         selected_default = str(st.session_state.get(select_key, "")).strip()
         if selected_default not in site_ids and site_ids:
             selected_default = active_site_id
@@ -5339,7 +5371,15 @@ def render_sites_page(prefs: dict[str, Any]) -> None:
             format_func=lambda site_id: get_site_name(prefs, site_id),
         )
 
-        edit_col, duplicate_col, delete_col = st.columns(3, gap="small")
+        add_col, edit_col, duplicate_col, delete_col = st.columns(4, gap="small")
+        if add_col.button("Add new site", use_container_width=True, key="sites_add_button"):
+            created_site_id = create_site(prefs)
+            if created_site_id:
+                set_active_site(prefs, created_site_id)
+                st.session_state[pending_select_key] = created_site_id
+                st.session_state["location_notice"] = f"Created new site: {get_site_name(prefs, created_site_id)}."
+                persist_and_rerun(prefs)
+
         if edit_col.button("Edit", use_container_width=True, key="sites_edit_button"):
             changed = set_active_site(prefs, selected_site_id)
             if changed:
@@ -5350,7 +5390,7 @@ def render_sites_page(prefs: dict[str, Any]) -> None:
             duplicated_site_id = duplicate_site(prefs, selected_site_id)
             if duplicated_site_id:
                 set_active_site(prefs, duplicated_site_id)
-                st.session_state[select_key] = duplicated_site_id
+                st.session_state[pending_select_key] = duplicated_site_id
                 st.session_state["location_notice"] = (
                     f"Created duplicate site: {get_site_name(prefs, duplicated_site_id)}."
                 )
@@ -6548,8 +6588,28 @@ def render_explorer_page(
         "</p>"
     )
 
-    st.title("Observation Planner")
-    st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    site_ids = site_ids_in_order(prefs)
+    active_site_id = get_active_site_id(prefs)
+    if active_site_id not in site_ids and site_ids:
+        active_site_id = site_ids[0]
+        set_active_site(prefs, active_site_id)
+
+    title_col, site_col = st.columns([4, 2], gap="medium")
+    with title_col:
+        st.title("Observation Planner")
+        st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    with site_col:
+        if len(site_ids) > 1:
+            selected_site_id = st.selectbox(
+                "Site",
+                options=site_ids,
+                index=site_ids.index(active_site_id) if active_site_id in site_ids else 0,
+                format_func=lambda site_id: get_site_name(prefs, site_id),
+                key="explorer_active_site_selector",
+            )
+            if selected_site_id != active_site_id and set_active_site(prefs, selected_site_id):
+                persist_and_rerun(prefs)
+
     location = prefs["location"]
     if not is_location_configured(location):
         st.warning("Observation site location is not set. Open the Sites page to set location and obstructions.")
