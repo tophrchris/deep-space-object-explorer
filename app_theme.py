@@ -344,22 +344,40 @@ def apply_ui_theme_css(theme_name: str) -> None:
     browser_badge = badges.get("browser", {})
     ip_badge = badges.get("ip", {})
     collapsed_sidebar_css = """
+                section[data-testid="stSidebar"][aria-expanded="false"],
                 [data-testid="stSidebar"][aria-expanded="false"] {{
                     min-width: 4.5rem !important;
                     max-width: 4.5rem !important;
+                    width: 4.5rem !important;
                     margin-left: 0 !important;
-                    transform: none !important;
+                    left: 0 !important;
+                    transform: translateX(0) !important;
+                    visibility: visible !important;
+                    display: block !important;
                 }}
+                section[data-testid="stSidebar"][aria-expanded="false"] > div:first-child,
                 [data-testid="stSidebar"][aria-expanded="false"] > div:first-child {{
                     width: 4.5rem !important;
+                    min-width: 4.5rem !important;
+                    max-width: 4.5rem !important;
+                    margin-left: 0 !important;
+                    transform: translateX(0) !important;
                 }}
+                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] a,
                 [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] a {{
                     justify-content: center;
                     padding-left: 0.25rem !important;
                     padding-right: 0.25rem !important;
                 }}
+                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] p,
                 [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] p {{
-                    display: none;
+                    width: 1.35rem !important;
+                    max-width: 1.35rem !important;
+                    overflow: hidden !important;
+                    white-space: nowrap !important;
+                    text-overflow: clip !important;
+                    margin-left: auto !important;
+                    margin-right: auto !important;
                 }}
     """
 
