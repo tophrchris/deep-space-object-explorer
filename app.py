@@ -3348,7 +3348,7 @@ def build_unobstructed_altitude_area_plot(
             emoji, tooltip_text = resolve_weather_alert_indicator(weather_row, temperature_unit)
             if emoji:
                 alert_x.append(hour_timestamp)
-                alert_y.append(-9.0)
+                alert_y.append(-11.0)
                 alert_text.append(emoji)
                 if tooltip_text:
                     alert_hover.append(
@@ -6038,7 +6038,7 @@ def render_explorer_page(
         "</p>"
     )
 
-    st.title("DSO Explorer")
+    st.title("Observation Planner")
     st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
     location = prefs["location"]
     if not is_location_configured(location):
