@@ -2767,6 +2767,7 @@ def render_target_recommendations(
             "cloud_cover_threshold": RECOMMENDATION_CLOUD_COVER_THRESHOLD,
             "sample_minutes": RECOMMENDATION_CACHE_SAMPLE_MINUTES,
             "result_limit_mode": "unlimited",
+            "visibility_fallback_mode": "issue93_v1",
             "window_start": pd.Timestamp(window_start).isoformat(),
             "window_end": pd.Timestamp(window_end).isoformat(),
         },
@@ -2935,171 +2936,215 @@ def render_target_recommendations(
                     selected_visible_minutes = np.sum(qualified_matrix_selected_hours, axis=0).astype(int) * sample_minutes
                     full_night_visible_minutes = np.sum(qualified_matrix_full_night, axis=0).astype(int) * sample_minutes
                     has_duration = selected_visible_minutes > 0
-                    if not np.any(has_duration):
-                        empty_query_message = "No targets meet the current visibility/weather/mount constraints."
+                    update_query_progress(72, "Searching recommendations: evaluating filter and visibility matches...")
+
+                    peak_altitude_all = np.asarray(altaz_bundle.get("peak_altitude", np.empty((0,))), dtype=float)
+                    peak_time_local_all = np.asarray(altaz_bundle.get("peak_time_local_iso", ()), dtype=object)
+                    peak_direction_all = np.asarray(altaz_bundle.get("peak_direction", ()), dtype=object)
+                    max_col_index = int(candidate_col_indices.max()) if candidate_col_indices.size else -1
+                    if (
+                        peak_altitude_all.ndim == 1
+                        and peak_altitude_all.size > max_col_index
+                        and peak_time_local_all.size > max_col_index
+                        and peak_direction_all.size > max_col_index
+                    ):
+                        peak_altitude = peak_altitude_all[candidate_col_indices]
+                        peak_time_local = peak_time_local_all[candidate_col_indices]
+                        peak_direction = peak_direction_all[candidate_col_indices]
                     else:
-                        update_query_progress(72, "Searching recommendations: evaluating filter and visibility matches...")
+                        peak_idx_by_target = np.argmax(altitude_matrix, axis=0)
+                        peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(len(candidate_col_indices))]
+                        sample_times_local = np.asarray(altaz_bundle.get("sample_times_local_iso", ()), dtype=object)
+                        peak_time_local = np.array(
+                            [sample_times_local[int(index)] for index in peak_idx_by_target],
+                            dtype=object,
+                        )
+                        peak_direction = np.array(
+                            [
+                                WIND16[int(wind_index_matrix[int(index), target_idx])]
+                                for target_idx, index in enumerate(peak_idx_by_target)
+                            ],
+                            dtype=object,
+                        )
 
-                        peak_altitude_all = np.asarray(altaz_bundle.get("peak_altitude", np.empty((0,))), dtype=float)
-                        peak_time_local_all = np.asarray(altaz_bundle.get("peak_time_local_iso", ()), dtype=object)
-                        peak_direction_all = np.asarray(altaz_bundle.get("peak_direction", ()), dtype=object)
-                        max_col_index = int(candidate_col_indices.max()) if candidate_col_indices.size else -1
-                        if (
-                            peak_altitude_all.ndim == 1
-                            and peak_altitude_all.size > max_col_index
-                            and peak_time_local_all.size > max_col_index
-                            and peak_direction_all.size > max_col_index
-                        ):
-                            peak_altitude = peak_altitude_all[candidate_col_indices]
-                            peak_time_local = peak_time_local_all[candidate_col_indices]
-                            peak_direction = peak_direction_all[candidate_col_indices]
-                        else:
-                            peak_idx_by_target = np.argmax(altitude_matrix, axis=0)
-                            peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(len(candidate_col_indices))]
-                            sample_times_local = np.asarray(altaz_bundle.get("sample_times_local_iso", ()), dtype=object)
-                            peak_time_local = np.array(
-                                [sample_times_local[int(index)] for index in peak_idx_by_target],
-                                dtype=object,
-                            )
-                            peak_direction = np.array(
-                                [
-                                    WIND16[int(wind_index_matrix[int(index), target_idx])]
-                                    for target_idx, index in enumerate(peak_idx_by_target)
-                                ],
-                                dtype=object,
-                            )
+                    emission_token_values = candidates.get("emission_band_tokens")
+                    if emission_token_values is None:
+                        target_emission_sets = [
+                            _parse_emission_band_set(value)
+                            for value in candidates.get("emission_lines", pd.Series(dtype=object)).tolist()
+                        ]
+                    else:
+                        target_emission_sets = [set(value) for value in emission_token_values.tolist()]
 
-                        emission_token_values = candidates.get("emission_band_tokens")
-                        if emission_token_values is None:
-                            target_emission_sets = [
-                                _parse_emission_band_set(value)
-                                for value in candidates.get("emission_lines", pd.Series(dtype=object)).tolist()
-                            ]
-                        else:
-                            target_emission_sets = [set(value) for value in emission_token_values.tolist()]
-
-                        if selected_filter_item is not None and selected_filter_bands:
+                    if selected_filter_item is not None and selected_filter_bands:
+                        filter_match_tier = np.array(
+                            [_filter_match_tier(target_bands, selected_filter_bands) for target_bands in target_emission_sets],
+                            dtype=int,
+                        )
+                        filter_visibility_mask = filter_match_tier > 0
+                    else:
+                        if owned_filter_band_sets:
                             filter_match_tier = np.array(
-                                [_filter_match_tier(target_bands, selected_filter_bands) for target_bands in target_emission_sets],
+                                [
+                                    max(_filter_match_tier(target_bands, reference_bands) for reference_bands in owned_filter_band_sets)
+                                    for target_bands in target_emission_sets
+                                ],
                                 dtype=int,
                             )
-                            filter_visibility_mask = filter_match_tier > 0
                         else:
-                            if owned_filter_band_sets:
-                                filter_match_tier = np.array(
-                                    [
-                                        max(_filter_match_tier(target_bands, reference_bands) for reference_bands in owned_filter_band_sets)
-                                        for target_bands in target_emission_sets
-                                    ],
-                                    dtype=int,
-                                )
-                            else:
-                                filter_match_tier = np.zeros(len(candidate_col_indices), dtype=int)
-                            filter_visibility_mask = np.ones(len(candidate_col_indices), dtype=bool)
+                            filter_match_tier = np.zeros(len(candidate_col_indices), dtype=int)
+                        filter_visibility_mask = np.ones(len(candidate_col_indices), dtype=bool)
 
-                        eligible_mask = has_duration & filter_visibility_mask
-                        if not np.any(eligible_mask):
-                            empty_query_message = "No targets match the selected camera filter."
+                    above_horizon_matrix = altitude_matrix >= 0.0
+                    selected_window_matrix = selected_hours_mask[:, np.newaxis]
+                    above_horizon_selected = np.any(above_horizon_matrix & selected_window_matrix, axis=0)
+                    obstructed_selected = np.any(
+                        above_horizon_matrix
+                        & (~visible_matrix)
+                        & selected_window_matrix,
+                        axis=0,
+                    )
+                    cloud_blocked_selected = np.any(
+                        visible_matrix
+                        & mount_mask
+                        & (~cloud_ok_mask[:, np.newaxis])
+                        & selected_window_matrix,
+                        axis=0,
+                    )
+                    visibility_reason = np.full(len(candidate_col_indices), "obstructed", dtype=object)
+                    visibility_reason[~above_horizon_selected] = "below horizon"
+                    visibility_reason[
+                        above_horizon_selected
+                        & (~obstructed_selected)
+                        & cloud_blocked_selected
+                    ] = "cloud cover"
+
+                    eligible_visible_mask = has_duration & filter_visibility_mask
+                    no_visible_targets = not bool(np.any(eligible_visible_mask))
+                    keyword_search_active = bool(str(cleaned_keyword).strip())
+                    include_fallback_mask = np.zeros(len(candidate_col_indices), dtype=bool)
+                    if keyword_search_active:
+                        include_fallback_mask = (~eligible_visible_mask) & filter_visibility_mask
+                    elif no_visible_targets:
+                        include_fallback_mask = (
+                            (~eligible_visible_mask)
+                            & filter_visibility_mask
+                            & (visibility_reason != "below horizon")
+                        )
+
+                    eligible_mask = eligible_visible_mask | include_fallback_mask
+                    if not np.any(filter_visibility_mask):
+                        empty_query_message = "No targets match the selected camera filter."
+                    elif not np.any(eligible_mask):
+                        if no_visible_targets:
+                            empty_query_message = "No targets above the horizon meet the current visibility/weather/mount constraints."
                         else:
-                            eligible_indices = np.where(eligible_mask)[0]
-                            recommended = candidates.iloc[eligible_indices].copy()
-                            recommended["visible_minutes"] = full_night_visible_minutes[eligible_indices]
-                            recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
-                            recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
-                            recommended["peak_altitude"] = np.round(peak_altitude[eligible_indices], 1)
-                            recommended["peak_time_local"] = peak_time_local[eligible_indices]
-                            recommended["peak_direction"] = peak_direction[eligible_indices]
-                            recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
-                            recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
-                            recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
-                            if "apparent_size" not in recommended.columns:
-                                recommended["apparent_size"] = recommended.apply(
-                                    lambda row: format_apparent_size_display(
-                                        row.get("ang_size_maj_arcmin"),
-                                        row.get("ang_size_min_arcmin"),
-                                    ),
-                                    axis=1,
-                                )
-                            if "apparent_size_sort_arcmin" not in recommended.columns:
-                                recommended["apparent_size_sort_arcmin"] = recommended.apply(
-                                    lambda row: apparent_size_sort_key_arcmin(
-                                        row.get("ang_size_maj_arcmin"),
-                                        row.get("ang_size_min_arcmin"),
-                                    ),
-                                    axis=1,
-                                )
-                            if "target_name" not in recommended.columns:
-                                primary_ids = recommended["primary_id"].astype(str)
-                                common_names = recommended["common_name"].fillna("").astype(str).str.strip()
-                                recommended["target_name"] = np.where(
-                                    common_names != "",
-                                    primary_ids + " - " + common_names,
-                                    primary_ids,
-                                )
-                            recommended["visibility_duration"] = recommended["visible_minutes"].map(
-                                lambda minutes: f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}"
+                            empty_query_message = "No targets meet the current visibility/weather/mount constraints."
+                    else:
+                        eligible_indices = np.where(eligible_mask)[0]
+                        recommended = candidates.iloc[eligible_indices].copy()
+                        recommended["visible_minutes"] = full_night_visible_minutes[eligible_indices]
+                        recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
+                        recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
+                        recommended["visibility_reason"] = visibility_reason[eligible_indices]
+                        recommended["peak_altitude"] = np.round(peak_altitude[eligible_indices], 1)
+                        recommended["peak_time_local"] = peak_time_local[eligible_indices]
+                        recommended["peak_direction"] = peak_direction[eligible_indices]
+                        recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
+                        recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
+                        recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
+                        if "apparent_size" not in recommended.columns:
+                            recommended["apparent_size"] = recommended.apply(
+                                lambda row: format_apparent_size_display(
+                                    row.get("ang_size_maj_arcmin"),
+                                    row.get("ang_size_min_arcmin"),
+                                ),
+                                axis=1,
                             )
-                            recommended["visibility_bin_15"] = np.floor_divide(
-                                recommended["selected_visible_minutes"],
-                                15,
-                            ).astype(int)
-                            recommended["peak_alt_band_10"] = np.floor(
-                                np.clip(recommended["peak_altitude"], 0.0, 90.0) / 10.0
-                            ).astype(int)
+                        if "apparent_size_sort_arcmin" not in recommended.columns:
+                            recommended["apparent_size_sort_arcmin"] = recommended.apply(
+                                lambda row: apparent_size_sort_key_arcmin(
+                                    row.get("ang_size_maj_arcmin"),
+                                    row.get("ang_size_min_arcmin"),
+                                ),
+                                axis=1,
+                            )
+                        if "target_name" not in recommended.columns:
+                            primary_ids = recommended["primary_id"].astype(str)
+                            common_names = recommended["common_name"].fillna("").astype(str).str.strip()
+                            recommended["target_name"] = np.where(
+                                common_names != "",
+                                primary_ids + " - " + common_names,
+                                primary_ids,
+                            )
+                        recommended["visibility_duration"] = recommended["visible_minutes"].map(
+                            lambda minutes: f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}"
+                        )
+                        non_visible_reason_mask = recommended["selected_visible_minutes"] <= 0
+                        recommended.loc[non_visible_reason_mask, "visibility_duration"] = (
+                            recommended.loc[non_visible_reason_mask, "visibility_reason"].astype(str)
+                        )
+                        recommended["visibility_bin_15"] = np.floor_divide(
+                            recommended["selected_visible_minutes"],
+                            15,
+                        ).astype(int)
+                        recommended["peak_alt_band_10"] = np.floor(
+                            np.clip(recommended["peak_altitude"], 0.0, 90.0) / 10.0
+                        ).astype(int)
 
-                            recommended["framing_percent"] = np.nan
-                            if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
-                                target_maj_deg = pd.to_numeric(recommended["ang_size_maj_arcmin"], errors="coerce") / 60.0
-                                target_min_deg = pd.to_numeric(recommended["ang_size_min_arcmin"], errors="coerce") / 60.0
-                                target_maj_deg = target_maj_deg.where(target_maj_deg > 0.0)
-                                target_min_deg = target_min_deg.where(target_min_deg > 0.0)
-                                target_maj_deg = target_maj_deg.fillna(target_min_deg)
-                                target_min_deg = target_min_deg.fillna(target_maj_deg)
-                                target_area_deg2 = target_maj_deg * target_min_deg
-                                framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
-                                recommended["framing_percent"] = framing_percent
+                        recommended["framing_percent"] = np.nan
+                        if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
+                            target_maj_deg = pd.to_numeric(recommended["ang_size_maj_arcmin"], errors="coerce") / 60.0
+                            target_min_deg = pd.to_numeric(recommended["ang_size_min_arcmin"], errors="coerce") / 60.0
+                            target_maj_deg = target_maj_deg.where(target_maj_deg > 0.0)
+                            target_min_deg = target_min_deg.where(target_min_deg > 0.0)
+                            target_maj_deg = target_maj_deg.fillna(target_min_deg)
+                            target_min_deg = target_min_deg.fillna(target_maj_deg)
+                            target_area_deg2 = target_maj_deg * target_min_deg
+                            framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
+                            recommended["framing_percent"] = framing_percent
 
-                                if minimum_size_pct is not None:
-                                    recommended = recommended[
-                                        recommended["framing_percent"].apply(
-                                            lambda value: value is not None and not pd.isna(value) and np.isfinite(float(value))
-                                            and float(value) >= float(minimum_size_pct)
-                                        )
-                                    ]
+                            if minimum_size_pct is not None:
+                                recommended = recommended[
+                                    recommended["framing_percent"].apply(
+                                        lambda value: value is not None and not pd.isna(value) and np.isfinite(float(value))
+                                        and float(value) >= float(minimum_size_pct)
+                                    )
+                                ]
 
-                            if recommended.empty:
-                                empty_query_message = "No targets remain after applying size/framing criteria."
+                        if recommended.empty:
+                            empty_query_message = "No targets remain after applying size/framing criteria."
+                        else:
+                            if selected_telescope is not None:
+                                recommended["sort_size_metric"] = recommended["framing_percent"].apply(
+                                    lambda value: (
+                                        float(value)
+                                        if value is not None and not pd.isna(value) and np.isfinite(float(value))
+                                        else -1.0
+                                    )
+                                )
                             else:
-                                if selected_telescope is not None:
-                                    recommended["sort_size_metric"] = recommended["framing_percent"].apply(
-                                        lambda value: (
-                                            float(value)
-                                            if value is not None and not pd.isna(value) and np.isfinite(float(value))
-                                            else -1.0
-                                        )
+                                recommended["sort_size_metric"] = recommended["apparent_size_sort_arcmin"].apply(
+                                    lambda value: (
+                                        float(value)
+                                        if value is not None and not pd.isna(value) and np.isfinite(float(value))
+                                        else -1.0
                                     )
-                                else:
-                                    recommended["sort_size_metric"] = recommended["apparent_size_sort_arcmin"].apply(
-                                        lambda value: (
-                                            float(value)
-                                            if value is not None and not pd.isna(value) and np.isfinite(float(value))
-                                            else -1.0
-                                        )
-                                    )
+                                )
 
-                                recommended = recommended.sort_values(
-                                    by=[
-                                        "filter_match_tier",
-                                        "visibility_bin_15",
-                                        "selected_visible_minutes",
-                                        "peak_alt_band_10",
-                                        "peak_altitude",
-                                        "sort_size_metric",
-                                        "primary_id",
-                                    ],
-                                    ascending=[False, False, False, False, False, False, True],
-                                ).reset_index(drop=True)
-                                total_results_uncapped = int(len(recommended))
+                            recommended = recommended.sort_values(
+                                by=[
+                                    "filter_match_tier",
+                                    "visibility_bin_15",
+                                    "selected_visible_minutes",
+                                    "peak_alt_band_10",
+                                    "peak_altitude",
+                                    "sort_size_metric",
+                                    "primary_id",
+                                ],
+                                ascending=[False, False, False, False, False, False, True],
+                            ).reset_index(drop=True)
+                            total_results_uncapped = int(len(recommended))
 
         update_query_progress(88, "Searching recommendations: applying limits and sorting...")
         update_query_progress(100, "Searching recommendations: ready.")
