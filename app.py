@@ -8,6 +8,7 @@ import re
 import uuid
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,7 +32,6 @@ from app_constants import (
     UI_THEME_LIGHT,
     UI_THEME_MONOKAI_ST3,
     WIND16,
-    WIND16_ARROWS,
 )
 from app_preferences import (
     PREFS_BOOTSTRAP_MAX_RUNS,
@@ -71,7 +71,7 @@ from lists.list_subsystem import (
     set_active_preview_list_id,
     toggle_target_in_list,
 )
-from lists.list_search import searchbox_target_options, subset_by_id_list
+from lists.list_search import subset_by_id_list
 from lists.list_settings_ui import render_lists_settings_section
 from geopy.geocoders import ArcGIS, Nominatim, Photon
 try:
@@ -83,10 +83,6 @@ except Exception:
     MacroElement = None
     Template = None
     st_folium = None
-try:
-    from streamlit_searchbox import st_searchbox
-except Exception:
-    st_searchbox = None
 try:
     from streamlit_vertical_slider import vertical_slider
 except Exception:
@@ -1726,11 +1722,11 @@ def render_sky_position_summary_table(
 
     if allow_list_membership_toggle:
         st.caption(
-            f"Search results choose the detail target. Use this table to highlight rows and update '{preview_list_name}'."
+            f"Recommended targets choose the detail target. Use this table to highlight rows and update '{preview_list_name}'."
         )
     else:
         st.caption(
-            f"Search results choose the detail target. '{preview_list_name}' is auto-managed from recent search selections."
+            f"Recommended targets choose the detail target. '{preview_list_name}' is auto-managed from recent selections."
         )
 
 
@@ -2047,249 +2043,859 @@ def render_target_recommendations(
     tzinfo: ZoneInfo,
     use_12_hour: bool,
 ) -> None:
-    st.markdown("#### Find New Targets")
+    del active_preview_list_ids
+    st.markdown("### Recommended Targets")
 
-    hour_starts = build_full_dark_hour_starts(window_start, window_end)
-    if not hour_starts:
-        st.caption("No full dark-hour windows available tonight.")
+    if catalog.empty:
+        st.info("Catalog is empty.")
         return
 
+    def _normalize_emission_band(value: Any) -> str:
+        token = re.sub(r"[^A-Za-z0-9]+", "", str(value or "").strip().upper())
+        if not token:
+            return ""
+        synonyms = {
+            "HALPHA": "HA",
+            "HABETA": "HB",
+            "HBETA": "HB",
+            "O3": "OIII",
+            "N2": "NII",
+            "S2": "SII",
+        }
+        return synonyms.get(token, token)
+
+    def _parse_emission_band_set(value: Any) -> set[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_parts = [str(item) for item in value]
+        else:
+            cleaned = str(value or "").replace("[", " ").replace("]", " ")
+            raw_parts = re.split(r"[;,/|]+", cleaned)
+        bands = {
+            _normalize_emission_band(part)
+            for part in raw_parts
+            if _normalize_emission_band(part)
+        }
+        return bands
+
+    def _filter_match_tier(target_bands: set[str], reference_bands: set[str]) -> int:
+        if not reference_bands:
+            return 0
+        overlap_count = len(target_bands & reference_bands)
+        if overlap_count <= 0:
+            return 0
+        if overlap_count >= len(reference_bands):
+            return 2
+        return 1
+
+    def _safe_positive_float(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric) or numeric <= 0.0:
+            return None
+        return float(numeric)
+
+    location = prefs["location"]
+    location_lat = float(location["lat"])
+    location_lon = float(location["lon"])
+    obstructions = prefs["obstructions"]
+
+    equipment_catalog = load_equipment_catalog()
+    categories = equipment_catalog.get("categories", [])
+    category_items_by_id: dict[str, dict[str, dict[str, Any]]] = {}
+    if isinstance(categories, list):
+        for category in categories:
+            if not isinstance(category, dict):
+                continue
+            category_id = str(category.get("id", "")).strip()
+            if not category_id:
+                continue
+            items = category.get("items", [])
+            if not isinstance(items, list):
+                continue
+            item_lookup = {
+                str(item.get("id", "")).strip(): item
+                for item in items
+                if isinstance(item, dict) and str(item.get("id", "")).strip()
+            }
+            category_items_by_id[category_id] = item_lookup
+
+    owned_equipment = prefs.get("equipment", {})
+    if not isinstance(owned_equipment, dict):
+        owned_equipment = {}
+
+    owned_telescope_ids = [str(item).strip() for item in owned_equipment.get("telescopes", []) if str(item).strip()]
+    owned_filter_ids = [str(item).strip() for item in owned_equipment.get("filters", []) if str(item).strip()]
+    owned_accessory_ids = {
+        str(item).strip()
+        for item in owned_equipment.get("accessories", [])
+        if str(item).strip()
+    }
+
+    telescope_lookup = category_items_by_id.get("telescopes", {})
+    owned_telescopes = [telescope_lookup[item_id] for item_id in owned_telescope_ids if item_id in telescope_lookup]
+
+    filter_lookup = category_items_by_id.get("filters", {})
+    owned_filters = [filter_lookup[item_id] for item_id in owned_filter_ids if item_id in filter_lookup]
+    owned_filter_band_sets = [_parse_emission_band_set(item.get("emission_bands", [])) for item in owned_filters]
+    owned_filter_band_sets = [item for item in owned_filter_band_sets if item]
+
+    eq_owned = "equatorial-mount" in owned_accessory_ids
+
+    hour_starts = build_full_dark_hour_starts(window_start, window_end)
     hour_options = [hour_start.isoformat() for hour_start in hour_starts]
     hour_labels = {
         option: format_hour_window_label(pd.Timestamp(option), use_12_hour=use_12_hour)
         for option in hour_options
     }
+    hour_option_to_key = {option: normalize_hour_key(option) for option in hour_options}
 
-    now_local = pd.Timestamp(datetime.now(tzinfo))
-    default_hour_option = hour_options[0]
-    for hour_start in hour_starts:
-        if hour_start <= now_local < hour_start + pd.Timedelta(hours=1):
-            default_hour_option = hour_start.isoformat()
-            break
+    weather_rows = fetch_hourly_weather(
+        lat=location_lat,
+        lon=location_lon,
+        tz_name=tzinfo.key,
+        start_local_iso=window_start.isoformat(),
+        end_local_iso=window_end.isoformat(),
+        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+    )
+    weather_by_hour: dict[str, dict[str, Any]] = {}
+    for weather_row in weather_rows:
+        hour_key = normalize_hour_key(weather_row.get("time_iso"))
+        if not hour_key:
+            continue
+        weather_by_hour[hour_key] = weather_row
 
-    hour_state_key = "target_recommend_hour_option"
-    if str(st.session_state.get(hour_state_key, "")).strip() not in hour_options:
-        st.session_state[hour_state_key] = default_hour_option
+    def _metric_or_inf(weather_row: dict[str, Any] | None, field_name: str) -> float:
+        if not isinstance(weather_row, dict):
+            return float("inf")
+        try:
+            value = float(weather_row.get(field_name))
+        except (TypeError, ValueError):
+            return float("inf")
+        if not np.isfinite(value):
+            return float("inf")
+        return float(value)
 
-    catalog_groups = catalog["object_type_group"].map(normalize_object_type_group)
-    global_group_counts = catalog_groups.value_counts()
-    group_options = [str(group).strip() for group in global_group_counts.index.tolist() if str(group).strip()]
+    best_visible_hour_option: str | None = None
+    if hour_options:
+        ranked_hours: list[tuple[float, float, float, int, str]] = []
+        for option_idx, hour_option in enumerate(hour_options):
+            hour_key = hour_option_to_key.get(hour_option, "")
+            hour_weather = weather_by_hour.get(hour_key)
+            cloud_cover_rank = _metric_or_inf(hour_weather, "cloud_cover")
+            wind_rank = _metric_or_inf(hour_weather, "wind_gusts_10m")
+            if not np.isfinite(wind_rank):
+                wind_rank = _metric_or_inf(hour_weather, "wind_speed_10m")
+            humidity_rank = _metric_or_inf(hour_weather, "relative_humidity_2m")
+            ranked_hours.append((cloud_cover_rank, wind_rank, humidity_rank, option_idx, hour_option))
+        best_visible_hour_option = min(ranked_hours)[-1]
+
+    groups_series = catalog["object_type_group"].map(normalize_object_type_group)
+    group_options = [str(group).strip() for group in groups_series.value_counts().index.tolist() if str(group).strip()]
     if not group_options:
         group_options = ["other"]
 
-    list_targets = subset_by_id_list(catalog, active_preview_list_ids)
-    default_group = group_options[0]
-    if not list_targets.empty and "object_type_group" in list_targets.columns:
-        list_group_counts = list_targets["object_type_group"].map(normalize_object_type_group).value_counts()
-        if not list_group_counts.empty:
-            candidate_default_group = str(list_group_counts.index[0]).strip()
-            if candidate_default_group in group_options:
-                default_group = candidate_default_group
+    visible_hour_key = "recommended_targets_visible_hours"
+    object_type_key = "recommended_targets_object_types"
+    keyword_key = "recommended_targets_keyword"
+    filter_key = "recommended_targets_filter_id"
+    mount_key = "recommended_targets_mount_mode"
+    telescope_radio_key = "recommended_targets_telescope_id"
+    telescope_single_key = "recommended_targets_single_telescope_enabled"
+    min_size_enabled_key = "recommended_targets_min_size_enabled"
+    min_size_value_key = "recommended_targets_min_size_pct"
+    page_size_key = "recommended_targets_page_size"
+    page_number_key = "recommended_targets_page_number"
+    sort_field_key = "recommended_targets_sort_field"
+    sort_direction_key = "recommended_targets_sort_direction"
+    sort_signature_key = "recommended_targets_sort_signature"
+    signature_key = "recommended_targets_criteria_signature"
+    selection_token_key = "recommended_targets_selection_token"
 
-    group_state_key = "target_recommend_group_options"
-    raw_group_state = st.session_state.get(group_state_key, [])
-    if isinstance(raw_group_state, str):
-        normalized_group_state = [raw_group_state]
-    elif isinstance(raw_group_state, (list, tuple, set)):
-        normalized_group_state = [str(item).strip() for item in raw_group_state if str(item).strip()]
+    if visible_hour_key not in st.session_state:
+        st.session_state[visible_hour_key] = [best_visible_hour_option] if best_visible_hour_option else []
+
+    raw_visible_hours = st.session_state.get(visible_hour_key, [])
+    if isinstance(raw_visible_hours, str):
+        normalized_visible_hours = [raw_visible_hours.strip()] if raw_visible_hours.strip() else []
+    elif isinstance(raw_visible_hours, (list, tuple, set)):
+        normalized_visible_hours = [str(item).strip() for item in raw_visible_hours if str(item).strip()]
     else:
-        normalized_group_state = []
-    normalized_group_state = [group for group in normalized_group_state if group in group_options]
-    if not normalized_group_state:
-        normalized_group_state = [default_group]
-    st.session_state[group_state_key] = normalized_group_state
+        normalized_visible_hours = []
+    had_raw_visible_hours = len(normalized_visible_hours) > 0
+    normalized_visible_hours = [item for item in normalized_visible_hours if item in hour_options]
+    if not normalized_visible_hours and had_raw_visible_hours and best_visible_hour_option:
+        normalized_visible_hours = [best_visible_hour_option]
+    st.session_state[visible_hour_key] = normalized_visible_hours
 
-    controls = st.columns([2, 2, 1], gap="small")
-    selected_hour_option = controls[0].selectbox(
-        "Dark Hour",
-        options=hour_options,
-        key=hour_state_key,
-        format_func=lambda option: hour_labels.get(option, option),
+    raw_groups = st.session_state.get(object_type_key, [])
+    if isinstance(raw_groups, str):
+        normalized_groups = [raw_groups.strip()] if raw_groups.strip() else []
+    elif isinstance(raw_groups, (list, tuple, set)):
+        normalized_groups = [str(item).strip() for item in raw_groups if str(item).strip()]
+    else:
+        normalized_groups = []
+    normalized_groups = [group for group in normalized_groups if group in group_options]
+    st.session_state[object_type_key] = normalized_groups
+
+    if not isinstance(st.session_state.get(keyword_key), str):
+        st.session_state[keyword_key] = ""
+
+    filter_options = ["__none__"] + [str(item.get("id", "")).strip() for item in owned_filters if str(item.get("id", "")).strip()]
+    if str(st.session_state.get(filter_key, "__none__")).strip() not in filter_options:
+        st.session_state[filter_key] = "__none__"
+
+    default_mount_option = "EQ" if eq_owned else "Alt/Az"
+    normalized_mount_selection = str(st.session_state.get(mount_key, default_mount_option)).strip()
+    if normalized_mount_selection == "none":
+        normalized_mount_selection = "None"
+    if normalized_mount_selection not in {"None", "EQ", "Alt/Az"}:
+        normalized_mount_selection = default_mount_option
+    st.session_state[mount_key] = normalized_mount_selection
+
+    if len(owned_telescopes) > 1:
+        telescope_options = ["__any__"] + [
+            str(item.get("id", "")).strip()
+            for item in owned_telescopes
+            if str(item.get("id", "")).strip()
+        ]
+        if str(st.session_state.get(telescope_radio_key, "__any__")).strip() not in telescope_options:
+            st.session_state[telescope_radio_key] = "__any__"
+    else:
+        st.session_state[telescope_radio_key] = "__any__"
+
+    if telescope_single_key not in st.session_state:
+        st.session_state[telescope_single_key] = True
+    if min_size_enabled_key not in st.session_state:
+        st.session_state[min_size_enabled_key] = False
+    if min_size_value_key not in st.session_state:
+        st.session_state[min_size_value_key] = 0
+    if page_size_key not in st.session_state:
+        st.session_state[page_size_key] = 20
+    elif int(st.session_state.get(page_size_key, 20)) not in {10, 20, 100}:
+        st.session_state[page_size_key] = 20
+    if not isinstance(st.session_state.get(page_number_key), int):
+        st.session_state[page_number_key] = 1
+    if str(st.session_state.get(sort_direction_key, "Descending")).strip() not in {"Descending", "Ascending"}:
+        st.session_state[sort_direction_key] = "Descending"
+
+    criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 3, 2], gap="small")
+    with criteria_col_1:
+        selected_visible_hours = st.multiselect(
+            "Visible Hour",
+            options=hour_options,
+            default=normalized_visible_hours,
+            key=visible_hour_key,
+            format_func=lambda option: hour_labels.get(option, option),
+            help=(
+                "Defaults to the best hour (lowest cloud cover, then wind, then relative humidity, then earliest). "
+                "If empty, all hours in the selected night are considered."
+            ),
+        )
+        selected_object_types = st.multiselect(
+            "Object Type",
+            options=group_options,
+            default=normalized_groups,
+            key=object_type_key,
+            help="Optional. If empty, any object type can be returned.",
+        )
+        keyword_query = st.text_input(
+            "Keyword",
+            key=keyword_key,
+            placeholder="id, name, alias, description, emissions",
+        )
+        st.caption("Optional. Leave blank to search all targets.")
+
+    selected_telescope: dict[str, Any] | None = None
+    selected_filter_id = "__none__"
+    with criteria_col_2:
+        if len(owned_telescopes) == 1:
+            only_telescope = owned_telescopes[0]
+            only_name = str(only_telescope.get("name", "")).strip() or "Selected telescope"
+            use_single_telescope = st.checkbox(
+                f"Telescope: {only_name}",
+                key=telescope_single_key,
+            )
+            if use_single_telescope:
+                selected_telescope = only_telescope
+        elif len(owned_telescopes) > 1:
+            telescope_choice = st.radio(
+                "Telescope",
+                options=["__any__"] + [str(item.get("id", "")).strip() for item in owned_telescopes],
+                horizontal=False,
+                key=telescope_radio_key,
+                format_func=lambda item_id: (
+                    "Any telescope (none selected)"
+                    if item_id == "__any__"
+                    else str(telescope_lookup.get(item_id, {}).get("name", item_id))
+                ),
+            )
+            if telescope_choice != "__any__":
+                selected_telescope = telescope_lookup.get(telescope_choice)
+        else:
+            st.caption("Telescope: unavailable (no owned telescopes).")
+
+        if owned_filters:
+            selected_filter_id = st.selectbox(
+                "Camera Filter",
+                options=filter_options,
+                key=filter_key,
+                format_func=lambda item_id: (
+                    "Any (no filter selected)"
+                    if item_id == "__none__"
+                    else str(filter_lookup.get(item_id, {}).get("name", item_id))
+                ),
+            )
+        else:
+            st.caption("Camera Filter: unavailable (no owned filters).")
+
+        mount_selection = st.segmented_control(
+            "Mount accomodations:",
+            options=["None", "EQ", "Alt/Az"],
+            default=str(st.session_state.get(mount_key, default_mount_option)),
+            key=mount_key,
+            help="Used to refine visibility time to account for edge cases for each mount type",
+        )
+        mount_selection = str(mount_selection or st.session_state.get(mount_key, default_mount_option)).strip()
+        if mount_selection == "none":
+            mount_selection = "None"
+        if mount_selection not in {"None", "EQ", "Alt/Az"}:
+            mount_selection = default_mount_option
+        mount_note_text = ""
+        if mount_selection == "EQ":
+            mount_note_text = "increased likelyhood of star trails when target is below 30 degrees"
+        elif mount_selection == "Alt/Az":
+            mount_note_text = "increased likelyhood of field rotation artifacts above 80 degrees"
+        if mount_note_text:
+            st.caption(mount_note_text)
+        if mount_selection == "EQ":
+            mount_mode = "eq"
+        elif mount_selection == "Alt/Az":
+            mount_mode = "altaz"
+        else:
+            mount_mode = "none"
+
+    selected_filter_item = filter_lookup.get(selected_filter_id) if selected_filter_id != "__none__" else None
+    selected_filter_bands = _parse_emission_band_set(selected_filter_item.get("emission_bands", [])) if selected_filter_item else set()
+
+    telescope_fov_maj = _safe_positive_float(selected_telescope.get("fov_maj_deg")) if selected_telescope else None
+    telescope_fov_min = _safe_positive_float(selected_telescope.get("fov_min_deg")) if selected_telescope else None
+    telescope_fov_area = (
+        float(telescope_fov_maj * telescope_fov_min)
+        if telescope_fov_maj is not None and telescope_fov_min is not None
+        else None
     )
-    selected_group_options = controls[1].multiselect(
-        "Object Type Group",
-        options=group_options,
-        key=group_state_key,
-    )
-    find_targets_clicked = controls[2].button(
-        "Find Targets",
+
+    use_minimum_size = False
+    minimum_size_pct: float | None = None
+    with criteria_col_3:
+        if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
+            use_minimum_size = st.checkbox("Enable Minimum Size", key=min_size_enabled_key)
+            slider_disabled = not use_minimum_size
+            min_size_value = st.slider(
+                "Minimum Size (% of FOV)",
+                min_value=0,
+                max_value=200,
+                value=int(st.session_state.get(min_size_value_key, 0)),
+                step=1,
+                key=min_size_value_key,
+                disabled=slider_disabled,
+            )
+            if use_minimum_size:
+                minimum_size_pct = float(min_size_value)
+        else:
+            st.caption("Minimum Size filter requires a selected telescope with FOV dimensions.")
+        st.caption("Minimum Brightness filter deferred to #86.")
+
+    action_row = st.columns([1, 4], gap="small")
+    search_clicked = action_row[0].button(
+        "Search",
+        key="recommended_targets_search_button",
+        type="primary",
         use_container_width=True,
-        key="target_recommend_find_button",
+    )
+    action_row[1].caption("Adjust criteria and click Search to refresh recommendations.")
+    _ = search_clicked
+
+    query_started_at = perf_counter()
+    query_progress_placeholder = st.empty()
+    query_progress = query_progress_placeholder.progress(
+        1,
+        text="Searching recommendations: preparing query...",
     )
 
-    results_state_key = "target_recommend_results_rows"
-    query_state_key = "target_recommend_results_query"
-    selection_state_key = "target_recommend_table_selection_token"
+    def update_query_progress(value: int, text: str) -> None:
+        clamped_value = max(0, min(100, int(value)))
+        query_progress.progress(clamped_value, text=text)
 
-    if find_targets_clicked:
-        selected_hour_ts = pd.Timestamp(selected_hour_option)
-        recommended = compute_hourly_target_recommendations(
-            catalog,
-            lat=float(prefs["location"]["lat"]),
-            lon=float(prefs["location"]["lon"]),
-            hour_start_local=selected_hour_ts,
-            obstructions=prefs["obstructions"],
-            object_type_groups=selected_group_options,
-            exclude_ids={str(item) for item in active_preview_list_ids},
-            max_results=50,
-        )
-        st.session_state[results_state_key] = recommended.to_dict(orient="records")
-        st.session_state[query_state_key] = {
-            "hour_option": selected_hour_option,
-            "group_options": list(selected_group_options),
-        }
-        st.session_state[selection_state_key] = ""
+    def clear_query_progress() -> None:
+        query_progress_placeholder.empty()
 
-    query_state = st.session_state.get(query_state_key, {})
-    results_rows = st.session_state.get(results_state_key, [])
-    has_query = bool(str(query_state.get("hour_option", "")).strip())
-    if not results_rows and not has_query:
-        st.caption("Choose an hour and one or more object type groups, then click Find Targets.")
-        return
+    selected_visible_hour_keys = {
+        key
+        for option in selected_visible_hours
+        for key in [hour_option_to_key.get(option)]
+        if key
+    }
 
-    query_hour = str(query_state.get("hour_option", "")).strip()
-    raw_query_groups = query_state.get("group_options", query_state.get("group_option", []))
-    if isinstance(raw_query_groups, str):
-        query_groups = [raw_query_groups.strip()] if raw_query_groups.strip() else []
-    elif isinstance(raw_query_groups, (list, tuple, set)):
-        query_groups = [str(value).strip() for value in raw_query_groups if str(value).strip()]
+    criteria_signature = json.dumps(
+        {
+            "visible_hours": sorted(selected_visible_hour_keys),
+            "object_types": sorted(selected_object_types),
+            "keyword": str(keyword_query).strip().lower(),
+            "filter_id": selected_filter_id,
+            "mount_mode": mount_mode,
+            "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
+            "min_size_enabled": bool(use_minimum_size),
+            "min_size_pct": minimum_size_pct if minimum_size_pct is not None else "",
+            "window_start": pd.Timestamp(window_start).isoformat(),
+            "window_end": pd.Timestamp(window_end).isoformat(),
+        },
+        sort_keys=True,
+    )
+    if str(st.session_state.get(signature_key, "")) != criteria_signature:
+        st.session_state[signature_key] = criteria_signature
+        st.session_state[page_number_key] = 1
+        st.session_state[selection_token_key] = ""
+
+    update_query_progress(12, "Searching recommendations: evaluating weather conditions...")
+    cloud_cover_by_hour: dict[str, float] = {}
+    for weather_row in weather_rows:
+        hour_key = normalize_hour_key(weather_row.get("time_iso"))
+        if not hour_key:
+            continue
+        try:
+            cloud_value = float(weather_row.get("cloud_cover"))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(cloud_value):
+            cloud_cover_by_hour[hour_key] = float(cloud_value)
+
+    working_catalog = catalog.copy()
+    cleaned_keyword = str(keyword_query).strip()
+    if cleaned_keyword:
+        working_catalog = search_catalog(catalog, cleaned_keyword)
+
+    selected_object_type_values = [str(value).strip() for value in (selected_object_types or []) if str(value).strip()]
+    valid_group_set = {
+        normalize_object_type_group(value)
+        for value in group_options
+        if str(value).strip()
+    }
+    selected_group_set = {
+        normalize_object_type_group(value)
+        for value in selected_object_type_values
+        if normalize_object_type_group(value) in valid_group_set
+    }
+    if selected_object_type_values:
+        effective_group_set = selected_group_set if selected_group_set else set(valid_group_set)
     else:
-        query_groups = []
-    query_groups_display = ", ".join(query_groups) if query_groups else "-"
-    if query_hour:
-        query_hour_label = hour_labels.get(query_hour, query_hour)
-        st.caption(f"Results for {query_hour_label} | {query_groups_display}")
-    is_dark_theme = is_dark_ui_theme()
-    theme_palette = resolve_theme_palette()
-    dark_table_styles = theme_palette.get("dataframe_styler", {})
-    dark_td_bg = str(dark_table_styles.get("td_bg", "#0F172A"))
-    dark_td_text = str(dark_table_styles.get("td_text", "#E5E7EB"))
+        effective_group_set = set(valid_group_set)
+    if effective_group_set:
+        working_catalog = working_catalog[
+            working_catalog["object_type_group"].map(normalize_object_type_group).isin(effective_group_set)
+        ]
 
-    selected_groups_for_compare = [str(value).strip() for value in selected_group_options if str(value).strip()]
-    if query_hour != selected_hour_option or query_groups != selected_groups_for_compare:
-        st.caption("Selections changed. Click Find Targets to refresh.")
-
-    if not results_rows and has_query:
-        empty_table = pd.DataFrame(
-            columns=[
-                "Target",
-                "Object Type",
-                "Object Type Group",
-                "Emissions",
-                "Apparent Size",
-                "Peak",
-                "Max Alt",
-                "Direction",
-            ],
-        )
-        empty_table_styler: Any = empty_table.style
-        if is_dark_theme:
-            empty_table_styler = apply_dataframe_styler_theme(empty_table_styler)
-        st.dataframe(
-            empty_table_styler,
-            hide_index=True,
-            use_container_width=True,
-            key="target_recommendations_table_empty",
-            column_config={
-                "Target": st.column_config.TextColumn(width="large"),
-                "Object Type": st.column_config.TextColumn(width="small"),
-                "Object Type Group": st.column_config.TextColumn(width="small"),
-                "Emissions": st.column_config.TextColumn(width="medium"),
-                "Apparent Size": st.column_config.TextColumn(width="small"),
-                "Peak": st.column_config.TextColumn(width="small"),
-                "Max Alt": st.column_config.TextColumn(width="small"),
-                "Direction": st.column_config.TextColumn(width="small"),
-            },
-        )
-        st.caption("no objects of the designated type are visible during this time")
-        st.session_state[selection_state_key] = ""
+    if working_catalog.empty:
+        clear_query_progress()
+        st.info("No targets match the current criteria.")
         return
 
-    recommendation_df = pd.DataFrame(results_rows)
-    if recommendation_df.empty:
-        st.caption("no objects of the designated type are visible during this time")
-        st.session_state[selection_state_key] = ""
+    update_query_progress(28, "Searching recommendations: preparing coordinate candidates...")
+    candidate_columns = [
+        "primary_id",
+        "common_name",
+        "object_type",
+        "object_type_group",
+        "emission_lines",
+        "ang_size_maj_arcmin",
+        "ang_size_min_arcmin",
+        "ra_deg",
+        "dec_deg",
+    ]
+    candidates = working_catalog.loc[:, candidate_columns].copy()
+    candidates["ra_deg"] = pd.to_numeric(candidates["ra_deg"], errors="coerce")
+    candidates["dec_deg"] = pd.to_numeric(candidates["dec_deg"], errors="coerce")
+    candidates = candidates[np.isfinite(candidates["ra_deg"]) & np.isfinite(candidates["dec_deg"])]
+    if candidates.empty:
+        clear_query_progress()
+        st.info("No targets with valid coordinates match the current criteria.")
         return
 
-    recommendation_df["object_type_group"] = recommendation_df["object_type_group"].map(normalize_object_type_group)
-    display = recommendation_df.copy()
-    display["Object Type"] = display["object_type"].apply(
-        lambda value: str(value).strip() if str(value).strip() else "-"
+    update_query_progress(40, "Searching recommendations: sampling night window...")
+    sample_times_local = pd.date_range(
+        start=pd.Timestamp(window_start),
+        end=pd.Timestamp(window_end),
+        freq="10min",
+        inclusive="both",
     )
-    display["Object Type Group"] = display["object_type_group"]
-    display["Emissions"] = display["emissions"].apply(lambda value: str(value).strip() if str(value).strip() else "-")
-    display["Apparent Size"] = display["apparent_size"].apply(
-        lambda value: str(value).strip() if str(value).strip() else "-"
+    if sample_times_local.empty:
+        clear_query_progress()
+        st.info("No valid time samples available for this night.")
+        return
+
+    sample_hour_keys = [normalize_hour_key(hour_ts.floor("h")) for hour_ts in sample_times_local]
+    cloud_ok_mask = np.array(
+        [
+            (hour_key in cloud_cover_by_hour) and (float(cloud_cover_by_hour[hour_key]) < 30.0)
+            for hour_key in sample_hour_keys
+        ],
+        dtype=bool,
     )
-    display["Peak"] = display["peak_time_local"].apply(
+    if selected_visible_hour_keys:
+        selected_hours_mask = np.array(
+            [hour_key in selected_visible_hour_keys for hour_key in sample_hour_keys],
+            dtype=bool,
+        )
+    else:
+        selected_hours_mask = np.ones(len(sample_times_local), dtype=bool)
+
+    target_count = len(candidates)
+    time_count = len(sample_times_local)
+    location_obj = EarthLocation(lat=location_lat * u.deg, lon=location_lon * u.deg)
+    sample_times_utc = sample_times_local.tz_convert("UTC")
+
+    repeated_ra = np.tile(candidates["ra_deg"].to_numpy(dtype=float), time_count)
+    repeated_dec = np.tile(candidates["dec_deg"].to_numpy(dtype=float), time_count)
+    repeated_times = np.repeat(sample_times_utc.to_pydatetime(), target_count)
+
+    update_query_progress(56, "Searching recommendations: computing target altitude/azimuth tracks...")
+    coords = SkyCoord(ra=repeated_ra * u.deg, dec=repeated_dec * u.deg)
+    frame = AltAz(obstime=Time(repeated_times), location=location_obj)
+    altaz = coords.transform_to(frame)
+
+    altitude_matrix = np.asarray(altaz.alt.deg, dtype=float).reshape(time_count, target_count)
+    azimuth_matrix = np.asarray(altaz.az.deg % 360.0, dtype=float).reshape(time_count, target_count)
+    wind_index_matrix = (((azimuth_matrix + 11.25) // 22.5).astype(int)) % 16
+
+    obstruction_thresholds = np.array(
+        [float(obstructions.get(direction, 20.0)) for direction in WIND16],
+        dtype=float,
+    )
+    min_required_matrix = obstruction_thresholds[wind_index_matrix]
+    visible_matrix = (altitude_matrix >= 0.0) & (altitude_matrix >= min_required_matrix)
+
+    if mount_mode == "eq":
+        mount_mask = altitude_matrix >= 30.0
+    elif mount_mode == "altaz":
+        mount_mask = altitude_matrix <= 80.0
+    else:
+        mount_mask = np.ones_like(altitude_matrix, dtype=bool)
+
+    qualified_matrix_full_night = (
+        visible_matrix
+        & mount_mask
+        & cloud_ok_mask[:, np.newaxis]
+    )
+    qualified_matrix_selected_hours = (
+        visible_matrix
+        & mount_mask
+        & cloud_ok_mask[:, np.newaxis]
+        & selected_hours_mask[:, np.newaxis]
+    )
+
+    sample_minutes = 10
+    selected_visible_minutes = np.sum(qualified_matrix_selected_hours, axis=0).astype(int) * sample_minutes
+    full_night_visible_minutes = np.sum(qualified_matrix_full_night, axis=0).astype(int) * sample_minutes
+    has_duration = selected_visible_minutes > 0
+    if not np.any(has_duration):
+        clear_query_progress()
+        st.info("No targets meet the current visibility/weather/mount constraints.")
+        return
+
+    update_query_progress(72, "Searching recommendations: evaluating filter and visibility matches...")
+    peak_idx_by_target = np.argmax(altitude_matrix, axis=0)
+    peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(target_count)]
+    peak_time_local = np.array(
+        [sample_times_local[int(index)] for index in peak_idx_by_target],
+        dtype=object,
+    )
+    peak_direction = np.array(
+        [WIND16[int(wind_index_matrix[int(index), target_idx])] for target_idx, index in enumerate(peak_idx_by_target)],
+        dtype=object,
+    )
+
+    target_emission_sets = [_parse_emission_band_set(value) for value in candidates["emission_lines"].tolist()]
+    if selected_filter_item is not None and selected_filter_bands:
+        filter_match_tier = np.array(
+            [_filter_match_tier(target_bands, selected_filter_bands) for target_bands in target_emission_sets],
+            dtype=int,
+        )
+        filter_visibility_mask = filter_match_tier > 0
+    else:
+        if owned_filter_band_sets:
+            filter_match_tier = np.array(
+                [
+                    max(_filter_match_tier(target_bands, reference_bands) for reference_bands in owned_filter_band_sets)
+                    for target_bands in target_emission_sets
+                ],
+                dtype=int,
+            )
+        else:
+            filter_match_tier = np.zeros(target_count, dtype=int)
+        filter_visibility_mask = np.ones(target_count, dtype=bool)
+
+    eligible_mask = has_duration & filter_visibility_mask
+    if not np.any(eligible_mask):
+        clear_query_progress()
+        st.info("No targets match the selected camera filter.")
+        return
+
+    eligible_indices = np.where(eligible_mask)[0]
+    recommended = candidates.iloc[eligible_indices].copy()
+    recommended["visible_minutes"] = full_night_visible_minutes[eligible_indices]
+    recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
+    recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
+    recommended["peak_altitude"] = np.round(peak_altitude[eligible_indices], 1)
+    recommended["peak_time_local"] = peak_time_local[eligible_indices]
+    recommended["peak_direction"] = peak_direction[eligible_indices]
+    recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
+    recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
+    recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
+    recommended["apparent_size"] = recommended.apply(
+        lambda row: format_apparent_size_display(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+    recommended["apparent_size_sort_arcmin"] = recommended.apply(
+        lambda row: apparent_size_sort_key_arcmin(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+
+    primary_ids = recommended["primary_id"].astype(str)
+    common_names = recommended["common_name"].fillna("").astype(str).str.strip()
+    recommended["target_name"] = np.where(
+        common_names != "",
+        primary_ids + " - " + common_names,
+        primary_ids,
+    )
+    recommended["visibility_duration"] = recommended["visible_minutes"].map(
+        lambda minutes: f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}"
+    )
+    recommended["visibility_bin_15"] = np.floor_divide(recommended["selected_visible_minutes"], 15).astype(int)
+    recommended["peak_alt_band_10"] = np.floor(np.clip(recommended["peak_altitude"], 0.0, 90.0) / 10.0).astype(int)
+
+    recommended["framing_percent"] = np.nan
+    if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
+        target_maj_deg = pd.to_numeric(recommended["ang_size_maj_arcmin"], errors="coerce") / 60.0
+        target_min_deg = pd.to_numeric(recommended["ang_size_min_arcmin"], errors="coerce") / 60.0
+        target_maj_deg = target_maj_deg.where(target_maj_deg > 0.0)
+        target_min_deg = target_min_deg.where(target_min_deg > 0.0)
+        target_maj_deg = target_maj_deg.fillna(target_min_deg)
+        target_min_deg = target_min_deg.fillna(target_maj_deg)
+        target_area_deg2 = target_maj_deg * target_min_deg
+        framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
+        recommended["framing_percent"] = framing_percent
+
+        if minimum_size_pct is not None:
+            recommended = recommended[
+                recommended["framing_percent"].apply(
+                    lambda value: value is not None and not pd.isna(value) and np.isfinite(float(value))
+                    and float(value) >= float(minimum_size_pct)
+                )
+            ]
+
+    if recommended.empty:
+        clear_query_progress()
+        st.info("No targets remain after applying size/framing criteria.")
+        return
+
+    if selected_telescope is not None:
+        recommended["sort_size_metric"] = recommended["framing_percent"].apply(
+            lambda value: float(value) if value is not None and not pd.isna(value) and np.isfinite(float(value)) else -1.0
+        )
+    else:
+        recommended["sort_size_metric"] = recommended["apparent_size_sort_arcmin"].apply(
+            lambda value: float(value) if value is not None and not pd.isna(value) and np.isfinite(float(value)) else -1.0
+        )
+
+    recommended = recommended.sort_values(
+        by=[
+            "filter_match_tier",
+            "visibility_bin_15",
+            "selected_visible_minutes",
+            "peak_alt_band_10",
+            "peak_altitude",
+            "sort_size_metric",
+            "primary_id",
+        ],
+        ascending=[False, False, False, False, False, False, True],
+    ).reset_index(drop=True)
+    update_query_progress(88, "Searching recommendations: applying limits and sorting...")
+
+    if selected_filter_item is not None:
+        filter_name = str(selected_filter_item.get("name", "selected filter")).strip() or "selected filter"
+        st.caption(f"Camera filter applied: {filter_name} (hard-filter: any emission-band overlap required).")
+    elif owned_filter_band_sets:
+        st.caption("No camera filter selected; results are ranked by best filter-match tier across owned filters.")
+
+    max_results_limit = 1000
+    total_results_uncapped = int(len(recommended))
+    results_limited = total_results_uncapped > max_results_limit
+    if results_limited:
+        recommended = recommended.head(max_results_limit).copy().reset_index(drop=True)
+
+    sort_options: list[tuple[str, str]] = [
+        ("ranking", "Recommended"),
+        ("target_name", "Target Name"),
+        ("visible_minutes", "Duration of visibility"),
+        ("object_type", "Object Type"),
+        ("emissions", "Emissions"),
+        ("apparent_size_sort_arcmin", "Apparent size"),
+        ("peak_time_local", "Peak"),
+        ("peak_altitude", "Altitude at Peak"),
+        ("peak_direction", "Direction"),
+    ]
+    if selected_telescope is not None:
+        sort_options.insert(6, ("framing_percent", "Framing"))
+    sort_option_labels = {option_value: option_label for option_value, option_label in sort_options}
+    sort_option_values = [option_value for option_value, _ in sort_options]
+    if str(st.session_state.get(sort_field_key, "ranking")).strip() not in sort_option_labels:
+        st.session_state[sort_field_key] = "ranking"
+
+    sort_col, sort_order_col = st.columns([2, 1], gap="small")
+    sort_field = sort_col.selectbox(
+        "Sort results by",
+        options=sort_option_values,
+        key=sort_field_key,
+        format_func=lambda option_value: sort_option_labels.get(option_value, option_value),
+    )
+    sort_direction = sort_order_col.segmented_control(
+        "Order",
+        options=["Descending", "Ascending"],
+        key=sort_direction_key,
+    )
+    sort_direction = str(sort_direction or st.session_state.get(sort_direction_key, "Descending")).strip()
+    if sort_direction not in {"Descending", "Ascending"}:
+        sort_direction = "Descending"
+
+    sort_signature = f"{sort_field}|{sort_direction}"
+    if str(st.session_state.get(sort_signature_key, "")) != sort_signature:
+        st.session_state[sort_signature_key] = sort_signature
+        st.session_state[page_number_key] = 1
+
+    if sort_field == "ranking":
+        if sort_direction == "Ascending":
+            recommended = recommended.iloc[::-1].reset_index(drop=True)
+    else:
+        sort_ascending = sort_direction == "Ascending"
+        recommended = recommended.sort_values(
+            by=[sort_field, "target_name", "primary_id"],
+            ascending=[sort_ascending, True, True],
+            na_position="last",
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+    update_query_progress(100, "Searching recommendations: ready.")
+    clear_query_progress()
+
+    page_size = int(st.session_state.get(page_size_key, 20))
+    if page_size not in {10, 20, 100}:
+        page_size = 20
+        st.session_state[page_size_key] = page_size
+    total_results = int(len(recommended))
+    query_elapsed_seconds = max(0.0, perf_counter() - query_started_at)
+    query_elapsed_label = (
+        f"{query_elapsed_seconds * 1000.0:.0f} ms"
+        if query_elapsed_seconds < 1.0
+        else f"{query_elapsed_seconds:.2f} s"
+    )
+    total_pages = max(1, int(np.ceil(float(total_results) / float(page_size))))
+    current_page = int(st.session_state.get(page_number_key, 1))
+    if current_page < 1 or current_page > total_pages:
+        current_page = 1
+        st.session_state[page_number_key] = current_page
+    page_number = current_page
+    results_meta_col, query_meta_col = st.columns([4, 2], gap="small")
+    if results_limited:
+        results_meta_col.caption(
+            f"{total_results} of {total_results_uncapped} targets | page {page_number}/{total_pages}"
+        )
+    else:
+        results_meta_col.caption(f"{total_results} targets | page {page_number}/{total_pages}")
+    query_meta_col.caption(f"Query time: {query_elapsed_label}")
+    if results_limited:
+        st.warning(
+            f"Maximum results reached ({max_results_limit}). Add additional search criteria."
+        )
+
+    start_index = (page_number - 1) * int(page_size)
+    end_index = min(total_results, start_index + int(page_size))
+    page_frame = recommended.iloc[start_index:end_index].copy().reset_index(drop=True)
+
+    page_frame["Peak"] = page_frame["peak_time_local"].apply(
         lambda value: format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
         if value is not None and not pd.isna(value)
         else "--"
     )
-    display["Max Alt"] = display["max_alt_hour"].apply(
+    page_frame["Altitude at Peak"] = page_frame["peak_altitude"].apply(
         lambda value: f"{float(value):.1f} deg" if value is not None and not pd.isna(value) else "--"
     )
-    if "direction_during_hour" in display.columns:
-        direction_series = display["direction_during_hour"]
-    elif "peak_wind16" in display.columns:
-        direction_series = display["peak_wind16"]
-    else:
-        direction_series = pd.Series(["--"] * len(display), index=display.index)
-    display["Direction"] = direction_series.fillna("--").astype(str)
-    display_table = display[
-        [
-            "target",
-            "Object Type",
-            "Object Type Group",
-            "Emissions",
-            "Apparent Size",
-            "Peak",
-            "Max Alt",
-            "Direction",
-        ]
-    ].rename(
-        columns={"target": "Target"}
-    )
+    page_frame["Direction"] = page_frame["peak_direction"].fillna("--").astype(str)
 
-    def _style_recommendation_row(row: pd.Series) -> list[str]:
-        base_cell_style = f"background-color: {dark_td_bg}; color: {dark_td_text};" if is_dark_theme else ""
-        styles = [base_cell_style for _ in row]
-        source_row = recommendation_df.loc[row.name]
-        color = str(source_row.get("line_color", "")).strip()
-        row_primary_id = str(source_row.get("primary_id", "")).strip()
-        selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
-        if row_primary_id and selected_detail_id and row_primary_id == selected_detail_id:
-            selected_bg = _muted_rgba_from_hex(color, alpha=0.16)
-            for idx in range(len(styles)):
-                base_style = styles[idx]
-                if base_style and not base_style.endswith(";"):
-                    base_style = f"{base_style};"
-                styles[idx] = f"{base_style} background-color: {selected_bg};"
-        if color:
-            target_idx = row.index.get_loc("Target")
-            base_style = styles[target_idx]
-            if base_style and not base_style.endswith(";"):
-                base_style = f"{base_style};"
-            styles[target_idx] = f"{base_style} color: {color}; font-weight: 700;"
-        return styles
+    display_columns = [
+        "target_name",
+        "visibility_duration",
+        "object_type",
+        "emissions",
+        "apparent_size",
+    ]
+    if selected_telescope is not None:
+        display_columns.append("framing_percent")
+    display_columns.extend(["Peak", "Altitude at Peak", "Direction"])
+
+    rename_columns = {
+        "target_name": "Target Name",
+        "visibility_duration": "Duration of visibility",
+        "object_type": "Object Type",
+        "emissions": "Emissions",
+        "apparent_size": "Apparent size",
+        "framing_percent": "Framing",
+    }
+    display_table = page_frame[display_columns].rename(columns=rename_columns)
+
+    column_config: dict[str, Any] = {
+        "Target Name": st.column_config.TextColumn(width="large"),
+        "Duration of visibility": st.column_config.TextColumn(width="small"),
+        "Object Type": st.column_config.TextColumn(width="small"),
+        "Emissions": st.column_config.TextColumn(width="small"),
+        "Apparent size": st.column_config.TextColumn(width="small"),
+        "Peak": st.column_config.TextColumn(width="small"),
+        "Altitude at Peak": st.column_config.TextColumn(width="small"),
+        "Direction": st.column_config.TextColumn(width="small"),
+    }
+    if "Framing" in display_table.columns:
+        column_config["Framing"] = st.column_config.NumberColumn(width="small", format="%.0f%%")
 
     recommendation_event = st.dataframe(
-        apply_dataframe_styler_theme(display_table.style.apply(_style_recommendation_row, axis=1)),
+        apply_dataframe_styler_theme(display_table.style),
         hide_index=True,
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
-        key="target_recommendations_table",
-        column_config={
-            "Target": st.column_config.TextColumn(width="large"),
-            "Object Type": st.column_config.TextColumn(width="small"),
-            "Object Type Group": st.column_config.TextColumn(width="small"),
-            "Emissions": st.column_config.TextColumn(width="medium"),
-            "Apparent Size": st.column_config.TextColumn(width="small"),
-            "Peak": st.column_config.TextColumn(width="small"),
-            "Max Alt": st.column_config.TextColumn(width="small"),
-            "Direction": st.column_config.TextColumn(width="small"),
-        },
+        key="recommended_targets_table",
+        column_config=column_config,
+    )
+
+    per_page_col, page_col = st.columns([1, 1], gap="small")
+    per_page_col.selectbox(
+        "Results per page",
+        options=[10, 20, 100],
+        key=page_size_key,
+    )
+    page_col.number_input(
+        "Page",
+        min_value=1,
+        max_value=total_pages,
+        value=page_number,
+        step=1,
+        key=page_number_key,
     )
 
     selected_rows: list[int] = []
@@ -2301,29 +2907,31 @@ def render_target_recommendations(
                 selection_payload = recommendation_event.get("selection", {})
                 selected_rows = list(selection_payload.get("rows", []))
 
-    selected_index: int | None = None
-    if selected_rows:
-        try:
-            parsed_row_index = int(selected_rows[0])
-            if 0 <= parsed_row_index < len(recommendation_df):
-                selected_index = parsed_row_index
-        except (TypeError, ValueError):
-            selected_index = None
-
-    if selected_index is None:
-        st.session_state[selection_state_key] = ""
+    if not selected_rows:
+        st.session_state[selection_token_key] = ""
         return
 
-    selected_primary_id = str(recommendation_df.iloc[selected_index].get("primary_id", "")).strip()
+    selected_index = None
+    try:
+        parsed_index = int(selected_rows[0])
+        if 0 <= parsed_index < len(page_frame):
+            selected_index = parsed_index
+    except (TypeError, ValueError):
+        selected_index = None
+
+    if selected_index is None:
+        st.session_state[selection_token_key] = ""
+        return
+
+    selected_primary_id = str(page_frame.iloc[selected_index].get("primary_id", "")).strip()
     if not selected_primary_id:
         return
 
-    selection_token = f"{selected_index}:{selected_primary_id}"
-    last_selection_token = str(st.session_state.get(selection_state_key, ""))
-    if selection_token == last_selection_token:
+    selection_token = f"{page_number}:{selected_index}:{selected_primary_id}"
+    if str(st.session_state.get(selection_token_key, "")) == selection_token:
         return
 
-    st.session_state[selection_state_key] = selection_token
+    st.session_state[selection_token_key] = selection_token
     current_selected_id = str(st.session_state.get("selected_id") or "").strip()
     if selected_primary_id != current_selected_id:
         st.session_state["selected_id"] = selected_primary_id
@@ -3961,7 +4569,7 @@ def build_path_plot(
 
     fig.update_layout(
         title="Target Paths",
-        height=330,
+        height=360,
         margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
         plot_bgcolor=theme_colors["plot_bg"],
@@ -3972,7 +4580,8 @@ def build_path_plot(
     )
     fig.update_xaxes(tickvals=[i * 22.5 for i in range(16)], ticktext=WIND16, range=[0, 360])
     fig.update_yaxes(
-        range=[0, 90],
+        range=[-12, 90],
+        tickvals=[0, 15, 30, 45, 60, 75, 90],
         showgrid=True,
         gridcolor=theme_colors["grid"],
         gridwidth=1,
@@ -4819,81 +5428,6 @@ def sanitize_saved_lists(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
         save_preferences(prefs)
 
 
-def render_searchbox_results(
-    catalog: pd.DataFrame,
-    *,
-    prefs: dict[str, Any] | None = None,
-    lat: float,
-    lon: float,
-    listed_ids: list[str] | set[str] | None = None,
-) -> str | None:
-    if catalog.empty:
-        st.info("No targets matched that search.")
-        return None
-
-    current_selected = str(st.session_state.get("selected_id") or "").strip()
-
-    if st_searchbox is None:
-        st.warning("`streamlit-searchbox` is unavailable; install dependencies to enable searchbox UI.")
-        return None
-
-    picked = st_searchbox(
-        search_function=lambda search_term: searchbox_target_options(
-            search_term,
-            catalog=catalog,
-            lat=lat,
-            lon=lon,
-            listed_ids=listed_ids,
-            max_options=20,
-            wind16_arrows=WIND16_ARROWS,
-            search_catalog_fn=search_catalog,
-            compute_altaz_now_fn=compute_altaz_now,
-        ),
-        label="Search",
-        placeholder="Type to search targets (M31, NGC 7000, Orion Nebula...)",
-        key="targets_searchbox_component",
-        help="Type to filter suggestions, then use arrow keys + Enter to select.",
-        clear_on_submit=True,
-        edit_after_submit="option",
-        rerun_on_update=True,
-        debounce=150,
-    )
-
-    picked_value = str(picked).strip() if picked is not None else ""
-    if picked_value:
-        last_applied_pick = str(st.session_state.get("targets_searchbox_last_applied_pick", "")).strip()
-        if picked_value != last_applied_pick:
-            st.session_state["selected_id"] = picked_value
-            st.session_state["targets_searchbox_last_applied_pick"] = picked_value
-            if isinstance(prefs, dict) and push_target_to_auto_recent_list(prefs, picked_value):
-                st.session_state["prefs"] = prefs
-                save_preferences(prefs)
-        st.caption(f"Selected: {picked_value}")
-        return picked_value
-    else:
-        st.session_state["targets_searchbox_last_applied_pick"] = ""
-
-    search_state = st.session_state.get("targets_searchbox_component")
-    search_term = str(search_state.get("search", "")).strip() if isinstance(search_state, dict) else ""
-    options_js = search_state.get("options_js", []) if isinstance(search_state, dict) else []
-    options_count = len(options_js) if isinstance(options_js, list) else 0
-
-    if search_term and options_count == 0:
-        st.caption("No targets matched that search.")
-        return None
-
-    if current_selected:
-        st.caption(f"No search selection. Detail remains on selected target: {current_selected}")
-        return None
-
-    if search_term:
-        st.caption("Use arrow keys and Enter to choose a target.")
-        return None
-
-    st.caption("No target selected. Type to search and choose a target.")
-    return None
-
-
 def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Series | None:
     selected_id = st.session_state.get("selected_id")
     selected = get_object_by_id(catalog, str(selected_id) if selected_id else "")
@@ -5723,16 +6257,23 @@ def render_detail_panel(
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
-    listed_ids = all_listed_ids_in_order(prefs)
+    recommendation_window_start, recommendation_window_end, recommendation_tzinfo = weather_forecast_window(
+        location_lat,
+        location_lon,
+        day_offset=normalized_forecast_day_offset,
+    )
+    active_preview_list_id_for_recommendations = get_active_preview_list_id(prefs)
+    active_preview_list_ids_for_recommendations = get_list_ids(prefs, active_preview_list_id_for_recommendations)
+
     with st.container(border=True):
-        st.markdown("### Find Target")
-        st.caption("Type to filter suggestions, then use arrow keys + Enter to select.")
-        render_searchbox_results(
+        render_target_recommendations(
             catalog,
-            prefs=prefs,
-            lat=location_lat,
-            lon=location_lon,
-            listed_ids=listed_ids,
+            prefs,
+            active_preview_list_ids=active_preview_list_ids_for_recommendations,
+            window_start=recommendation_window_start,
+            window_end=recommendation_window_end,
+            tzinfo=recommendation_tzinfo,
+            use_12_hour=use_12_hour,
         )
 
     if selected is None:
@@ -5919,15 +6460,6 @@ def render_detail_panel(
                     key="detail_unobstructed_area_plot",
                 )
                 st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
-                render_target_recommendations(
-                    catalog,
-                    prefs,
-                    active_preview_list_ids=active_preview_list_ids,
-                    window_start=window_start,
-                    window_end=window_end,
-                    tzinfo=tzinfo,
-                    use_12_hour=use_12_hour,
-                )
             with tips_col:
                 with st.container(border=True):
                     render_target_tips_panel(
@@ -6417,11 +6949,6 @@ def render_detail_panel(
         else:
             st.session_state.pop(WEATHER_ALERT_RAIN_BUCKET_STATE_KEY, None)
 
-        st.plotly_chart(
-            path_figure,
-            use_container_width=True,
-            key="detail_path_plot",
-        )
         summary_rows = build_sky_position_summary_rows(
             selected_id=target_id,
             selected_label=selected_label,
@@ -6438,6 +6965,45 @@ def render_detail_panel(
                 else [str(item) for item in active_preview_list_ids]
             ),
         )
+        highlight_for_area = summary_highlight_id if summary_highlight_id else target_id
+        unobstructed_area_tracks = [
+            {
+                "is_selected": target_id == highlight_for_area,
+                "label": selected_label,
+                "color": selected_color,
+                "line_width": selected_line_width,
+                "emission_lines_display": emission_details_display,
+                "track": track,
+            },
+            *[
+                {
+                    **preview_track,
+                    "is_selected": str(preview_track.get("primary_id", "")).strip() == highlight_for_area,
+                }
+                for preview_track in preview_tracks
+            ],
+        ]
+        path_col, area_col = st.columns([1, 1], gap="small")
+        with path_col:
+            st.plotly_chart(
+                path_figure,
+                use_container_width=True,
+                key="detail_path_plot",
+            )
+        with area_col:
+            st.plotly_chart(
+                build_unobstructed_altitude_area_plot(
+                    unobstructed_area_tracks,
+                    use_12_hour=use_12_hour,
+                    temperature_by_hour=temperatures,
+                    weather_by_hour=weather_by_hour,
+                    temperature_unit=temperature_unit,
+                ),
+                use_container_width=True,
+                key="detail_unobstructed_area_plot",
+            )
+            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
+
         local_now = datetime.now(tzinfo)
         show_remaining_column = window_start <= local_now <= window_end
         summary_col, tips_col = st.columns([3, 1], gap="medium")
@@ -6451,45 +7017,6 @@ def render_detail_panel(
                 allow_list_membership_toggle=(not preview_list_is_system),
                 show_remaining=show_remaining_column,
                 now_local=pd.Timestamp(local_now),
-            )
-            highlight_for_area = summary_highlight_id if summary_highlight_id else target_id
-            unobstructed_area_tracks = [
-                {
-                    "is_selected": target_id == highlight_for_area,
-                    "label": selected_label,
-                    "color": selected_color,
-                    "line_width": selected_line_width,
-                    "emission_lines_display": emission_details_display,
-                    "track": track,
-                },
-                *[
-                    {
-                        **preview_track,
-                        "is_selected": str(preview_track.get("primary_id", "")).strip() == highlight_for_area,
-                    }
-                    for preview_track in preview_tracks
-                ],
-            ]
-            st.plotly_chart(
-                build_unobstructed_altitude_area_plot(
-                    unobstructed_area_tracks,
-                    use_12_hour=use_12_hour,
-                    temperature_by_hour=temperatures,
-                    weather_by_hour=weather_by_hour,
-                    temperature_unit=temperature_unit,
-                ),
-                use_container_width=True,
-                key="detail_unobstructed_area_plot",
-            )
-            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
-            render_target_recommendations(
-                catalog,
-                prefs,
-                active_preview_list_ids=active_preview_list_ids,
-                window_start=window_start,
-                window_end=window_end,
-                tzinfo=tzinfo,
-                use_12_hour=use_12_hour,
             )
         with tips_col:
             summary_ids = {
