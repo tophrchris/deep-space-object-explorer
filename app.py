@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import html
 import json
 import re
+import uuid
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,9 @@ from astral.sun import sun
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 from app_constants import (
+    DEFAULT_LOCATION,
+    DEFAULT_SITE_ID,
+    DEFAULT_SITE_NAME,
     UI_THEME_AURA_DRACULA,
     UI_THEME_BLUE_LIGHT,
     UI_THEME_DARK,
@@ -110,6 +115,7 @@ from weather_service import (
 st.set_page_config(page_title="DSO Explorer", page_icon="✨", layout="wide")
 
 CATALOG_CACHE_PATH = Path("data/dso_catalog_cache.parquet")
+EQUIPMENT_CATALOG_PATH = Path("data/equipment/equipment_catalog.json")
 
 TEMPERATURE_UNIT_OPTIONS = {
     "Auto (browser)": "auto",
@@ -677,13 +683,322 @@ def is_default_site_name(label: Any) -> bool:
 
 def resolve_location_source_badge(source: Any) -> tuple[str, str] | None:
     normalized = str(source or "").strip().lower()
-    if normalized == "manual":
+    if normalized in {"manual", "search", "map"}:
         return ("found", "manual")
     if normalized == "browser":
         return ("Browser", "browser")
     if normalized == "ip":
         return ("IP", "ip")
     return None
+
+
+def default_site_definition(name: str = DEFAULT_SITE_NAME) -> dict[str, Any]:
+    site_name = str(name or "").strip() or DEFAULT_SITE_NAME
+    location = copy.deepcopy(DEFAULT_LOCATION)
+    location["label"] = site_name
+    return {
+        "name": site_name,
+        "location": location,
+        "obstructions": {direction: 20.0 for direction in WIND16},
+    }
+
+
+def site_ids_in_order(prefs: dict[str, Any]) -> list[str]:
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        return []
+
+    ordered: list[str] = []
+    raw_order = prefs.get("site_order", [])
+    if isinstance(raw_order, (list, tuple)):
+        for raw_site_id in raw_order:
+            site_id = str(raw_site_id).strip()
+            if site_id and site_id in sites and site_id not in ordered:
+                ordered.append(site_id)
+
+    for raw_site_id in sites.keys():
+        site_id = str(raw_site_id).strip()
+        if site_id and site_id not in ordered:
+            ordered.append(site_id)
+    return ordered
+
+
+def get_active_site_id(prefs: dict[str, Any]) -> str:
+    ordered = site_ids_in_order(prefs)
+    if not ordered:
+        return DEFAULT_SITE_ID
+    candidate = str(prefs.get("active_site_id", "")).strip()
+    return candidate if candidate in ordered else ordered[0]
+
+
+def get_site_definition(prefs: dict[str, Any], site_id: str) -> dict[str, Any]:
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        return default_site_definition()
+    site = sites.get(site_id)
+    if isinstance(site, dict):
+        return site
+    return default_site_definition()
+
+
+def sync_active_site_to_legacy_fields(prefs: dict[str, Any]) -> None:
+    ordered = site_ids_in_order(prefs)
+    if not ordered:
+        default_site = default_site_definition()
+        prefs["sites"] = {DEFAULT_SITE_ID: default_site}
+        prefs["site_order"] = [DEFAULT_SITE_ID]
+        prefs["active_site_id"] = DEFAULT_SITE_ID
+        ordered = [DEFAULT_SITE_ID]
+
+    active_site_id = get_active_site_id(prefs)
+    active_site = get_site_definition(prefs, active_site_id)
+    site_name = str(active_site.get("name") or "").strip() or DEFAULT_SITE_NAME
+    location = copy.deepcopy(active_site.get("location", DEFAULT_LOCATION))
+    if not str(location.get("label") or "").strip():
+        location["label"] = site_name
+    obstructions_raw = active_site.get("obstructions", {})
+    obstructions = {
+        direction: clamp_obstruction_altitude(
+            obstructions_raw.get(direction, 20.0) if isinstance(obstructions_raw, dict) else 20.0,
+            default=20.0,
+        )
+        for direction in WIND16
+    }
+
+    prefs["active_site_id"] = active_site_id
+    prefs["location"] = location
+    prefs["obstructions"] = obstructions
+
+
+def persist_legacy_fields_to_active_site(prefs: dict[str, Any]) -> None:
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        sites = {}
+    active_site_id = get_active_site_id(prefs)
+    current_site = get_site_definition(prefs, active_site_id)
+
+    location = prefs.get("location", {})
+    merged_location = copy.deepcopy(DEFAULT_LOCATION)
+    if isinstance(location, dict):
+        for key in merged_location:
+            if key in location:
+                merged_location[key] = location.get(key, merged_location[key])
+    location_label = str(merged_location.get("label") or "").strip()
+
+    obstructions = {
+        direction: clamp_obstruction_altitude(
+            prefs.get("obstructions", {}).get(direction, 20.0) if isinstance(prefs.get("obstructions"), dict) else 20.0,
+            default=20.0,
+        )
+        for direction in WIND16
+    }
+
+    site_name = str(current_site.get("name") or "").strip()
+    if location_label:
+        site_name = location_label
+    if not site_name:
+        site_name = DEFAULT_SITE_NAME
+        merged_location["label"] = site_name
+
+    sites[active_site_id] = {
+        "name": site_name,
+        "location": merged_location,
+        "obstructions": obstructions,
+    }
+    prefs["sites"] = sites
+
+    ordered = site_ids_in_order(prefs)
+    if active_site_id not in ordered:
+        ordered.append(active_site_id)
+    prefs["site_order"] = ordered
+    prefs["active_site_id"] = active_site_id
+    prefs["location"] = copy.deepcopy(merged_location)
+    prefs["obstructions"] = copy.deepcopy(obstructions)
+
+
+def set_active_site(prefs: dict[str, Any], site_id: str) -> bool:
+    ordered = site_ids_in_order(prefs)
+    if site_id not in ordered:
+        return False
+    changed = str(prefs.get("active_site_id", "")).strip() != site_id
+    prefs["active_site_id"] = site_id
+    sync_active_site_to_legacy_fields(prefs)
+    return changed
+
+
+def duplicate_site(prefs: dict[str, Any], site_id: str) -> str | None:
+    source_site = get_site_definition(prefs, site_id)
+    source_name = str(source_site.get("name") or "").strip() or DEFAULT_SITE_NAME
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        sites = {}
+
+    existing_names = {
+        str(site.get("name") or "").strip()
+        for site in sites.values()
+        if isinstance(site, dict) and str(site.get("name") or "").strip()
+    }
+    copy_index = 1
+    candidate_name = f"{source_name} - copy {copy_index}"
+    while candidate_name in existing_names:
+        copy_index += 1
+        candidate_name = f"{source_name} - copy {copy_index}"
+
+    duplicated = copy.deepcopy(source_site)
+    duplicated["name"] = candidate_name
+    duplicated_location = duplicated.get("location", {})
+    if isinstance(duplicated_location, dict):
+        duplicated_location["label"] = candidate_name
+        duplicated["location"] = duplicated_location
+
+    new_site_id = f"site_{uuid.uuid4().hex[:8]}"
+    sites[new_site_id] = duplicated
+    prefs["sites"] = sites
+
+    ordered = site_ids_in_order(prefs)
+    if site_id in ordered:
+        insert_idx = ordered.index(site_id) + 1
+        ordered.insert(insert_idx, new_site_id)
+    else:
+        ordered.append(new_site_id)
+    prefs["site_order"] = ordered
+    return new_site_id
+
+
+def create_site(prefs: dict[str, Any], name: str | None = None) -> str | None:
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        sites = {}
+
+    base_name = str(name or "").strip() or DEFAULT_SITE_NAME
+    existing_names = {
+        str(site.get("name") or "").strip().lower()
+        for site in sites.values()
+        if isinstance(site, dict) and str(site.get("name") or "").strip()
+    }
+    candidate_name = base_name
+    suffix = 2
+    while candidate_name.strip().lower() in existing_names:
+        candidate_name = f"{base_name} {suffix}"
+        suffix += 1
+
+    new_site_id = f"site_{uuid.uuid4().hex[:8]}"
+    sites[new_site_id] = default_site_definition(candidate_name)
+    prefs["sites"] = sites
+
+    ordered = site_ids_in_order(prefs)
+    if new_site_id not in ordered:
+        ordered.append(new_site_id)
+    prefs["site_order"] = ordered
+    return new_site_id
+
+
+def delete_site(prefs: dict[str, Any], site_id: str) -> bool:
+    ordered = site_ids_in_order(prefs)
+    if site_id not in ordered or len(ordered) <= 1:
+        return False
+
+    sites = prefs.get("sites", {})
+    if not isinstance(sites, dict):
+        return False
+    sites.pop(site_id, None)
+    prefs["sites"] = sites
+
+    ordered = [item for item in ordered if item != site_id]
+    prefs["site_order"] = ordered
+    if str(prefs.get("active_site_id", "")).strip() == site_id:
+        prefs["active_site_id"] = ordered[0]
+    sync_active_site_to_legacy_fields(prefs)
+    return True
+
+
+def get_site_name(prefs: dict[str, Any], site_id: str) -> str:
+    site = get_site_definition(prefs, site_id)
+    name = str(site.get("name") or "").strip()
+    if name:
+        return name
+    location = site.get("location", {})
+    if isinstance(location, dict):
+        location_label = str(location.get("label") or "").strip()
+        if location_label:
+            return location_label
+    return "Observation Site"
+
+
+def load_equipment_catalog(catalog_path: str = str(EQUIPMENT_CATALOG_PATH)) -> dict[str, Any]:
+    try:
+        raw_payload = json.loads(Path(catalog_path).read_text(encoding="utf-8"))
+    except Exception:
+        return {"categories": []}
+
+    categories: list[dict[str, Any]] = []
+    raw_categories = raw_payload.get("categories", [])
+    if not isinstance(raw_categories, list):
+        return {"categories": []}
+
+    for raw_category in raw_categories:
+        if not isinstance(raw_category, dict):
+            continue
+        category_id = str(raw_category.get("id") or "").strip()
+        if not category_id:
+            continue
+        label = str(raw_category.get("label") or category_id).strip() or category_id
+        description = str(raw_category.get("description") or "").strip()
+
+        display_columns: list[dict[str, str]] = []
+        raw_columns = raw_category.get("display_columns", [])
+        if isinstance(raw_columns, list):
+            for raw_column in raw_columns:
+                if not isinstance(raw_column, dict):
+                    continue
+                field = str(raw_column.get("field") or "").strip()
+                if not field:
+                    continue
+                column_label = str(raw_column.get("label") or field).strip() or field
+                display_columns.append({"field": field, "label": column_label})
+
+        items: list[dict[str, Any]] = []
+        raw_items = raw_category.get("items", [])
+        if isinstance(raw_items, list):
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                item_id = str(raw_item.get("id") or "").strip()
+                item_name = str(raw_item.get("name") or "").strip()
+                if not item_id or not item_name:
+                    continue
+                item_payload = {"id": item_id, "name": item_name}
+                for key, value in raw_item.items():
+                    if key in {"id", "name"}:
+                        continue
+                    item_payload[str(key)] = value
+                items.append(item_payload)
+
+        categories.append(
+            {
+                "id": category_id,
+                "label": label,
+                "description": description,
+                "display_columns": display_columns,
+                "items": items,
+            }
+        )
+
+    return {"categories": categories}
+
+
+def format_equipment_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return "; ".join(parts) if parts else "-"
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return "-"
+        return f"{value:.6g}"
+    text = str(value).strip()
+    return text if text else "-"
 
 
 def clamp_obstruction_altitude(value: Any, *, default: float = 20.0) -> float:
@@ -826,14 +1141,14 @@ def build_location_selection_map(lat: float, lon: float, *, zoom_start: int) -> 
 
 
 def apply_resolved_location(prefs: dict[str, Any], resolved_location: dict[str, Any]) -> tuple[str, bool]:
-    current_location = prefs.get("location", {})
-    current_label = str(current_location.get("label") or "").strip() if isinstance(current_location, dict) else ""
+    active_site = get_site_definition(prefs, get_active_site_id(prefs))
+    current_site_name = str(active_site.get("name") or "").strip()
     resolved_label = str(resolved_location.get("label") or "").strip()
 
-    keep_existing_site_name = bool(current_label) and not is_default_site_name(current_label)
-    next_label = current_label if keep_existing_site_name else resolved_label
+    keep_existing_site_name = bool(current_site_name) and not is_default_site_name(current_site_name)
+    next_label = current_site_name if keep_existing_site_name else resolved_label
     if not next_label:
-        next_label = current_label or resolved_label or "Observation Site"
+        next_label = current_site_name or resolved_label or DEFAULT_SITE_NAME
 
     lat = float(resolved_location["lat"])
     lon = float(resolved_location["lon"])
@@ -847,6 +1162,7 @@ def apply_resolved_location(prefs: dict[str, Any], resolved_location: dict[str, 
         "source": source,
         "resolved_at": resolved_at,
     }
+    persist_legacy_fields_to_active_site(prefs)
 
     result_label = resolved_label or f"{lat:.4f}, {lon:.4f}"
     return result_label, keep_existing_site_name
@@ -4192,7 +4508,7 @@ def resolve_manual_location(query: str) -> dict[str, Any] | None:
             "lat": lat,
             "lon": lon,
             "label": clean_label,
-            "source": "manual",
+            "source": "search",
             "resolved_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -4595,10 +4911,13 @@ def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Ser
 def render_location_settings_section(prefs: dict[str, Any]) -> None:
     st.subheader("Location")
     st.caption("Set location manually or with browser geolocation first. IP-based location is used only as fallback.")
+    sync_active_site_to_legacy_fields(prefs)
+    active_site_id = get_active_site_id(prefs)
+    active_site = get_site_definition(prefs, active_site_id)
     location = prefs["location"]
-    location_label = str(location.get("label") or "").strip() or "Observation Site"
-    label_editor_key = "location_name_inline_edit"
-    label_editor_sync_key = "location_name_inline_edit_synced_label"
+    location_label = str(active_site.get("name") or location.get("label") or "").strip() or DEFAULT_SITE_NAME
+    label_editor_key = f"location_name_inline_edit_{active_site_id}"
+    label_editor_sync_key = f"location_name_inline_edit_synced_label_{active_site_id}"
 
     if str(st.session_state.get(label_editor_sync_key, "")).strip() != location_label:
         st.session_state[label_editor_key] = location_label
@@ -4612,6 +4931,7 @@ def render_location_settings_section(prefs: dict[str, Any]) -> None:
         if edited_value == location_label:
             return
         prefs["location"]["label"] = edited_value
+        persist_legacy_fields_to_active_site(prefs)
         st.session_state["location_notice"] = f"Site name updated: {edited_value}."
         persist_and_rerun(prefs)
 
@@ -4657,10 +4977,10 @@ def render_location_settings_section(prefs: dict[str, Any]) -> None:
 
     form_col, _form_spacer_col = st.columns([3, 7], gap="large")
     with form_col:
-        with st.form("site_location_search_form"):
+        with st.form(f"site_location_search_form_{active_site_id}"):
             manual_location = st.text_input(
                 "Location",
-                key="manual_location",
+                key=f"manual_location_{active_site_id}",
                 placeholder="enter an address, zip code, or landmark",
             )
             search_col, browser_col = st.columns(2, gap="small")
@@ -4722,7 +5042,7 @@ def render_location_settings_section(prefs: dict[str, Any]) -> None:
             interactive_map,
             height=320,
             use_container_width=True,
-            key="site_location_selector_map",
+            key=f"site_location_selector_map_{active_site_id}",
         )
         clicked = map_event.get("last_clicked") if isinstance(map_event, dict) else None
         if isinstance(clicked, dict):
@@ -4745,7 +5065,7 @@ def render_location_settings_section(prefs: dict[str, Any]) -> None:
                         "lat": clicked_lat,
                         "lon": clicked_lon,
                         "label": reverse_geocode_label(clicked_lat, clicked_lon),
-                        "source": "manual",
+                        "source": "map",
                         "resolved_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
@@ -4771,6 +5091,8 @@ def render_location_settings_section(prefs: dict[str, Any]) -> None:
 def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
     st.subheader("Obstructions")
     st.caption("Choose an input method. All obstruction data is normalized and stored as WIND16.")
+    sync_active_site_to_legacy_fields(prefs)
+    active_site_id = get_active_site_id(prefs)
     current_obstructions = {
         direction: clamp_obstruction_altitude(prefs["obstructions"].get(direction), default=20.0)
         for direction in WIND16
@@ -4783,7 +5105,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         file_name=f"{filename_base}-obstructions.hrz",
         mime="text/plain",
         use_container_width=False,
-        key="obstruction_export_hrz_button",
+        key=f"obstruction_export_hrz_button_{active_site_id}",
     )
 
     def _apply_wind16_obstructions(next_values: dict[str, Any], *, success_message: str) -> None:
@@ -4793,6 +5115,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         }
         if normalized != prefs["obstructions"]:
             prefs["obstructions"] = normalized
+            persist_legacy_fields_to_active_site(prefs)
             save_preferences(prefs)
             st.success(success_message)
         else:
@@ -4802,7 +5125,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         "Obstruction input method",
         options=OBSTRUCTION_INPUT_MODES,
         horizontal=True,
-        key="obstruction_input_mode",
+        key=f"obstruction_input_mode_{active_site_id}",
     )
 
     if input_mode == OBSTRUCTION_INPUT_MODE_NESW:
@@ -4812,11 +5135,11 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         )
         for direction in CARDINAL_DIRECTIONS:
             sync_slider_state_value(
-                f"obstruction_cardinal_slider_{direction}",
+                f"obstruction_cardinal_slider_{active_site_id}_{direction}",
                 wind16_average,
             )
 
-        with st.form("obstruction_cardinal_form"):
+        with st.form(f"obstruction_cardinal_form_{active_site_id}"):
             slider_cols = st.columns(len(CARDINAL_DIRECTIONS), gap="small")
             cardinal_values: dict[str, float] = {}
             for idx, direction in enumerate(CARDINAL_DIRECTIONS):
@@ -4827,7 +5150,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
                             min_value=0,
                             max_value=90,
                             step=1,
-                            key=f"obstruction_cardinal_slider_{direction}",
+                            key=f"obstruction_cardinal_slider_{active_site_id}_{direction}",
                         )
                     )
             apply_cardinals = st.form_submit_button("Apply N/E/S/W to WIND16", use_container_width=True)
@@ -4846,13 +5169,13 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
             "Horizon file (.hrz)",
             type=["hrz"],
             accept_multiple_files=False,
-            key="obstruction_hrz_file",
+            key=f"obstruction_hrz_file_{active_site_id}",
         )
         apply_hrz = st.button(
             "Apply .hrz to WIND16",
             use_container_width=False,
             disabled=uploaded_hrz is None,
-            key="obstruction_hrz_apply_button",
+            key=f"obstruction_hrz_apply_button_{active_site_id}",
         )
 
         if apply_hrz and uploaded_hrz is not None:
@@ -4900,7 +5223,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
             use_container_width=True,
             num_rows="fixed",
             disabled=["Direction"],
-            key="obstruction_editor",
+            key=f"obstruction_editor_{active_site_id}",
         )
 
         edited_values = edited["Min Altitude (deg)"].tolist()
@@ -4910,6 +5233,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         }
         if next_obstructions != prefs["obstructions"]:
             prefs["obstructions"] = next_obstructions
+            persist_legacy_fields_to_active_site(prefs)
             save_preferences(prefs)
         return
 
@@ -4949,7 +5273,7 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         next_obstructions: dict[str, float] = {}
         for idx, direction in enumerate(WIND16):
             default_val = int(round(current_obstructions.get(direction, 20.0)))
-            state_key = f"obstruction_slider_{direction}"
+            state_key = f"obstruction_slider_{active_site_id}_{direction}"
             sync_slider_state_value(state_key, default_val)
             preview_value_raw = st.session_state.get(state_key, default_val)
             try:
@@ -4980,12 +5304,13 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
 
         if next_obstructions != prefs["obstructions"]:
             prefs["obstructions"] = next_obstructions
+            persist_legacy_fields_to_active_site(prefs)
             save_preferences(prefs)
 
 
-def render_site_page(prefs: dict[str, Any]) -> None:
-    st.title("Observation Site")
-    st.caption("Manage site name, location, and obstructions. Manual/browser location is primary; IP is fallback.")
+def render_sites_page(prefs: dict[str, Any]) -> None:
+    st.title("Observation Sites")
+    st.caption("Manage sites. One site is active at a time and used across Explorer weather/visibility calculations.")
 
     persistence_notice = st.session_state.get("prefs_persistence_notice", "")
     if persistence_notice:
@@ -4994,6 +5319,108 @@ def render_site_page(prefs: dict[str, Any]) -> None:
     location_notice = st.session_state.pop("location_notice", "")
     if location_notice:
         st.info(location_notice)
+
+    site_ids = site_ids_in_order(prefs)
+    active_site_id = get_active_site_id(prefs)
+    if active_site_id not in site_ids and site_ids:
+        active_site_id = site_ids[0]
+        set_active_site(prefs, active_site_id)
+
+    with st.container(border=True):
+        st.subheader("Sites")
+        rows: list[dict[str, str]] = []
+        for site_id in site_ids:
+            site = get_site_definition(prefs, site_id)
+            location = site.get("location", {})
+            lat_text = "-"
+            lon_text = "-"
+            try:
+                lat_text = f"{float(location.get('lat')):.4f}"
+                lon_text = f"{float(location.get('lon')):.4f}"
+            except (TypeError, ValueError):
+                pass
+            source_badge = resolve_location_source_badge(location.get("source"))
+            source_label = source_badge[0] if source_badge is not None else "-"
+            rows.append(
+                {
+                    "Active": "●" if site_id == active_site_id else "",
+                    "Name": get_site_name(prefs, site_id),
+                    "Latitude": lat_text,
+                    "Longitude": lon_text,
+                    "Source": source_label,
+                }
+            )
+        site_frame = pd.DataFrame(rows)
+        table_height = max(72, min(280, 36 * (len(site_frame) + 1)))
+        st.dataframe(site_frame, hide_index=True, use_container_width=True, height=table_height)
+
+        select_key = "sites_selected_site_id"
+        pending_select_key = "sites_selected_site_id_pending"
+        pending_selected = str(st.session_state.pop(pending_select_key, "")).strip()
+        if pending_selected in site_ids:
+            st.session_state[select_key] = pending_selected
+        selected_default = str(st.session_state.get(select_key, "")).strip()
+        if selected_default not in site_ids and site_ids:
+            selected_default = active_site_id
+            st.session_state[select_key] = selected_default
+        selected_site_id = st.selectbox(
+            "Selected site",
+            options=site_ids,
+            index=site_ids.index(selected_default) if selected_default in site_ids else 0,
+            key=select_key,
+            format_func=lambda site_id: get_site_name(prefs, site_id),
+        )
+
+        add_col, edit_col, duplicate_col, delete_col = st.columns(4, gap="small")
+        if add_col.button("Add new site", use_container_width=True, key="sites_add_button"):
+            created_site_id = create_site(prefs)
+            if created_site_id:
+                set_active_site(prefs, created_site_id)
+                st.session_state[pending_select_key] = created_site_id
+                st.session_state["location_notice"] = f"Created new site: {get_site_name(prefs, created_site_id)}."
+                persist_and_rerun(prefs)
+
+        if edit_col.button("Edit", use_container_width=True, key="sites_edit_button"):
+            changed = set_active_site(prefs, selected_site_id)
+            if changed:
+                st.session_state["location_notice"] = f"Active site set to: {get_site_name(prefs, selected_site_id)}."
+                persist_and_rerun(prefs)
+
+        if duplicate_col.button("Duplicate", use_container_width=True, key="sites_duplicate_button"):
+            duplicated_site_id = duplicate_site(prefs, selected_site_id)
+            if duplicated_site_id:
+                set_active_site(prefs, duplicated_site_id)
+                st.session_state[pending_select_key] = duplicated_site_id
+                st.session_state["location_notice"] = (
+                    f"Created duplicate site: {get_site_name(prefs, duplicated_site_id)}."
+                )
+                persist_and_rerun(prefs)
+
+        can_delete = len(site_ids) > 1
+        if delete_col.button(
+            "Delete",
+            use_container_width=True,
+            key="sites_delete_button",
+            disabled=not can_delete,
+        ):
+            st.session_state["sites_delete_pending_id"] = selected_site_id
+
+        pending_delete_id = str(st.session_state.get("sites_delete_pending_id", "")).strip()
+        if pending_delete_id and pending_delete_id in site_ids:
+            st.warning(f"Delete site '{get_site_name(prefs, pending_delete_id)}'? This cannot be undone.")
+            confirm_col, cancel_col = st.columns(2, gap="small")
+            if confirm_col.button("Confirm Delete", use_container_width=True, key="sites_delete_confirm_button"):
+                deleted_name = get_site_name(prefs, pending_delete_id)
+                if delete_site(prefs, pending_delete_id):
+                    st.session_state.pop("sites_delete_pending_id", None)
+                    st.session_state["location_notice"] = f"Deleted site: {deleted_name}."
+                    persist_and_rerun(prefs)
+            if cancel_col.button("Cancel", use_container_width=True, key="sites_delete_cancel_button"):
+                st.session_state.pop("sites_delete_pending_id", None)
+
+    sync_active_site_to_legacy_fields(prefs)
+    active_site_name = get_site_name(prefs, get_active_site_id(prefs))
+    st.caption(f"Editing active site: {active_site_name}")
 
     with st.container(border=True):
         render_location_settings_section(prefs)
@@ -5016,6 +5443,129 @@ def render_lists_page(prefs: dict[str, Any]) -> None:
             persist_and_rerun_fn=persist_and_rerun,
             show_subheader=False,
         )
+
+
+def render_equipment_page(prefs: dict[str, Any]) -> None:
+    st.title("Equipment")
+    st.caption("Store your telescopes/accessories/filters. Recommendation integration will come in a later update.")
+
+    persistence_notice = st.session_state.get("prefs_persistence_notice", "")
+    if persistence_notice:
+        st.warning(persistence_notice)
+
+    catalog = load_equipment_catalog()
+    categories = catalog.get("categories", [])
+    if not isinstance(categories, list) or not categories:
+        st.warning(f"No equipment catalog entries found at `{EQUIPMENT_CATALOG_PATH}`.")
+        return
+
+    current_equipment_raw = prefs.get("equipment", {})
+    if not isinstance(current_equipment_raw, dict):
+        current_equipment_raw = {}
+
+    def _normalize_selected_ids(raw_values: Any, allowed_ids: set[str]) -> list[str]:
+        normalized: list[str] = []
+        if not isinstance(raw_values, (list, tuple, set)):
+            return normalized
+        for raw_value in raw_values:
+            item_id = str(raw_value).strip()
+            if item_id and item_id in allowed_ids and item_id not in normalized:
+                normalized.append(item_id)
+        return normalized
+
+    next_equipment: dict[str, list[str]] = {}
+    current_equipment_known: dict[str, list[str]] = {}
+
+    with st.container(border=True):
+        st.subheader("Owned Equipment")
+        st.caption("Use the Owned column to select one or more items per table. Changes are saved automatically.")
+
+        for category in categories:
+            category_id = str(category.get("id", "")).strip()
+            if not category_id:
+                continue
+            label = str(category.get("label", category_id)).strip() or category_id
+            description = str(category.get("description", "")).strip()
+            items = category.get("items", [])
+            if not isinstance(items, list) or not items:
+                continue
+
+            item_by_id: dict[str, dict[str, Any]] = {}
+            ordered_item_ids: list[str] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id", "")).strip()
+                item_name = str(item.get("name", "")).strip()
+                if not item_id or not item_name:
+                    continue
+                item_by_id[item_id] = item
+                ordered_item_ids.append(item_id)
+            if not ordered_item_ids:
+                continue
+
+            allowed_ids = set(ordered_item_ids)
+            existing_selected = _normalize_selected_ids(current_equipment_raw.get(category_id, []), allowed_ids)
+            current_equipment_known[category_id] = existing_selected
+
+            st.markdown(f"#### {label}")
+            if description:
+                st.caption(description)
+
+            display_columns = category.get("display_columns", [])
+            parsed_columns = [
+                column
+                for column in display_columns
+                if isinstance(column, dict) and str(column.get("field", "")).strip()
+            ]
+            existing_set = set(existing_selected)
+            table_rows: list[dict[str, Any]] = []
+            for item_id in ordered_item_ids:
+                item = item_by_id[item_id]
+                row: dict[str, Any] = {
+                    "Owned": item_id in existing_set,
+                    "Name": str(item.get("name", item_id)).strip() or item_id,
+                }
+                for column in parsed_columns:
+                    field = str(column.get("field", "")).strip()
+                    column_label = str(column.get("label", field)).strip() or field
+                    row[column_label] = format_equipment_value(item.get(field))
+                table_rows.append(row)
+
+            table_frame = pd.DataFrame(table_rows)
+            table_height = max(72, min(360, 36 * (len(table_frame) + 1)))
+            editable_cols = {"Owned"}
+            disabled_cols = [column for column in table_frame.columns if column not in editable_cols]
+
+            editor_kwargs: dict[str, Any] = {
+                "hide_index": True,
+                "use_container_width": False,
+                "disabled": disabled_cols,
+                "num_rows": "fixed",
+                "height": table_height,
+                "key": f"equipment_table_{category_id}",
+            }
+            if hasattr(st, "column_config") and hasattr(st.column_config, "CheckboxColumn"):
+                editor_kwargs["column_config"] = {
+                    "Owned": st.column_config.CheckboxColumn("Owned", width="small"),
+                }
+
+            edited_frame = st.data_editor(table_frame, **editor_kwargs)
+            owned_values = (
+                edited_frame["Owned"].tolist()
+                if isinstance(edited_frame, pd.DataFrame) and "Owned" in edited_frame.columns
+                else [False] * len(ordered_item_ids)
+            )
+            next_equipment[category_id] = [
+                ordered_item_ids[idx]
+                for idx, owned in enumerate(owned_values[: len(ordered_item_ids)])
+                if bool(owned)
+            ]
+
+    if next_equipment != current_equipment_known:
+        prefs["equipment"] = next_equipment
+        st.session_state["prefs"] = prefs
+        save_preferences(prefs)
 
 
 def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], browser_locale: str | None) -> None:
@@ -5102,7 +5652,7 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
         "Import settings JSON",
         type=["json"],
         key="settings_import_file",
-        help="Imports location, obstructions, lists, and display preferences.",
+        help="Imports sites, obstructions, equipment, lists, and display preferences.",
     )
     if st.button("Import settings", use_container_width=True, key="settings_import_apply"):
         if uploaded_settings is None:
@@ -6038,11 +6588,31 @@ def render_explorer_page(
         "</p>"
     )
 
-    st.title("Observation Planner")
-    st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    site_ids = site_ids_in_order(prefs)
+    active_site_id = get_active_site_id(prefs)
+    if active_site_id not in site_ids and site_ids:
+        active_site_id = site_ids[0]
+        set_active_site(prefs, active_site_id)
+
+    title_col, site_col = st.columns([4, 2], gap="medium")
+    with title_col:
+        st.title("Observation Planner")
+        st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
+    with site_col:
+        if len(site_ids) > 1:
+            selected_site_id = st.selectbox(
+                "Site",
+                options=site_ids,
+                index=site_ids.index(active_site_id) if active_site_id in site_ids else 0,
+                format_func=lambda site_id: get_site_name(prefs, site_id),
+                key="explorer_active_site_selector",
+            )
+            if selected_site_id != active_site_id and set_active_site(prefs, selected_site_id):
+                persist_and_rerun(prefs)
+
     location = prefs["location"]
     if not is_location_configured(location):
-        st.warning("Observation site location is not set. Open the Site page to set location and obstructions.")
+        st.warning("Observation site location is not set. Open the Sites page to set location and obstructions.")
         return
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
@@ -6196,25 +6766,35 @@ def main() -> None:
         st.session_state["prefs_bootstrapped"] = True
 
     prefs = ensure_preferences_shape(st.session_state["prefs"])
+    sync_active_site_to_legacy_fields(prefs)
     st.session_state["prefs"] = prefs
 
     if not is_location_configured(prefs.get("location")):
         if not bool(st.session_state.get("initial_location_fallback_attempted", False)):
+            browser_applied = False
+            initial_geo_payload = get_geolocation(component_key="initial_site_browser_geo")
+            if isinstance(initial_geo_payload, dict):
+                coords = initial_geo_payload.get("coords")
+                if isinstance(coords, dict):
+                    apply_browser_geolocation_payload(prefs, initial_geo_payload)
+                    browser_applied = is_location_configured(prefs.get("location"))
+
             st.session_state["initial_location_fallback_attempted"] = True
-            resolved = approximate_location_from_ip()
-            if resolved:
-                resolved_label, kept_site_name = apply_resolved_location(prefs, resolved)
-                st.session_state["prefs"] = prefs
-                save_preferences(prefs)
-                st.session_state["location_notice"] = (
-                    f"Approximate location applied: {resolved_label}. Site name unchanged."
-                    if kept_site_name
-                    else f"Approximate location applied: {resolved_label}."
-                )
-            else:
-                st.session_state["location_notice"] = (
-                    "Location not set. Open the Site page to set it manually or via browser geolocation (IP estimate is fallback)."
-                )
+            if not browser_applied:
+                resolved = approximate_location_from_ip()
+                if resolved:
+                    resolved_label, kept_site_name = apply_resolved_location(prefs, resolved)
+                    st.session_state["prefs"] = prefs
+                    save_preferences(prefs)
+                    st.session_state["location_notice"] = (
+                        f"Approximate location applied: {resolved_label}. Site name unchanged."
+                        if kept_site_name
+                        else f"Approximate location applied: {resolved_label}."
+                    )
+                else:
+                    st.session_state["location_notice"] = (
+                        "Location not set. Open the Sites page to set it manually or via browser geolocation (IP estimate is fallback)."
+                    )
 
     theme_label_to_id = {
         "Light": UI_THEME_LIGHT,
@@ -6301,8 +6881,11 @@ def main() -> None:
             browser_month_day_pattern=browser_month_day_pattern,
         )
 
-    def site_page() -> None:
-        render_site_page(prefs=prefs)
+    def sites_page() -> None:
+        render_sites_page(prefs=prefs)
+
+    def equipment_page() -> None:
+        render_equipment_page(prefs=prefs)
 
     def lists_page() -> None:
         render_lists_page(prefs=prefs)
@@ -6318,7 +6901,8 @@ def main() -> None:
         navigation = st.navigation(
             [
                 st.Page(explorer_page, title="Explorer", icon="✨", default=True),
-                st.Page(site_page, title="Site", icon="📍"),
+                st.Page(sites_page, title="Sites", icon="📍"),
+                st.Page(equipment_page, title="Equipment", icon="🧰"),
                 st.Page(lists_page, title="Lists", icon="📚"),
                 st.Page(settings_page, title="Settings", icon="⚙️"),
             ]
@@ -6326,9 +6910,16 @@ def main() -> None:
         navigation.run()
         return
 
-    selected_page = st.sidebar.radio("Page", ["Explorer", "Site", "Lists", "Settings"], key="app_page_selector")
-    if selected_page == "Site":
-        site_page()
+    selected_page = st.sidebar.radio(
+        "Page",
+        ["Explorer", "Sites", "Equipment", "Lists", "Settings"],
+        key="app_page_selector",
+    )
+    if selected_page == "Sites":
+        sites_page()
+        return
+    if selected_page == "Equipment":
+        equipment_page()
         return
     if selected_page == "Lists":
         lists_page()
