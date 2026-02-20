@@ -363,21 +363,33 @@ def apply_ui_theme_css(theme_name: str) -> None:
                     margin-left: 0 !important;
                     transform: translateX(0) !important;
                 }}
+                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarUserContent"],
+                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"],
+                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarUserContent"],
+                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] {{
+                    display: block !important;
+                    visibility: visible !important;
+                    opacity: 1 !important;
+                }}
                 section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] a,
                 [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] a {{
                     justify-content: center;
+                    gap: 0 !important;
                     padding-left: 0.25rem !important;
                     padding-right: 0.25rem !important;
                 }}
-                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] p,
-                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNav"] p {{
-                    width: 1.35rem !important;
-                    max-width: 1.35rem !important;
-                    overflow: hidden !important;
-                    white-space: nowrap !important;
-                    text-overflow: clip !important;
+                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNavLinkText"],
+                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNavLinkText"] {{
+                    display: none !important;
+                }}
+                section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNavLinkIcon"],
+                [data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNavLinkIcon"] {{
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
                     margin-left: auto !important;
                     margin-right: auto !important;
+                    font-size: 1.1rem !important;
                 }}
     """
 
