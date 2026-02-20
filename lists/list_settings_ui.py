@@ -49,6 +49,10 @@ def render_lists_settings_section(
         )
     st.caption("`Auto (Recent)` is system-managed and tracks the last 10 search selections.")
 
+    reset_new_name_key = "lists_new_name_reset"
+    if bool(st.session_state.pop(reset_new_name_key, False)):
+        st.session_state["lists_new_name"] = ""
+
     create_cols = st.columns([3, 1], gap="small")
     with create_cols[0]:
         new_list_name = st.text_input("New list name", key="lists_new_name")
@@ -58,7 +62,7 @@ def render_lists_settings_section(
             created_list_id = create_list(prefs, new_list_name)
             if created_list_id:
                 st.session_state["lists_manage_selected_id"] = created_list_id
-                st.session_state["lists_new_name"] = ""
+                st.session_state[reset_new_name_key] = True
                 persist_and_rerun_fn(prefs)
             else:
                 st.warning("Enter a list name to create a new list.")

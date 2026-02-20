@@ -118,6 +118,312 @@ TEMPERATURE_UNIT_OPTIONS = {
     "Fahrenheit": "f",
     "Celsius": "c",
 }
+
+
+def _catalog_cache_fingerprint(cache_path: Path) -> tuple[int, int]:
+    try:
+        stat_result = cache_path.stat()
+    except OSError:
+        return (0, 0)
+    return (int(stat_result.st_mtime_ns), int(stat_result.st_size))
+
+
+@st.cache_resource(show_spinner=False)
+def _load_catalog_resource_cached(
+    cache_path_str: str,
+    cache_mtime_ns: int,
+    cache_size_bytes: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    trace_cache_event(
+        f"Hydrating app catalog cache for {cache_path_str} "
+        f"(mtime_ns={cache_mtime_ns}, bytes={cache_size_bytes})"
+    )
+    del cache_mtime_ns, cache_size_bytes
+    cached_catalog, cached_meta = load_catalog_from_cache(cache_path=Path(cache_path_str))
+    meta_payload = dict(cached_meta or {})
+    meta_payload["app_cache"] = "streamlit_resource"
+    return cached_catalog, meta_payload
+
+
+def load_catalog_app_cached(cache_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    resolved_path = cache_path.expanduser().resolve()
+    cache_mtime_ns, cache_size_bytes = _catalog_cache_fingerprint(resolved_path)
+    return _load_catalog_resource_cached(
+        str(resolved_path),
+        cache_mtime_ns,
+        cache_size_bytes,
+    )
+
+
+RECOMMENDATION_CACHE_SAMPLE_MINUTES = 10
+RECOMMENDATION_CLOUD_COVER_THRESHOLD = 30.0
+RECOMMENDATION_QUERY_SESSION_CACHE_LIMIT = 8
+
+
+def trace_cache_event(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    print(f"[DSO CACHE {timestamp}] {message}", flush=True)
+
+
+def normalize_emission_band_token(value: Any) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "", str(value or "").strip().upper())
+    if not token:
+        return ""
+    synonyms = {
+        "HALPHA": "HA",
+        "HABETA": "HB",
+        "HBETA": "HB",
+        "O3": "OIII",
+        "N2": "NII",
+        "S2": "SII",
+    }
+    return synonyms.get(token, token)
+
+
+def parse_emission_band_set(value: Any) -> set[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw_parts = [str(item) for item in value]
+    else:
+        cleaned = str(value or "").replace("[", " ").replace("]", " ")
+        raw_parts = re.split(r"[;,/|]+", cleaned)
+    return {
+        normalize_emission_band_token(part)
+        for part in raw_parts
+        if normalize_emission_band_token(part)
+    }
+
+
+@st.cache_resource(show_spinner=False)
+def _load_catalog_recommendation_features_cached(
+    cache_path_str: str,
+    cache_mtime_ns: int,
+    cache_size_bytes: int,
+) -> pd.DataFrame:
+    trace_cache_event(
+        f"Hydrating catalog recommendation feature cache for {cache_path_str} "
+        f"(mtime_ns={cache_mtime_ns}, bytes={cache_size_bytes})"
+    )
+    catalog_frame, _ = load_catalog_app_cached(Path(cache_path_str))
+    features = catalog_frame.copy()
+
+    features["primary_id"] = features["primary_id"].fillna("").astype(str).str.strip()
+    features["common_name"] = features["common_name"].fillna("").astype(str).str.strip()
+    features["object_type_group_norm"] = features["object_type_group"].map(normalize_object_type_group)
+    features["ra_deg_num"] = pd.to_numeric(features["ra_deg"], errors="coerce")
+    features["dec_deg_num"] = pd.to_numeric(features["dec_deg"], errors="coerce")
+    features["has_valid_coords"] = np.isfinite(features["ra_deg_num"]) & np.isfinite(features["dec_deg_num"])
+    features["emission_band_tokens"] = features["emission_lines"].apply(
+        lambda value: tuple(sorted(parse_emission_band_set(value)))
+    )
+    features["apparent_size"] = features.apply(
+        lambda row: format_apparent_size_display(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+    features["apparent_size_sort_arcmin"] = features.apply(
+        lambda row: apparent_size_sort_key_arcmin(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+    features["target_name"] = np.where(
+        features["common_name"] != "",
+        features["primary_id"] + " - " + features["common_name"],
+        features["primary_id"],
+    )
+    return features
+
+
+def load_catalog_recommendation_features(cache_path: Path) -> pd.DataFrame:
+    resolved_path = cache_path.expanduser().resolve()
+    cache_mtime_ns, cache_size_bytes = _catalog_cache_fingerprint(resolved_path)
+    return _load_catalog_recommendation_features_cached(
+        str(resolved_path),
+        cache_mtime_ns,
+        cache_size_bytes,
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _load_site_date_altaz_bundle_cached(
+    cache_path_str: str,
+    cache_mtime_ns: int,
+    cache_size_bytes: int,
+    lat: float,
+    lon: float,
+    window_start_iso: str,
+    window_end_iso: str,
+    sample_minutes: int,
+) -> dict[str, Any]:
+    trace_cache_event(
+        "Hydrating site/date alt-az cache "
+        f"(lat={lat:.5f}, lon={lon:.5f}, window={window_start_iso}->{window_end_iso}, step={sample_minutes}m)"
+    )
+    feature_frame = _load_catalog_recommendation_features_cached(
+        cache_path_str,
+        cache_mtime_ns,
+        cache_size_bytes,
+    )
+    valid_frame = feature_frame[feature_frame["has_valid_coords"]].copy()
+    if valid_frame.empty:
+        return {
+            "primary_ids": tuple(),
+            "primary_id_to_col": {},
+            "sample_times_local_iso": tuple(),
+            "sample_hour_keys": tuple(),
+            "altitude_matrix": np.empty((0, 0), dtype=float),
+            "wind_index_matrix": np.empty((0, 0), dtype=np.uint8),
+            "peak_idx_by_target": np.empty((0,), dtype=np.int32),
+            "peak_altitude": np.empty((0,), dtype=float),
+            "peak_time_local_iso": tuple(),
+            "peak_direction": tuple(),
+        }
+
+    sample_times_local = pd.date_range(
+        start=pd.Timestamp(window_start_iso),
+        end=pd.Timestamp(window_end_iso),
+        freq=f"{int(sample_minutes)}min",
+        inclusive="both",
+    )
+    if sample_times_local.empty:
+        return {
+            "primary_ids": tuple(valid_frame["primary_id"].tolist()),
+            "primary_id_to_col": {primary_id: idx for idx, primary_id in enumerate(valid_frame["primary_id"].tolist())},
+            "sample_times_local_iso": tuple(),
+            "sample_hour_keys": tuple(),
+            "altitude_matrix": np.empty((0, len(valid_frame)), dtype=float),
+            "wind_index_matrix": np.empty((0, len(valid_frame)), dtype=np.uint8),
+            "peak_idx_by_target": np.zeros((len(valid_frame),), dtype=np.int32),
+            "peak_altitude": np.zeros((len(valid_frame),), dtype=float),
+            "peak_time_local_iso": tuple("" for _ in range(len(valid_frame))),
+            "peak_direction": tuple("--" for _ in range(len(valid_frame))),
+        }
+
+    sample_times_utc = sample_times_local.tz_convert("UTC")
+    time_count = len(sample_times_local)
+    target_count = len(valid_frame)
+    location_obj = EarthLocation(lat=lat * u.deg, lon=lon * u.deg)
+
+    repeated_ra = np.tile(valid_frame["ra_deg_num"].to_numpy(dtype=float), time_count)
+    repeated_dec = np.tile(valid_frame["dec_deg_num"].to_numpy(dtype=float), time_count)
+    repeated_times = np.repeat(sample_times_utc.to_pydatetime(), target_count)
+
+    coords = SkyCoord(ra=repeated_ra * u.deg, dec=repeated_dec * u.deg)
+    frame = AltAz(obstime=Time(repeated_times), location=location_obj)
+    altaz = coords.transform_to(frame)
+
+    altitude_matrix = np.asarray(altaz.alt.deg, dtype=float).reshape(time_count, target_count)
+    azimuth_matrix = np.asarray(altaz.az.deg % 360.0, dtype=float).reshape(time_count, target_count)
+    wind_index_matrix = (((azimuth_matrix + 11.25) // 22.5).astype(int)) % 16
+    wind_index_matrix = wind_index_matrix.astype(np.uint8)
+
+    peak_idx_by_target = np.argmax(altitude_matrix, axis=0).astype(np.int32)
+    peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(target_count)]
+    peak_time_local_iso = tuple(
+        pd.Timestamp(sample_times_local[int(index)]).isoformat()
+        for index in peak_idx_by_target
+    )
+    peak_direction = tuple(
+        WIND16[int(wind_index_matrix[int(index), target_idx])]
+        for target_idx, index in enumerate(peak_idx_by_target)
+    )
+
+    primary_ids = tuple(valid_frame["primary_id"].tolist())
+    primary_id_to_col = {
+        primary_id: idx
+        for idx, primary_id in enumerate(primary_ids)
+    }
+    sample_times_local_iso = tuple(pd.Timestamp(value).isoformat() for value in sample_times_local.tolist())
+    sample_hour_keys = tuple(
+        normalize_hour_key(pd.Timestamp(value).floor("h")) or pd.Timestamp(value).floor("h").isoformat()
+        for value in sample_times_local
+    )
+
+    return {
+        "primary_ids": primary_ids,
+        "primary_id_to_col": primary_id_to_col,
+        "sample_times_local_iso": sample_times_local_iso,
+        "sample_hour_keys": sample_hour_keys,
+        "altitude_matrix": altitude_matrix,
+        "wind_index_matrix": wind_index_matrix,
+        "peak_idx_by_target": peak_idx_by_target,
+        "peak_altitude": peak_altitude,
+        "peak_time_local_iso": peak_time_local_iso,
+        "peak_direction": peak_direction,
+    }
+
+
+def load_site_date_altaz_bundle(
+    cache_path: Path,
+    *,
+    lat: float,
+    lon: float,
+    window_start: datetime,
+    window_end: datetime,
+    sample_minutes: int = RECOMMENDATION_CACHE_SAMPLE_MINUTES,
+) -> dict[str, Any]:
+    resolved_path = cache_path.expanduser().resolve()
+    cache_mtime_ns, cache_size_bytes = _catalog_cache_fingerprint(resolved_path)
+    return _load_site_date_altaz_bundle_cached(
+        str(resolved_path),
+        cache_mtime_ns,
+        cache_size_bytes,
+        float(lat),
+        float(lon),
+        pd.Timestamp(window_start).isoformat(),
+        pd.Timestamp(window_end).isoformat(),
+        int(sample_minutes),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=15 * 60)
+def load_site_date_weather_mask_bundle(
+    *,
+    lat: float,
+    lon: float,
+    tz_name: str,
+    window_start_iso: str,
+    window_end_iso: str,
+    sample_hour_keys: tuple[str, ...],
+    cloud_cover_threshold: float = RECOMMENDATION_CLOUD_COVER_THRESHOLD,
+) -> dict[str, Any]:
+    trace_cache_event(
+        "Hydrating site/date weather-mask cache "
+        f"(lat={lat:.5f}, lon={lon:.5f}, window={window_start_iso}->{window_end_iso}, "
+        f"hours={len(sample_hour_keys)}, cloud<{cloud_cover_threshold:.1f})"
+    )
+    weather_rows = fetch_hourly_weather(
+        lat=lat,
+        lon=lon,
+        tz_name=tz_name,
+        start_local_iso=window_start_iso,
+        end_local_iso=window_end_iso,
+        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+    )
+    cloud_cover_by_hour: dict[str, float] = {}
+    for weather_row in weather_rows:
+        hour_key = normalize_hour_key(weather_row.get("time_iso"))
+        if not hour_key:
+            continue
+        try:
+            cloud_value = float(weather_row.get("cloud_cover"))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(cloud_value):
+            cloud_cover_by_hour[hour_key] = float(cloud_value)
+
+    cloud_ok_mask = tuple(
+        (hour_key in cloud_cover_by_hour) and (float(cloud_cover_by_hour[hour_key]) < float(cloud_cover_threshold))
+        for hour_key in sample_hour_keys
+    )
+    return {
+        "weather_rows": weather_rows,
+        "cloud_cover_by_hour": cloud_cover_by_hour,
+        "cloud_ok_mask": cloud_ok_mask,
+    }
 WEATHER_MATRIX_ROWS: list[tuple[str, str]] = [
     ("temperature_2m", "Temperature"),
     ("dew_point_2m", "Dewpoint (2m)"),
@@ -501,6 +807,15 @@ def format_hourly_weather_title_period(
 
     day_name = pd.Timestamp(window_start).strftime("%A")
     return f"{day_name} night, {forecast_date}"
+
+
+def format_recommendation_night_title(day_offset: int, window_start: datetime) -> str:
+    if day_offset <= 0:
+        return "Tonight"
+    if day_offset == 1:
+        return "Tomorrow Night"
+    day_name = pd.Timestamp(window_start).strftime("%A")
+    return f"{day_name} Night"
 
 
 def format_condition_tips_title(day_offset: int, window_start: datetime) -> str:
@@ -2042,40 +2357,18 @@ def render_target_recommendations(
     window_end: datetime,
     tzinfo: ZoneInfo,
     use_12_hour: bool,
+    weather_forecast_day_offset: int = 0,
 ) -> None:
     del active_preview_list_ids
-    st.markdown("### Recommended Targets")
+    recommendation_night_title = format_recommendation_night_title(weather_forecast_day_offset, window_start)
+    st.markdown(f"### Recommended Targets for {recommendation_night_title}")
 
     if catalog.empty:
         st.info("Catalog is empty.")
         return
 
-    def _normalize_emission_band(value: Any) -> str:
-        token = re.sub(r"[^A-Za-z0-9]+", "", str(value or "").strip().upper())
-        if not token:
-            return ""
-        synonyms = {
-            "HALPHA": "HA",
-            "HABETA": "HB",
-            "HBETA": "HB",
-            "O3": "OIII",
-            "N2": "NII",
-            "S2": "SII",
-        }
-        return synonyms.get(token, token)
-
     def _parse_emission_band_set(value: Any) -> set[str]:
-        if isinstance(value, (list, tuple, set)):
-            raw_parts = [str(item) for item in value]
-        else:
-            cleaned = str(value or "").replace("[", " ").replace("]", " ")
-            raw_parts = re.split(r"[;,/|]+", cleaned)
-        bands = {
-            _normalize_emission_band(part)
-            for part in raw_parts
-            if _normalize_emission_band(part)
-        }
-        return bands
+        return parse_emission_band_set(value)
 
     def _filter_match_tier(target_bands: set[str], reference_bands: set[str]) -> int:
         if not reference_bands:
@@ -2151,14 +2444,30 @@ def render_target_recommendations(
     }
     hour_option_to_key = {option: normalize_hour_key(option) for option in hour_options}
 
-    weather_rows = fetch_hourly_weather(
+    recommendation_feature_catalog = load_catalog_recommendation_features(CATALOG_CACHE_PATH)
+    catalog_fingerprint = _catalog_cache_fingerprint(CATALOG_CACHE_PATH.expanduser().resolve())
+    altaz_bundle = load_site_date_altaz_bundle(
+        CATALOG_CACHE_PATH,
+        lat=location_lat,
+        lon=location_lon,
+        window_start=window_start,
+        window_end=window_end,
+        sample_minutes=RECOMMENDATION_CACHE_SAMPLE_MINUTES,
+    )
+    sample_hour_keys_for_weather = tuple(
+        str(hour_key or "").strip()
+        for hour_key in altaz_bundle.get("sample_hour_keys", ())
+    )
+    weather_bundle = load_site_date_weather_mask_bundle(
         lat=location_lat,
         lon=location_lon,
         tz_name=tzinfo.key,
-        start_local_iso=window_start.isoformat(),
-        end_local_iso=window_end.isoformat(),
-        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+        window_start_iso=pd.Timestamp(window_start).isoformat(),
+        window_end_iso=pd.Timestamp(window_end).isoformat(),
+        sample_hour_keys=sample_hour_keys_for_weather,
+        cloud_cover_threshold=RECOMMENDATION_CLOUD_COVER_THRESHOLD,
     )
+    weather_rows = list(weather_bundle.get("weather_rows", []))
     weather_by_hour: dict[str, dict[str, Any]] = {}
     for weather_row in weather_rows:
         hour_key = normalize_hour_key(weather_row.get("time_iso"))
@@ -2191,7 +2500,7 @@ def render_target_recommendations(
             ranked_hours.append((cloud_cover_rank, wind_rank, humidity_rank, option_idx, hour_option))
         best_visible_hour_option = min(ranked_hours)[-1]
 
-    groups_series = catalog["object_type_group"].map(normalize_object_type_group)
+    groups_series = recommendation_feature_catalog["object_type_group"].map(normalize_object_type_group)
     group_options = [str(group).strip() for group in groups_series.value_counts().index.tolist() if str(group).strip()]
     if not group_options:
         group_options = ["other"]
@@ -2212,6 +2521,7 @@ def render_target_recommendations(
     sort_signature_key = "recommended_targets_sort_signature"
     signature_key = "recommended_targets_criteria_signature"
     selection_token_key = "recommended_targets_selection_token"
+    query_cache_key = "recommended_targets_query_cache"
 
     if visible_hour_key not in st.session_state:
         st.session_state[visible_hour_key] = [best_visible_hour_option] if best_visible_hour_option else []
@@ -2441,6 +2751,8 @@ def render_target_recommendations(
 
     criteria_signature = json.dumps(
         {
+            "lat": round(location_lat, 6),
+            "lon": round(location_lon, 6),
             "visible_hours": sorted(selected_visible_hour_keys),
             "object_types": sorted(selected_object_types),
             "keyword": str(keyword_query).strip().lower(),
@@ -2449,6 +2761,12 @@ def render_target_recommendations(
             "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
             "min_size_enabled": bool(use_minimum_size),
             "min_size_pct": minimum_size_pct if minimum_size_pct is not None else "",
+            "catalog_mtime_ns": int(catalog_fingerprint[0]),
+            "catalog_size_bytes": int(catalog_fingerprint[1]),
+            "obstructions": {direction: float(obstructions.get(direction, 20.0)) for direction in WIND16},
+            "cloud_cover_threshold": RECOMMENDATION_CLOUD_COVER_THRESHOLD,
+            "sample_minutes": RECOMMENDATION_CACHE_SAMPLE_MINUTES,
+            "result_limit_mode": "unlimited",
             "window_start": pd.Timestamp(window_start).isoformat(),
             "window_end": pd.Timestamp(window_end).isoformat(),
         },
@@ -2459,275 +2777,353 @@ def render_target_recommendations(
         st.session_state[page_number_key] = 1
         st.session_state[selection_token_key] = ""
 
-    update_query_progress(12, "Searching recommendations: evaluating weather conditions...")
-    cloud_cover_by_hour: dict[str, float] = {}
-    for weather_row in weather_rows:
-        hour_key = normalize_hour_key(weather_row.get("time_iso"))
-        if not hour_key:
-            continue
-        try:
-            cloud_value = float(weather_row.get("cloud_cover"))
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(cloud_value):
-            cloud_cover_by_hour[hour_key] = float(cloud_value)
+    query_cache_store = st.session_state.get(query_cache_key)
+    if not isinstance(query_cache_store, dict):
+        query_cache_store = {}
+    query_cache_payload = query_cache_store.get(criteria_signature)
+    recommended = pd.DataFrame()
+    total_results_uncapped = 0
+    empty_query_message: str | None = None
 
-    working_catalog = catalog.copy()
-    cleaned_keyword = str(keyword_query).strip()
-    if cleaned_keyword:
-        working_catalog = search_catalog(catalog, cleaned_keyword)
-
-    selected_object_type_values = [str(value).strip() for value in (selected_object_types or []) if str(value).strip()]
-    valid_group_set = {
-        normalize_object_type_group(value)
-        for value in group_options
-        if str(value).strip()
-    }
-    selected_group_set = {
-        normalize_object_type_group(value)
-        for value in selected_object_type_values
-        if normalize_object_type_group(value) in valid_group_set
-    }
-    if selected_object_type_values:
-        effective_group_set = selected_group_set if selected_group_set else set(valid_group_set)
-    else:
-        effective_group_set = set(valid_group_set)
-    if effective_group_set:
-        working_catalog = working_catalog[
-            working_catalog["object_type_group"].map(normalize_object_type_group).isin(effective_group_set)
-        ]
-
-    if working_catalog.empty:
-        clear_query_progress()
-        st.info("No targets match the current criteria.")
-        return
-
-    update_query_progress(28, "Searching recommendations: preparing coordinate candidates...")
-    candidate_columns = [
-        "primary_id",
-        "common_name",
-        "object_type",
-        "object_type_group",
-        "emission_lines",
-        "ang_size_maj_arcmin",
-        "ang_size_min_arcmin",
-        "ra_deg",
-        "dec_deg",
-    ]
-    candidates = working_catalog.loc[:, candidate_columns].copy()
-    candidates["ra_deg"] = pd.to_numeric(candidates["ra_deg"], errors="coerce")
-    candidates["dec_deg"] = pd.to_numeric(candidates["dec_deg"], errors="coerce")
-    candidates = candidates[np.isfinite(candidates["ra_deg"]) & np.isfinite(candidates["dec_deg"])]
-    if candidates.empty:
-        clear_query_progress()
-        st.info("No targets with valid coordinates match the current criteria.")
-        return
-
-    update_query_progress(40, "Searching recommendations: sampling night window...")
-    sample_times_local = pd.date_range(
-        start=pd.Timestamp(window_start),
-        end=pd.Timestamp(window_end),
-        freq="10min",
-        inclusive="both",
-    )
-    if sample_times_local.empty:
-        clear_query_progress()
-        st.info("No valid time samples available for this night.")
-        return
-
-    sample_hour_keys = [normalize_hour_key(hour_ts.floor("h")) for hour_ts in sample_times_local]
-    cloud_ok_mask = np.array(
-        [
-            (hour_key in cloud_cover_by_hour) and (float(cloud_cover_by_hour[hour_key]) < 30.0)
-            for hour_key in sample_hour_keys
-        ],
-        dtype=bool,
-    )
-    if selected_visible_hour_keys:
-        selected_hours_mask = np.array(
-            [hour_key in selected_visible_hour_keys for hour_key in sample_hour_keys],
-            dtype=bool,
-        )
-    else:
-        selected_hours_mask = np.ones(len(sample_times_local), dtype=bool)
-
-    target_count = len(candidates)
-    time_count = len(sample_times_local)
-    location_obj = EarthLocation(lat=location_lat * u.deg, lon=location_lon * u.deg)
-    sample_times_utc = sample_times_local.tz_convert("UTC")
-
-    repeated_ra = np.tile(candidates["ra_deg"].to_numpy(dtype=float), time_count)
-    repeated_dec = np.tile(candidates["dec_deg"].to_numpy(dtype=float), time_count)
-    repeated_times = np.repeat(sample_times_utc.to_pydatetime(), target_count)
-
-    update_query_progress(56, "Searching recommendations: computing target altitude/azimuth tracks...")
-    coords = SkyCoord(ra=repeated_ra * u.deg, dec=repeated_dec * u.deg)
-    frame = AltAz(obstime=Time(repeated_times), location=location_obj)
-    altaz = coords.transform_to(frame)
-
-    altitude_matrix = np.asarray(altaz.alt.deg, dtype=float).reshape(time_count, target_count)
-    azimuth_matrix = np.asarray(altaz.az.deg % 360.0, dtype=float).reshape(time_count, target_count)
-    wind_index_matrix = (((azimuth_matrix + 11.25) // 22.5).astype(int)) % 16
-
-    obstruction_thresholds = np.array(
-        [float(obstructions.get(direction, 20.0)) for direction in WIND16],
-        dtype=float,
-    )
-    min_required_matrix = obstruction_thresholds[wind_index_matrix]
-    visible_matrix = (altitude_matrix >= 0.0) & (altitude_matrix >= min_required_matrix)
-
-    if mount_mode == "eq":
-        mount_mask = altitude_matrix >= 30.0
-    elif mount_mode == "altaz":
-        mount_mask = altitude_matrix <= 80.0
-    else:
-        mount_mask = np.ones_like(altitude_matrix, dtype=bool)
-
-    qualified_matrix_full_night = (
-        visible_matrix
-        & mount_mask
-        & cloud_ok_mask[:, np.newaxis]
-    )
-    qualified_matrix_selected_hours = (
-        visible_matrix
-        & mount_mask
-        & cloud_ok_mask[:, np.newaxis]
-        & selected_hours_mask[:, np.newaxis]
-    )
-
-    sample_minutes = 10
-    selected_visible_minutes = np.sum(qualified_matrix_selected_hours, axis=0).astype(int) * sample_minutes
-    full_night_visible_minutes = np.sum(qualified_matrix_full_night, axis=0).astype(int) * sample_minutes
-    has_duration = selected_visible_minutes > 0
-    if not np.any(has_duration):
-        clear_query_progress()
-        st.info("No targets meet the current visibility/weather/mount constraints.")
-        return
-
-    update_query_progress(72, "Searching recommendations: evaluating filter and visibility matches...")
-    peak_idx_by_target = np.argmax(altitude_matrix, axis=0)
-    peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(target_count)]
-    peak_time_local = np.array(
-        [sample_times_local[int(index)] for index in peak_idx_by_target],
-        dtype=object,
-    )
-    peak_direction = np.array(
-        [WIND16[int(wind_index_matrix[int(index), target_idx])] for target_idx, index in enumerate(peak_idx_by_target)],
-        dtype=object,
-    )
-
-    target_emission_sets = [_parse_emission_band_set(value) for value in candidates["emission_lines"].tolist()]
-    if selected_filter_item is not None and selected_filter_bands:
-        filter_match_tier = np.array(
-            [_filter_match_tier(target_bands, selected_filter_bands) for target_bands in target_emission_sets],
-            dtype=int,
-        )
-        filter_visibility_mask = filter_match_tier > 0
-    else:
-        if owned_filter_band_sets:
-            filter_match_tier = np.array(
-                [
-                    max(_filter_match_tier(target_bands, reference_bands) for reference_bands in owned_filter_band_sets)
-                    for target_bands in target_emission_sets
-                ],
-                dtype=int,
-            )
+    if isinstance(query_cache_payload, dict):
+        trace_cache_event(f"Session recommendation query cache hit ({criteria_signature[:12]}...)")
+        cached_status = str(query_cache_payload.get("status", "ok")).strip().lower()
+        if cached_status == "empty":
+            empty_query_message = str(query_cache_payload.get("message") or "No targets match the current criteria.")
         else:
-            filter_match_tier = np.zeros(target_count, dtype=int)
-        filter_visibility_mask = np.ones(target_count, dtype=bool)
-
-    eligible_mask = has_duration & filter_visibility_mask
-    if not np.any(eligible_mask):
+            cached_recommended = query_cache_payload.get("recommended")
+            if isinstance(cached_recommended, pd.DataFrame):
+                recommended = cached_recommended.copy()
+            total_results_uncapped = int(query_cache_payload.get("total_results_uncapped", len(recommended)))
+        update_query_progress(100, "Searching recommendations: ready (session cache).")
         clear_query_progress()
-        st.info("No targets match the selected camera filter.")
-        return
+    else:
+        trace_cache_event(f"Hydrating session recommendation query cache ({criteria_signature[:12]}...)")
+        update_query_progress(12, "Searching recommendations: evaluating weather conditions...")
 
-    eligible_indices = np.where(eligible_mask)[0]
-    recommended = candidates.iloc[eligible_indices].copy()
-    recommended["visible_minutes"] = full_night_visible_minutes[eligible_indices]
-    recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
-    recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
-    recommended["peak_altitude"] = np.round(peak_altitude[eligible_indices], 1)
-    recommended["peak_time_local"] = peak_time_local[eligible_indices]
-    recommended["peak_direction"] = peak_direction[eligible_indices]
-    recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
-    recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
-    recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
-    recommended["apparent_size"] = recommended.apply(
-        lambda row: format_apparent_size_display(
-            row.get("ang_size_maj_arcmin"),
-            row.get("ang_size_min_arcmin"),
-        ),
-        axis=1,
-    )
-    recommended["apparent_size_sort_arcmin"] = recommended.apply(
-        lambda row: apparent_size_sort_key_arcmin(
-            row.get("ang_size_maj_arcmin"),
-            row.get("ang_size_min_arcmin"),
-        ),
-        axis=1,
-    )
+        cloud_cover_by_hour: dict[str, float] = {}
+        cloud_cover_payload = weather_bundle.get("cloud_cover_by_hour", {})
+        if isinstance(cloud_cover_payload, dict):
+            for hour_key_raw, cloud_value_raw in cloud_cover_payload.items():
+                hour_key = str(hour_key_raw or "").strip()
+                if not hour_key:
+                    continue
+                try:
+                    cloud_value = float(cloud_value_raw)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(cloud_value):
+                    cloud_cover_by_hour[hour_key] = float(cloud_value)
 
-    primary_ids = recommended["primary_id"].astype(str)
-    common_names = recommended["common_name"].fillna("").astype(str).str.strip()
-    recommended["target_name"] = np.where(
-        common_names != "",
-        primary_ids + " - " + common_names,
-        primary_ids,
-    )
-    recommended["visibility_duration"] = recommended["visible_minutes"].map(
-        lambda minutes: f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}"
-    )
-    recommended["visibility_bin_15"] = np.floor_divide(recommended["selected_visible_minutes"], 15).astype(int)
-    recommended["peak_alt_band_10"] = np.floor(np.clip(recommended["peak_altitude"], 0.0, 90.0) / 10.0).astype(int)
+        working_catalog = recommendation_feature_catalog
+        cleaned_keyword = str(keyword_query).strip()
+        if cleaned_keyword:
+            working_catalog = search_catalog(recommendation_feature_catalog, cleaned_keyword)
 
-    recommended["framing_percent"] = np.nan
-    if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
-        target_maj_deg = pd.to_numeric(recommended["ang_size_maj_arcmin"], errors="coerce") / 60.0
-        target_min_deg = pd.to_numeric(recommended["ang_size_min_arcmin"], errors="coerce") / 60.0
-        target_maj_deg = target_maj_deg.where(target_maj_deg > 0.0)
-        target_min_deg = target_min_deg.where(target_min_deg > 0.0)
-        target_maj_deg = target_maj_deg.fillna(target_min_deg)
-        target_min_deg = target_min_deg.fillna(target_maj_deg)
-        target_area_deg2 = target_maj_deg * target_min_deg
-        framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
-        recommended["framing_percent"] = framing_percent
-
-        if minimum_size_pct is not None:
-            recommended = recommended[
-                recommended["framing_percent"].apply(
-                    lambda value: value is not None and not pd.isna(value) and np.isfinite(float(value))
-                    and float(value) >= float(minimum_size_pct)
-                )
+        selected_object_type_values = [str(value).strip() for value in (selected_object_types or []) if str(value).strip()]
+        valid_group_set = {
+            normalize_object_type_group(value)
+            for value in group_options
+            if str(value).strip()
+        }
+        selected_group_set = {
+            normalize_object_type_group(value)
+            for value in selected_object_type_values
+            if normalize_object_type_group(value) in valid_group_set
+        }
+        if selected_object_type_values:
+            effective_group_set = selected_group_set if selected_group_set else set(valid_group_set)
+        else:
+            effective_group_set = set(valid_group_set)
+        if effective_group_set:
+            working_catalog = working_catalog[
+                working_catalog["object_type_group_norm"].isin(effective_group_set)
             ]
 
-    if recommended.empty:
+        if working_catalog.empty:
+            empty_query_message = "No targets match the current criteria."
+        else:
+            update_query_progress(28, "Searching recommendations: preparing coordinate candidates...")
+            primary_id_to_col_raw = altaz_bundle.get("primary_id_to_col", {})
+            primary_id_to_col = primary_id_to_col_raw if isinstance(primary_id_to_col_raw, dict) else {}
+            candidate_row_positions: list[int] = []
+            candidate_col_positions: list[int] = []
+            working_primary_ids = working_catalog["primary_id"].fillna("").astype(str).tolist()
+            for row_idx, primary_id in enumerate(working_primary_ids):
+                column_index = primary_id_to_col.get(primary_id)
+                if column_index is None:
+                    continue
+                try:
+                    candidate_col_positions.append(int(column_index))
+                    candidate_row_positions.append(int(row_idx))
+                except (TypeError, ValueError):
+                    continue
+
+            if not candidate_row_positions:
+                empty_query_message = "No targets with valid coordinates match the current criteria."
+            else:
+                candidates = working_catalog.iloc[candidate_row_positions].copy().reset_index(drop=True)
+
+                altitude_matrix_full = np.asarray(altaz_bundle.get("altitude_matrix", np.empty((0, 0))), dtype=float)
+                wind_index_matrix_full = np.asarray(altaz_bundle.get("wind_index_matrix", np.empty((0, 0))), dtype=np.uint8)
+                sample_hour_keys = [
+                    str(hour_key or "").strip()
+                    for hour_key in altaz_bundle.get("sample_hour_keys", ())
+                ]
+                if altitude_matrix_full.ndim != 2 or altitude_matrix_full.shape[0] <= 0:
+                    empty_query_message = "No valid time samples available for this night."
+                else:
+                    time_count = int(altitude_matrix_full.shape[0])
+                    if len(sample_hour_keys) != time_count:
+                        sample_hour_keys = sample_hour_keys[:time_count]
+                        if len(sample_hour_keys) < time_count:
+                            sample_hour_keys.extend([""] * (time_count - len(sample_hour_keys)))
+
+                    cloud_ok_mask = np.asarray(
+                        weather_bundle.get("cloud_ok_mask", ()),
+                        dtype=bool,
+                    )
+                    if cloud_ok_mask.size != time_count:
+                        cloud_ok_mask = np.array(
+                            [
+                                (hour_key in cloud_cover_by_hour)
+                                and (float(cloud_cover_by_hour[hour_key]) < float(RECOMMENDATION_CLOUD_COVER_THRESHOLD))
+                                for hour_key in sample_hour_keys
+                            ],
+                            dtype=bool,
+                        )
+
+                    if selected_visible_hour_keys:
+                        selected_hours_mask = np.array(
+                            [hour_key in selected_visible_hour_keys for hour_key in sample_hour_keys],
+                            dtype=bool,
+                        )
+                    else:
+                        selected_hours_mask = np.ones(time_count, dtype=bool)
+
+                    candidate_col_indices = np.asarray(candidate_col_positions, dtype=int)
+                    altitude_matrix = altitude_matrix_full[:, candidate_col_indices]
+                    wind_index_matrix = wind_index_matrix_full[:, candidate_col_indices]
+
+                    obstruction_thresholds = np.array(
+                        [float(obstructions.get(direction, 20.0)) for direction in WIND16],
+                        dtype=float,
+                    )
+                    min_required_matrix = obstruction_thresholds[wind_index_matrix]
+                    visible_matrix = (altitude_matrix >= 0.0) & (altitude_matrix >= min_required_matrix)
+
+                    if mount_mode == "eq":
+                        mount_mask = altitude_matrix >= 30.0
+                    elif mount_mode == "altaz":
+                        mount_mask = altitude_matrix <= 80.0
+                    else:
+                        mount_mask = np.ones_like(altitude_matrix, dtype=bool)
+
+                    qualified_matrix_full_night = (
+                        visible_matrix
+                        & mount_mask
+                        & cloud_ok_mask[:, np.newaxis]
+                    )
+                    qualified_matrix_selected_hours = (
+                        visible_matrix
+                        & mount_mask
+                        & cloud_ok_mask[:, np.newaxis]
+                        & selected_hours_mask[:, np.newaxis]
+                    )
+
+                    sample_minutes = RECOMMENDATION_CACHE_SAMPLE_MINUTES
+                    selected_visible_minutes = np.sum(qualified_matrix_selected_hours, axis=0).astype(int) * sample_minutes
+                    full_night_visible_minutes = np.sum(qualified_matrix_full_night, axis=0).astype(int) * sample_minutes
+                    has_duration = selected_visible_minutes > 0
+                    if not np.any(has_duration):
+                        empty_query_message = "No targets meet the current visibility/weather/mount constraints."
+                    else:
+                        update_query_progress(72, "Searching recommendations: evaluating filter and visibility matches...")
+
+                        peak_altitude_all = np.asarray(altaz_bundle.get("peak_altitude", np.empty((0,))), dtype=float)
+                        peak_time_local_all = np.asarray(altaz_bundle.get("peak_time_local_iso", ()), dtype=object)
+                        peak_direction_all = np.asarray(altaz_bundle.get("peak_direction", ()), dtype=object)
+                        max_col_index = int(candidate_col_indices.max()) if candidate_col_indices.size else -1
+                        if (
+                            peak_altitude_all.ndim == 1
+                            and peak_altitude_all.size > max_col_index
+                            and peak_time_local_all.size > max_col_index
+                            and peak_direction_all.size > max_col_index
+                        ):
+                            peak_altitude = peak_altitude_all[candidate_col_indices]
+                            peak_time_local = peak_time_local_all[candidate_col_indices]
+                            peak_direction = peak_direction_all[candidate_col_indices]
+                        else:
+                            peak_idx_by_target = np.argmax(altitude_matrix, axis=0)
+                            peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(len(candidate_col_indices))]
+                            sample_times_local = np.asarray(altaz_bundle.get("sample_times_local_iso", ()), dtype=object)
+                            peak_time_local = np.array(
+                                [sample_times_local[int(index)] for index in peak_idx_by_target],
+                                dtype=object,
+                            )
+                            peak_direction = np.array(
+                                [
+                                    WIND16[int(wind_index_matrix[int(index), target_idx])]
+                                    for target_idx, index in enumerate(peak_idx_by_target)
+                                ],
+                                dtype=object,
+                            )
+
+                        emission_token_values = candidates.get("emission_band_tokens")
+                        if emission_token_values is None:
+                            target_emission_sets = [
+                                _parse_emission_band_set(value)
+                                for value in candidates.get("emission_lines", pd.Series(dtype=object)).tolist()
+                            ]
+                        else:
+                            target_emission_sets = [set(value) for value in emission_token_values.tolist()]
+
+                        if selected_filter_item is not None and selected_filter_bands:
+                            filter_match_tier = np.array(
+                                [_filter_match_tier(target_bands, selected_filter_bands) for target_bands in target_emission_sets],
+                                dtype=int,
+                            )
+                            filter_visibility_mask = filter_match_tier > 0
+                        else:
+                            if owned_filter_band_sets:
+                                filter_match_tier = np.array(
+                                    [
+                                        max(_filter_match_tier(target_bands, reference_bands) for reference_bands in owned_filter_band_sets)
+                                        for target_bands in target_emission_sets
+                                    ],
+                                    dtype=int,
+                                )
+                            else:
+                                filter_match_tier = np.zeros(len(candidate_col_indices), dtype=int)
+                            filter_visibility_mask = np.ones(len(candidate_col_indices), dtype=bool)
+
+                        eligible_mask = has_duration & filter_visibility_mask
+                        if not np.any(eligible_mask):
+                            empty_query_message = "No targets match the selected camera filter."
+                        else:
+                            eligible_indices = np.where(eligible_mask)[0]
+                            recommended = candidates.iloc[eligible_indices].copy()
+                            recommended["visible_minutes"] = full_night_visible_minutes[eligible_indices]
+                            recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
+                            recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
+                            recommended["peak_altitude"] = np.round(peak_altitude[eligible_indices], 1)
+                            recommended["peak_time_local"] = peak_time_local[eligible_indices]
+                            recommended["peak_direction"] = peak_direction[eligible_indices]
+                            recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
+                            recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
+                            recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
+                            if "apparent_size" not in recommended.columns:
+                                recommended["apparent_size"] = recommended.apply(
+                                    lambda row: format_apparent_size_display(
+                                        row.get("ang_size_maj_arcmin"),
+                                        row.get("ang_size_min_arcmin"),
+                                    ),
+                                    axis=1,
+                                )
+                            if "apparent_size_sort_arcmin" not in recommended.columns:
+                                recommended["apparent_size_sort_arcmin"] = recommended.apply(
+                                    lambda row: apparent_size_sort_key_arcmin(
+                                        row.get("ang_size_maj_arcmin"),
+                                        row.get("ang_size_min_arcmin"),
+                                    ),
+                                    axis=1,
+                                )
+                            if "target_name" not in recommended.columns:
+                                primary_ids = recommended["primary_id"].astype(str)
+                                common_names = recommended["common_name"].fillna("").astype(str).str.strip()
+                                recommended["target_name"] = np.where(
+                                    common_names != "",
+                                    primary_ids + " - " + common_names,
+                                    primary_ids,
+                                )
+                            recommended["visibility_duration"] = recommended["visible_minutes"].map(
+                                lambda minutes: f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}"
+                            )
+                            recommended["visibility_bin_15"] = np.floor_divide(
+                                recommended["selected_visible_minutes"],
+                                15,
+                            ).astype(int)
+                            recommended["peak_alt_band_10"] = np.floor(
+                                np.clip(recommended["peak_altitude"], 0.0, 90.0) / 10.0
+                            ).astype(int)
+
+                            recommended["framing_percent"] = np.nan
+                            if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
+                                target_maj_deg = pd.to_numeric(recommended["ang_size_maj_arcmin"], errors="coerce") / 60.0
+                                target_min_deg = pd.to_numeric(recommended["ang_size_min_arcmin"], errors="coerce") / 60.0
+                                target_maj_deg = target_maj_deg.where(target_maj_deg > 0.0)
+                                target_min_deg = target_min_deg.where(target_min_deg > 0.0)
+                                target_maj_deg = target_maj_deg.fillna(target_min_deg)
+                                target_min_deg = target_min_deg.fillna(target_maj_deg)
+                                target_area_deg2 = target_maj_deg * target_min_deg
+                                framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
+                                recommended["framing_percent"] = framing_percent
+
+                                if minimum_size_pct is not None:
+                                    recommended = recommended[
+                                        recommended["framing_percent"].apply(
+                                            lambda value: value is not None and not pd.isna(value) and np.isfinite(float(value))
+                                            and float(value) >= float(minimum_size_pct)
+                                        )
+                                    ]
+
+                            if recommended.empty:
+                                empty_query_message = "No targets remain after applying size/framing criteria."
+                            else:
+                                if selected_telescope is not None:
+                                    recommended["sort_size_metric"] = recommended["framing_percent"].apply(
+                                        lambda value: (
+                                            float(value)
+                                            if value is not None and not pd.isna(value) and np.isfinite(float(value))
+                                            else -1.0
+                                        )
+                                    )
+                                else:
+                                    recommended["sort_size_metric"] = recommended["apparent_size_sort_arcmin"].apply(
+                                        lambda value: (
+                                            float(value)
+                                            if value is not None and not pd.isna(value) and np.isfinite(float(value))
+                                            else -1.0
+                                        )
+                                    )
+
+                                recommended = recommended.sort_values(
+                                    by=[
+                                        "filter_match_tier",
+                                        "visibility_bin_15",
+                                        "selected_visible_minutes",
+                                        "peak_alt_band_10",
+                                        "peak_altitude",
+                                        "sort_size_metric",
+                                        "primary_id",
+                                    ],
+                                    ascending=[False, False, False, False, False, False, True],
+                                ).reset_index(drop=True)
+                                total_results_uncapped = int(len(recommended))
+
+        update_query_progress(88, "Searching recommendations: applying limits and sorting...")
+        update_query_progress(100, "Searching recommendations: ready.")
         clear_query_progress()
-        st.info("No targets remain after applying size/framing criteria.")
+
+        if empty_query_message:
+            query_cache_store[criteria_signature] = {
+                "status": "empty",
+                "message": empty_query_message,
+            }
+        else:
+            query_cache_store[criteria_signature] = {
+                "status": "ok",
+                "recommended": recommended.copy(),
+                "total_results_uncapped": int(total_results_uncapped),
+            }
+        while len(query_cache_store) > RECOMMENDATION_QUERY_SESSION_CACHE_LIMIT:
+            oldest_signature = next(iter(query_cache_store))
+            del query_cache_store[oldest_signature]
+        st.session_state[query_cache_key] = query_cache_store
+
+    if empty_query_message:
+        st.info(empty_query_message)
         return
-
-    if selected_telescope is not None:
-        recommended["sort_size_metric"] = recommended["framing_percent"].apply(
-            lambda value: float(value) if value is not None and not pd.isna(value) and np.isfinite(float(value)) else -1.0
-        )
-    else:
-        recommended["sort_size_metric"] = recommended["apparent_size_sort_arcmin"].apply(
-            lambda value: float(value) if value is not None and not pd.isna(value) and np.isfinite(float(value)) else -1.0
-        )
-
-    recommended = recommended.sort_values(
-        by=[
-            "filter_match_tier",
-            "visibility_bin_15",
-            "selected_visible_minutes",
-            "peak_alt_band_10",
-            "peak_altitude",
-            "sort_size_metric",
-            "primary_id",
-        ],
-        ascending=[False, False, False, False, False, False, True],
-    ).reset_index(drop=True)
-    update_query_progress(88, "Searching recommendations: applying limits and sorting...")
 
     if selected_filter_item is not None:
         filter_name = str(selected_filter_item.get("name", "selected filter")).strip() or "selected filter"
@@ -2735,11 +3131,8 @@ def render_target_recommendations(
     elif owned_filter_band_sets:
         st.caption("No camera filter selected; results are ranked by best filter-match tier across owned filters.")
 
-    max_results_limit = 1000
-    total_results_uncapped = int(len(recommended))
-    results_limited = total_results_uncapped > max_results_limit
-    if results_limited:
-        recommended = recommended.head(max_results_limit).copy().reset_index(drop=True)
+    if total_results_uncapped <= 0:
+        total_results_uncapped = int(len(recommended))
 
     sort_options: list[tuple[str, str]] = [
         ("ranking", "Recommended"),
@@ -2792,9 +3185,6 @@ def render_target_recommendations(
             kind="mergesort",
         ).reset_index(drop=True)
 
-    update_query_progress(100, "Searching recommendations: ready.")
-    clear_query_progress()
-
     page_size = int(st.session_state.get(page_size_key, 20))
     if page_size not in {10, 20, 100}:
         page_size = 20
@@ -2813,17 +3203,8 @@ def render_target_recommendations(
         st.session_state[page_number_key] = current_page
     page_number = current_page
     results_meta_col, query_meta_col = st.columns([4, 2], gap="small")
-    if results_limited:
-        results_meta_col.caption(
-            f"{total_results} of {total_results_uncapped} targets | page {page_number}/{total_pages}"
-        )
-    else:
-        results_meta_col.caption(f"{total_results} targets | page {page_number}/{total_pages}")
+    results_meta_col.caption(f"{total_results} targets | page {page_number}/{total_pages}")
     query_meta_col.caption(f"Query time: {query_elapsed_label}")
-    if results_limited:
-        st.warning(
-            f"Maximum results reached ({max_results_limit}). Add additional search criteria."
-        )
 
     start_index = (page_number - 1) * int(page_size)
     end_index = min(total_results, start_index + int(page_size))
@@ -6274,6 +6655,7 @@ def render_detail_panel(
             window_end=recommendation_window_end,
             tzinfo=recommendation_tzinfo,
             use_12_hour=use_12_hour,
+            weather_forecast_day_offset=normalized_forecast_day_offset,
         )
 
     if selected is None:
@@ -7393,7 +7775,7 @@ def main() -> None:
         browser_language,
     )
 
-    catalog, catalog_meta = load_catalog_from_cache(cache_path=CATALOG_CACHE_PATH)
+    catalog, catalog_meta = load_catalog_app_cached(CATALOG_CACHE_PATH)
     sanitize_saved_lists(catalog=catalog, prefs=prefs)
 
     def explorer_page() -> None:
