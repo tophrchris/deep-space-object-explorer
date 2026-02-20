@@ -378,6 +378,10 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 [data-testid="stSidebar"] * {{
                     color: var(--dso-text-color);
                 }}
+                [data-testid="stMainBlockContainer"],
+                [data-testid="stAppViewBlockContainer"] {{
+                    padding-top: 1.15rem !important;
+                }}
                 [data-testid="stMainBlockContainer"] * {{
                     color: var(--dso-text-color);
                 }}
@@ -488,6 +492,10 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 [data-testid="stSidebar"] * {{
                     color: var(--dso-text-color);
                 }}
+                [data-testid="stMainBlockContainer"],
+                [data-testid="stAppViewBlockContainer"] {{
+                    padding-top: 1.15rem !important;
+                }}
                 [data-testid="stMainBlockContainer"] * {{
                     color: var(--dso-text-color);
                 }}
@@ -571,6 +579,10 @@ def apply_ui_theme_css(theme_name: str) -> None:
             .small-note {{
                 font-size: 0.9rem;
                 color: {palette.get("small_note_color", "#666666")};
+            }}
+            [data-testid="stMainBlockContainer"],
+            [data-testid="stAppViewBlockContainer"] {{
+                padding-top: 1.15rem !important;
             }}
             .dso-location-meta {{
                 display: flex;
