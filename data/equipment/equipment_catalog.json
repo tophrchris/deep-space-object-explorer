@@ -35,14 +35,20 @@
           "name": "ZWO Seestar S30 Pro",
           "fov_maj_deg": 4.3,
           "fov_min_deg": 2.4,
-          "filter_bands": []
+          "filter_bands": [
+            "HA",
+            "OIII"
+          ]
         },
         {
           "id": "zwo-seestar-s30",
           "name": "zwo Seestar S30",
           "fov_maj_deg": 2.14,
           "fov_min_deg": 1.21,
-          "filter_bands": []
+          "filter_bands": [
+            "HA",
+            "OIII"
+          ]
         },
         {
           "id": "dwarflab-dwarf-3",
