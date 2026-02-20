@@ -770,6 +770,19 @@ def reduce_hrz_points_to_wind16(
     return reduced, missing_directions
 
 
+def wind16_obstructions_to_hrz_text(obstructions: dict[str, Any]) -> str:
+    wind16_values = {
+        direction: clamp_obstruction_altitude(obstructions.get(direction), default=20.0)
+        for direction in WIND16
+    }
+    lines: list[str] = []
+    for azimuth in range(360):
+        direction = az_to_wind16(float(azimuth))
+        altitude = wind16_values.get(direction, 20.0)
+        lines.append(f"{azimuth} {altitude:.1f}")
+    return "\n".join(lines) + "\n"
+
+
 def sync_slider_state_value(state_key: str, target_value: float) -> None:
     rounded_target = int(round(clamp_obstruction_altitude(target_value, default=20.0)))
     sync_key = f"{state_key}_synced"
@@ -2270,6 +2283,33 @@ def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_u
     return []
 
 
+def build_hourly_weather_maps(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, float], dict[str, float], dict[str, dict[str, Any]]]:
+    temperatures: dict[str, float] = {}
+    cloud_cover_by_hour: dict[str, float] = {}
+    weather_by_hour: dict[str, dict[str, Any]] = {}
+    for weather_row in rows:
+        time_iso = str(weather_row.get("time_iso", "")).strip()
+        if not time_iso:
+            continue
+        try:
+            hour_key = pd.Timestamp(time_iso).floor("h").isoformat()
+        except Exception:
+            hour_key = time_iso
+
+        temperature_value = weather_row.get("temperature_2m")
+        if temperature_value is not None and not pd.isna(temperature_value):
+            temperatures[hour_key] = float(temperature_value)
+
+        cloud_cover_value = weather_row.get("cloud_cover")
+        if cloud_cover_value is not None and not pd.isna(cloud_cover_value):
+            cloud_cover_by_hour[hour_key] = float(cloud_cover_value)
+
+        weather_by_hour[hour_key] = weather_row
+    return temperatures, cloud_cover_by_hour, weather_by_hour
+
+
 def build_hourly_weather_matrix(
     rows: list[dict[str, Any]],
     *,
@@ -2923,6 +2963,35 @@ def endpoint_marker_segments_radial(
     return rise_segment, set_segment
 
 
+def terminal_segment_from_path_arrays(
+    x_values: np.ndarray | pd.Series,
+    y_values: np.ndarray | pd.Series,
+) -> tuple[float, float, float, float] | None:
+    x_numeric = np.asarray(x_values, dtype=float)
+    y_numeric = np.asarray(y_values, dtype=float)
+    if x_numeric.size < 2 or y_numeric.size < 2:
+        return None
+
+    finite_mask = np.isfinite(x_numeric) & np.isfinite(y_numeric)
+    finite_indices = np.flatnonzero(finite_mask)
+    if finite_indices.size < 2:
+        return None
+
+    for idx in range(finite_indices.size - 1, 0, -1):
+        prev_idx = int(finite_indices[idx - 1])
+        curr_idx = int(finite_indices[idx])
+        if curr_idx - prev_idx != 1:
+            continue
+        x0 = float(x_numeric[prev_idx])
+        y0 = float(y_numeric[prev_idx])
+        x1 = float(x_numeric[curr_idx])
+        y1 = float(y_numeric[curr_idx])
+        if abs(x1 - x0) < 1e-9 and abs(y1 - y0) < 1e-9:
+            continue
+        return (x0, y0, x1, y1)
+    return None
+
+
 def obstruction_step_profile(obstructions: dict[str, float]) -> tuple[np.ndarray, np.ndarray]:
     # Hard-floor profile aligned to 16-wind bin boundaries.
     boundaries = [0.0] + [11.25 + (22.5 * idx) for idx in range(16)] + [360.0]
@@ -3019,6 +3088,9 @@ def build_unobstructed_altitude_area_plot(
     target_tracks: list[dict[str, Any]],
     *,
     use_12_hour: bool,
+    temperature_by_hour: dict[str, float] | None = None,
+    weather_by_hour: dict[str, dict[str, Any]] | None = None,
+    temperature_unit: str = "f",
 ) -> go.Figure:
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
@@ -3210,6 +3282,97 @@ def build_unobstructed_altitude_area_plot(
                 borderpad=2,
             )
 
+    hourly_points: list[pd.Timestamp] = []
+    if temperature_by_hour:
+        for hour_key in temperature_by_hour.keys():
+            try:
+                hourly_points.append(pd.Timestamp(hour_key))
+            except Exception:
+                continue
+    if weather_by_hour:
+        for hour_key in weather_by_hour.keys():
+            try:
+                hourly_points.append(pd.Timestamp(hour_key))
+            except Exception:
+                continue
+
+    if hourly_points:
+        unique_hour_points = sorted({pd.Timestamp(value).floor("h") for value in hourly_points})
+        min_plot_time = min(plotted_times) if plotted_times else None
+        max_plot_time = max(plotted_times) if plotted_times else None
+
+        temp_x: list[pd.Timestamp] = []
+        temp_y: list[float] = []
+        temp_text: list[str] = []
+        temp_colors: list[str] = []
+        temp_hover: list[str] = []
+
+        alert_x: list[pd.Timestamp] = []
+        alert_y: list[float] = []
+        alert_text: list[str] = []
+        alert_hover: list[str] = []
+
+        for hour_timestamp in unique_hour_points:
+            if min_plot_time is not None and hour_timestamp < (min_plot_time.floor("h") - pd.Timedelta(hours=1)):
+                continue
+            if max_plot_time is not None and hour_timestamp > (max_plot_time.ceil("h") + pd.Timedelta(hours=1)):
+                continue
+
+            hour_key = hour_timestamp.isoformat()
+            temp_value = None if not temperature_by_hour else temperature_by_hour.get(hour_key)
+            if temp_value is not None and not pd.isna(temp_value):
+                temp_x.append(hour_timestamp)
+                temp_y.append(-4.5)
+                temp_text.append(format_temperature(temp_value, temperature_unit))
+                temp_f = (float(temp_value) * 9.0 / 5.0) + 32.0
+                temp_colors.append(_interpolate_temperature_color_f(temp_f))
+                temp_hover.append(
+                    f"{format_display_time(hour_timestamp, use_12_hour=use_12_hour)}<br>"
+                    f"Temperature: {format_temperature(temp_value, temperature_unit)}"
+                )
+
+            weather_row = {} if not weather_by_hour else weather_by_hour.get(hour_key, {})
+            emoji, tooltip_text = resolve_weather_alert_indicator(weather_row, temperature_unit)
+            if emoji:
+                alert_x.append(hour_timestamp)
+                alert_y.append(-8.0)
+                alert_text.append(emoji)
+                if tooltip_text:
+                    alert_hover.append(
+                        f"{format_display_time(hour_timestamp, use_12_hour=use_12_hour)}<br>{tooltip_text}"
+                    )
+                else:
+                    alert_hover.append(format_display_time(hour_timestamp, use_12_hour=use_12_hour))
+
+        if temp_text:
+            fig.add_trace(
+                go.Scatter(
+                    x=temp_x,
+                    y=temp_y,
+                    mode="text",
+                    text=temp_text,
+                    textposition="middle center",
+                    textfont={"color": temp_colors},
+                    showlegend=False,
+                    hovertext=temp_hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                )
+            )
+
+        if alert_text:
+            fig.add_trace(
+                go.Scatter(
+                    x=alert_x,
+                    y=alert_y,
+                    mode="text",
+                    text=alert_text,
+                    textposition="middle center",
+                    showlegend=False,
+                    hovertext=alert_hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                )
+            )
+
     fig.update_layout(
         title=title,
         height=360,
@@ -3254,7 +3417,7 @@ def build_unobstructed_altitude_area_plot(
         **x_axis_settings,
     )
     fig.update_yaxes(
-        range=[0, 90],
+        range=[-12, 90],
         tickvals=[0, 15, 30, 45, 60, 75, 90],
         showgrid=True,
         gridcolor=theme_colors["grid"],
@@ -3317,7 +3480,9 @@ def build_path_plot(
             hovertemplate="%{hovertext}<extra></extra>",
         )
     )
-    rise_segment, _ = endpoint_marker_segments_cartesian(track, events)
+    rise_segment, set_segment = endpoint_marker_segments_cartesian(track, events)
+    if set_segment is None:
+        set_segment = terminal_segment_from_path_arrays(path_x, path_y)
     if rise_segment is not None:
         fig.add_trace(
             go.Scatter(
@@ -3331,6 +3496,23 @@ def build_path_plot(
                     "angleref": "previous",
                     "color": selected_color,
                     "line": {"width": 2, "color": selected_color},
+                },
+                hoverinfo="skip",
+            )
+        )
+    if set_segment is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[set_segment[0], set_segment[2]],
+                y=[set_segment[1], set_segment[3]],
+                mode="markers",
+                showlegend=False,
+                marker={
+                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY + 1],
+                    "symbol": "triangle-up",
+                    "angleref": "previous",
+                    "color": selected_color,
+                    "line": {"width": 1, "color": selected_color},
                 },
                 hoverinfo="skip",
             )
@@ -3385,9 +3567,11 @@ def build_path_plot(
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
-            overlay_rise_segment, _ = endpoint_marker_segments_cartesian(
+            overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_cartesian(
                 overlay_track, target_track.get("events", {})
             )
+            if overlay_set_segment is None:
+                overlay_set_segment = terminal_segment_from_path_arrays(path_x, path_y)
             if overlay_rise_segment is not None:
                 fig.add_trace(
                     go.Scatter(
@@ -3401,6 +3585,23 @@ def build_path_plot(
                             "angleref": "previous",
                             "color": target_color,
                             "line": {"width": 2, "color": target_color},
+                        },
+                        hoverinfo="skip",
+                    )
+                )
+            if overlay_set_segment is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[overlay_set_segment[0], overlay_set_segment[2]],
+                        y=[overlay_set_segment[1], overlay_set_segment[3]],
+                        mode="markers",
+                        showlegend=False,
+                        marker={
+                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY + 1],
+                            "symbol": "triangle-up",
+                            "angleref": "previous",
+                            "color": target_color,
+                            "line": {"width": 1, "color": target_color},
                         },
                         hoverinfo="skip",
                     )
@@ -3537,7 +3738,9 @@ def build_path_plot_radial(
         )
     )
     radial_values = np.asarray(track_r, dtype=float)
-    rise_segment, _ = endpoint_marker_segments_radial(track, events, radial_values)
+    rise_segment, set_segment = endpoint_marker_segments_radial(track, events, radial_values)
+    if set_segment is None:
+        set_segment = terminal_segment_from_path_arrays(track["az"], track_r)
     if rise_segment is not None:
         fig.add_trace(
             go.Scatterpolar(
@@ -3551,6 +3754,23 @@ def build_path_plot_radial(
                     "angleref": "previous",
                     "color": selected_color,
                     "line": {"width": 2, "color": selected_color},
+                },
+                hoverinfo="skip",
+            )
+        )
+    if set_segment is not None:
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[set_segment[0], set_segment[2]],
+                r=[set_segment[1], set_segment[3]],
+                mode="markers",
+                showlegend=False,
+                marker={
+                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY + 1],
+                    "symbol": "triangle-up",
+                    "angleref": "previous",
+                    "color": selected_color,
+                    "line": {"width": 1, "color": selected_color},
                 },
                 hoverinfo="skip",
             )
@@ -3620,9 +3840,11 @@ def build_path_plot_radial(
                 )
             )
             overlay_radial_values = np.asarray(overlay_r, dtype=float)
-            overlay_rise_segment, _ = endpoint_marker_segments_radial(
+            overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_radial(
                 overlay_track, target_track.get("events", {}), overlay_radial_values
             )
+            if overlay_set_segment is None:
+                overlay_set_segment = terminal_segment_from_path_arrays(overlay_track["az"], overlay_r)
             if overlay_rise_segment is not None:
                 fig.add_trace(
                     go.Scatterpolar(
@@ -3636,6 +3858,23 @@ def build_path_plot_radial(
                             "angleref": "previous",
                             "color": target_color,
                             "line": {"width": 2, "color": target_color},
+                        },
+                        hoverinfo="skip",
+                    )
+                )
+            if overlay_set_segment is not None:
+                fig.add_trace(
+                    go.Scatterpolar(
+                        theta=[overlay_set_segment[0], overlay_set_segment[2]],
+                        r=[overlay_set_segment[1], overlay_set_segment[3]],
+                        mode="markers",
+                        showlegend=False,
+                        marker={
+                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY + 1],
+                            "symbol": "triangle-up",
+                            "angleref": "previous",
+                            "color": target_color,
+                            "line": {"width": 1, "color": target_color},
                         },
                         hoverinfo="skip",
                     )
@@ -3914,19 +4153,7 @@ def build_night_plot(
         gridwidth=1,
         gridcolor=theme_colors["grid"],
     )
-    max_altitude = float(frame["max_alt"].max()) if "max_alt" in frame.columns and not frame["max_alt"].empty else 0.0
-    if not np.isfinite(max_altitude):
-        max_altitude = 0.0
-    y_axis_max = min(90.0, max_altitude + 10.0)
-    y_axis_max = max(10.0, y_axis_max)
-
-    tickvals = [value for value in [0, 15, 30, 45, 60, 75, 90] if value <= y_axis_max + 1e-9]
-    y_axis_max_rounded = round(y_axis_max, 1)
-    if y_axis_max_rounded not in tickvals:
-        tickvals.append(y_axis_max_rounded)
-    tickvals = sorted(set(tickvals))
-
-    fig.update_yaxes(range=[-12, y_axis_max], tickvals=tickvals)
+    fig.update_yaxes(range=[-12, 90], tickvals=[0, 15, 30, 45, 60, 75, 90])
     return fig
 
 
@@ -4535,6 +4762,16 @@ def render_obstructions_settings_section(prefs: dict[str, Any]) -> None:
         direction: clamp_obstruction_altitude(prefs["obstructions"].get(direction), default=20.0)
         for direction in WIND16
     }
+    location_label = str(prefs.get("location", {}).get("label", "")).strip()
+    filename_base = re.sub(r"[^a-zA-Z0-9._-]+", "-", location_label).strip("-").lower() or "observation-site"
+    st.download_button(
+        "Export WIND16 as .hrz",
+        data=wind16_obstructions_to_hrz_text(current_obstructions),
+        file_name=f"{filename_base}-obstructions.hrz",
+        mime="text/plain",
+        use_container_width=False,
+        key="obstruction_export_hrz_button",
+    )
 
     def _apply_wind16_obstructions(next_values: dict[str, Any], *, success_message: str) -> None:
         normalized = {
@@ -4971,6 +5208,7 @@ def render_detail_panel(
             hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
         )
         nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit)
+        temperatures, _, weather_by_hour = build_hourly_weather_maps(hourly_weather_rows)
 
         with st.container(border=True):
             st.markdown("### Night Sky Preview")
@@ -5110,10 +5348,14 @@ def render_detail_panel(
                     build_unobstructed_altitude_area_plot(
                         unobstructed_area_tracks,
                         use_12_hour=use_12_hour,
+                        temperature_by_hour=temperatures,
+                        weather_by_hour=weather_by_hour,
+                        temperature_unit=temperature_unit,
                     ),
                     use_container_width=True,
                     key="detail_unobstructed_area_plot",
                 )
+                st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
                 render_target_recommendations(
                     catalog,
                     prefs,
@@ -5523,6 +5765,7 @@ def render_detail_panel(
     )
     forecast_hourly_weather_rows = hourly_weather_rows
     nightly_weather_alert_emojis = collect_night_weather_alert_emojis(forecast_hourly_weather_rows, temperature_unit)
+    temperatures, cloud_cover_by_hour, weather_by_hour = build_hourly_weather_maps(forecast_hourly_weather_rows)
     if normalized_forecast_day_offset <= 0:
         detail_hourly_period_label = "Tonight"
     elif normalized_forecast_day_offset == 1:
@@ -5668,10 +5911,14 @@ def render_detail_panel(
                 build_unobstructed_altitude_area_plot(
                     unobstructed_area_tracks,
                     use_12_hour=use_12_hour,
+                    temperature_by_hour=temperatures,
+                    weather_by_hour=weather_by_hour,
+                    temperature_unit=temperature_unit,
                 ),
                 use_container_width=True,
                 key="detail_unobstructed_area_plot",
             )
+            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
             render_target_recommendations(
                 catalog,
                 prefs,
@@ -5737,24 +5984,6 @@ def render_detail_panel(
                     window_start=window_start,
                     window_end=window_end,
                 )
-    temperatures: dict[str, float] = {}
-    cloud_cover_by_hour: dict[str, float] = {}
-    weather_by_hour: dict[str, dict[str, Any]] = {}
-    for weather_row in forecast_hourly_weather_rows:
-        time_iso = str(weather_row.get("time_iso", "")).strip()
-        if not time_iso:
-            continue
-        try:
-            hour_key = pd.Timestamp(time_iso).floor("h").isoformat()
-        except Exception:
-            hour_key = time_iso
-        temperature_value = weather_row.get("temperature_2m")
-        if temperature_value is not None and not pd.isna(temperature_value):
-            temperatures[hour_key] = float(temperature_value)
-        cloud_cover_value = weather_row.get("cloud_cover")
-        if cloud_cover_value is not None and not pd.isna(cloud_cover_value):
-            cloud_cover_by_hour[hour_key] = float(cloud_cover_value)
-        weather_by_hour[hour_key] = weather_row
 
     forecast_placeholder.plotly_chart(
         build_night_plot(
