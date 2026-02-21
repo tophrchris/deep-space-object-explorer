@@ -442,6 +442,19 @@ WEATHER_FORECAST_PERIOD_TONIGHT = "tonight"
 WEATHER_FORECAST_PERIOD_TOMORROW = "tomorrow"
 WEATHER_FORECAST_DAY_OFFSET_STATE_KEY = "weather_forecast_day_offset"
 ASTRONOMY_FORECAST_NIGHTS = 5
+NIGHT_RATING_FACTOR_WEIGHTS: dict[str, float] = {
+    "precipitation": 0.40,
+    "cloud_coverage": 0.30,
+    "wind": 0.20,
+    "dew_spread": 0.10,
+}
+NIGHT_RATING_EMOJIS: dict[int, str] = {
+    1: "🚩🚩",
+    2: "🚩",
+    3: "⭐️",
+    4: "⭐️⭐️",
+    5: "⭐️⭐️🌟",
+}
 OBJECT_TYPE_GROUP_COLOR_DEFAULT = "#94A3B8"
 OBJECT_TYPE_GROUP_COLOR_RANGE_THEMES: dict[str, dict[str, tuple[str, str]]] = {
     "default": {
@@ -818,13 +831,202 @@ def format_recommendation_night_title(day_offset: int, window_start: datetime) -
     return f"{day_name} Night"
 
 
-def format_condition_tips_title(day_offset: int, window_start: datetime) -> str:
+def compute_night_rating_details(
+    hourly_weather_rows: list[dict[str, Any]],
+    *,
+    temperature_unit: str,
+) -> dict[str, Any] | None:
+    if not hourly_weather_rows:
+        return None
+
+    def _finite(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric):
+            return None
+        return float(numeric)
+
+    def _fraction_true(values: list[bool]) -> float | None:
+        if not values:
+            return None
+        true_count = sum(1 for value in values if bool(value))
+        return float(true_count) / float(len(values))
+
+    precip_clear_scores: list[bool] = []
+    cloud_scores: list[bool] = []
+    wind_scores: list[bool] = []
+    dew_scores: list[bool] = []
+
+    for row in hourly_weather_rows:
+        rain_mm = _finite(row.get("rain")) or 0.0
+        showers_mm = _finite(row.get("showers")) or 0.0
+        snowfall_cm = _finite(row.get("snowfall")) or 0.0
+        precip_clear_scores.append((rain_mm + showers_mm + snowfall_cm) <= 0.0)
+
+        cloud_cover = _finite(row.get("cloud_cover"))
+        if cloud_cover is not None:
+            cloud_scores.append(cloud_cover < 20.0)
+
+        gust_kmh = _finite(row.get("wind_gusts_10m"))
+        if gust_kmh is None:
+            gust_kmh = _finite(row.get("wind_speed_10m"))
+        if gust_kmh is not None:
+            wind_mph = gust_kmh * 0.621371
+            wind_scores.append(wind_mph < 10.0)
+
+        temp_c = _finite(row.get("temperature_2m"))
+        dew_c = _finite(row.get("dew_point_2m"))
+        if temp_c is not None and dew_c is not None:
+            spread_c = abs(temp_c - dew_c)
+            spread_display = spread_c * 9.0 / 5.0 if str(temperature_unit).strip().lower() == "f" else spread_c
+            dew_scores.append(spread_display >= 3.0)
+
+    factor_scores: dict[str, float | None] = {
+        "precipitation": _fraction_true(precip_clear_scores),
+        "cloud_coverage": _fraction_true(cloud_scores),
+        "wind": _fraction_true(wind_scores),
+        "dew_spread": _fraction_true(dew_scores),
+    }
+    weighted_total = 0.0
+    available_weight = 0.0
+    for factor_name, factor_weight in NIGHT_RATING_FACTOR_WEIGHTS.items():
+        factor_score = factor_scores.get(factor_name)
+        if factor_score is None:
+            continue
+        weighted_total += float(factor_weight) * float(factor_score)
+        available_weight += float(factor_weight)
+
+    if available_weight <= 0.0:
+        return None
+
+    normalized_score = weighted_total / available_weight
+    rating = int(np.clip(np.ceil(normalized_score * 5.0), 1, 5))
+    emoji = NIGHT_RATING_EMOJIS.get(rating, "⭐️")
+    factor_rows: list[dict[str, Any]] = []
+    factor_definitions = (
+        ("precipitation", "Precipitation = 0", precip_clear_scores),
+        ("cloud_coverage", "Cloud < 20%", cloud_scores),
+        ("wind", "Wind < 10 mph", wind_scores),
+        ("dew_spread", "Dew spread >= 3°", dew_scores),
+    )
+    for factor_key, factor_label, factor_values in factor_definitions:
+        factor_weight = float(NIGHT_RATING_FACTOR_WEIGHTS.get(factor_key, 0.0))
+        factor_score = factor_scores.get(factor_key)
+        data_hours = len(factor_values)
+        pass_hours = sum(1 for value in factor_values if bool(value))
+        factor_rows.append(
+            {
+                "key": factor_key,
+                "label": factor_label,
+                "weight": factor_weight,
+                "score": factor_score,
+                "data_hours": data_hours,
+                "pass_hours": pass_hours,
+                "weighted_contribution": (
+                    factor_weight * float(factor_score) if factor_score is not None else None
+                ),
+            }
+        )
+
+    return {
+        "rating": rating,
+        "emoji": emoji,
+        "normalized_score": normalized_score,
+        "available_weight": available_weight,
+        "factors": factor_rows,
+    }
+
+
+def compute_night_rating(
+    hourly_weather_rows: list[dict[str, Any]],
+    *,
+    temperature_unit: str,
+) -> tuple[int, str] | None:
+    details = compute_night_rating_details(
+        hourly_weather_rows,
+        temperature_unit=temperature_unit,
+    )
+    if details is None:
+        return None
+    return int(details["rating"]), str(details["emoji"])
+
+
+def format_night_rating_tooltip(rating_details: dict[str, Any] | None) -> str:
+    if not isinstance(rating_details, dict):
+        return ""
+
+    try:
+        rating = int(rating_details.get("rating", 0))
+    except (TypeError, ValueError):
+        rating = 0
+    emoji = str(rating_details.get("emoji", "")).strip()
+    normalized_score = rating_details.get("normalized_score")
+    available_weight = rating_details.get("available_weight")
+    try:
+        weighted_pct_text = f"{float(normalized_score) * 100.0:.0f}%"
+    except (TypeError, ValueError):
+        weighted_pct_text = "-"
+    try:
+        available_weight_pct_text = f"{float(available_weight) * 100.0:.0f}%"
+    except (TypeError, ValueError):
+        available_weight_pct_text = "-"
+
+    lines: list[str] = [
+        f"Night rating: {rating}/5 {emoji}".strip(),
+        f"Weighted score: {weighted_pct_text} (weights in use: {available_weight_pct_text})",
+        "Factors:",
+    ]
+
+    raw_factors = rating_details.get("factors", [])
+    if isinstance(raw_factors, list):
+        for factor in raw_factors:
+            if not isinstance(factor, dict):
+                continue
+            label = str(factor.get("label", "")).strip()
+            if not label:
+                continue
+            try:
+                weight_pct = float(factor.get("weight", 0.0)) * 100.0
+            except (TypeError, ValueError):
+                weight_pct = 0.0
+            score = factor.get("score")
+            if score is None:
+                lines.append(f"- {label} (w {weight_pct:.0f}%): no data")
+                continue
+            try:
+                score_pct = float(score) * 100.0
+            except (TypeError, ValueError):
+                lines.append(f"- {label} (w {weight_pct:.0f}%): no data")
+                continue
+            pass_hours = int(factor.get("pass_hours", 0))
+            data_hours = int(factor.get("data_hours", 0))
+            lines.append(
+                f"- {label} (w {weight_pct:.0f}%): {score_pct:.0f}% ({pass_hours}/{data_hours} hrs)"
+            )
+
+    return "\n".join(lines)
+
+
+def format_condition_tips_title(
+    day_offset: int,
+    window_start: datetime,
+    *,
+    rating_emoji: str | None = None,
+) -> str:
     if day_offset <= 0:
-        return "Tonight's conditions"
-    if day_offset == 1:
-        return "Tomorrow's conditions"
-    day_name = pd.Timestamp(window_start).strftime("%A")
-    return f"{day_name}'s conditions"
+        base_title = "Tonight's Conditions"
+    elif day_offset == 1:
+        base_title = "Tomorrow's Conditions"
+    else:
+        day_name = pd.Timestamp(window_start).strftime("%A")
+        base_title = f"{day_name}'s Conditions"
+
+    if not str(rating_emoji or "").strip():
+        return base_title
+
+    return f"{base_title} {str(rating_emoji).strip()}"
 
 
 def weather_forecast_window(
@@ -4459,7 +4661,6 @@ def build_unobstructed_altitude_area_plot(
     fig = go.Figure()
     plotted_any = False
     plotted_times: list[pd.Timestamp] = []
-    label_candidates: list[dict[str, Any]] = []
     obstruction_ceiling = max(0.0, min(90.0, float(UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG)))
 
     fig.add_shape(
@@ -4507,8 +4708,6 @@ def build_unobstructed_altitude_area_plot(
         target_line_color = target_color if is_selected else _muted_rgba_from_hex(target_color, alpha=0.68)
         target_emissions = str(target_track.get("emission_lines_display") or "").strip()
         target_fill_color = _muted_rgba_from_hex(target_color, alpha=(0.30 if is_selected else 0.10))
-        latest_visible_time: pd.Timestamp | None = None
-        latest_visible_altitude: float | None = None
 
         for segment in visible_track_segments(track):
             segment_times = pd.to_datetime(segment["time_local"], errors="coerce")
@@ -4533,11 +4732,6 @@ def build_unobstructed_altitude_area_plot(
                 continue
 
             plotted_times.extend([pd.Timestamp(value) for value in segment_times.tolist()])
-            segment_latest_time = pd.Timestamp(segment_times.iloc[-1])
-            segment_latest_altitude = float(altitude_values[-1])
-            if latest_visible_time is None or segment_latest_time > latest_visible_time:
-                latest_visible_time = segment_latest_time
-                latest_visible_altitude = segment_latest_altitude
 
             hover_times = np.asarray(
                 [format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in segment_times.tolist()],
@@ -4558,16 +4752,6 @@ def build_unobstructed_altitude_area_plot(
                 )
             )
             plotted_any = True
-        if latest_visible_time is not None and latest_visible_altitude is not None:
-            label_candidates.append(
-                {
-                    "label": target_label,
-                    "color": target_color,
-                    "is_selected": is_selected,
-                    "anchor_time": latest_visible_time,
-                    "anchor_altitude": float(max(0.0, min(90.0, latest_visible_altitude))),
-                }
-            )
 
     title = "Unobstructed Altitude Coverage"
     if not plotted_any:
@@ -4580,70 +4764,6 @@ def build_unobstructed_altitude_area_plot(
             showarrow=False,
             font={"size": 13, "color": theme_colors["muted_text"]},
         )
-    else:
-        anchored_altitudes = [float(candidate["anchor_altitude"]) for candidate in label_candidates]
-        placed_altitudes = distribute_non_overlapping_values(
-            anchored_altitudes,
-            lower=2.0,
-            upper=88.0,
-            min_gap=4.0,
-        )
-        for idx, candidate in enumerate(label_candidates):
-            candidate_color = str(candidate["color"])
-            is_selected_label = bool(candidate["is_selected"])
-            label_text = html.escape(str(candidate["label"]))
-            if is_selected_label:
-                label_text = f"<b>{label_text}</b>"
-            placed_altitude = float(placed_altitudes[idx])
-            anchor_altitude = float(candidate["anchor_altitude"])
-
-            fig.add_trace(
-                go.Scatter(
-                    x=[candidate["anchor_time"]],
-                    y=[anchor_altitude],
-                    mode="markers",
-                    showlegend=False,
-                    marker={
-                        "size": 5 if is_selected_label else 4,
-                        "color": candidate_color,
-                        "line": {"width": 0},
-                    },
-                    hoverinfo="skip",
-                )
-            )
-            if abs(placed_altitude - anchor_altitude) >= 0.2:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[candidate["anchor_time"], candidate["anchor_time"]],
-                        y=[anchor_altitude, placed_altitude],
-                        mode="lines",
-                        showlegend=False,
-                        line={
-                            "width": 1,
-                            "color": _muted_rgba_from_hex(candidate_color, alpha=0.70),
-                            "dash": "dot",
-                        },
-                        hoverinfo="skip",
-                    )
-                )
-            fig.add_annotation(
-                x=1.004,
-                y=placed_altitude,
-                xref="paper",
-                yref="y",
-                text=label_text,
-                showarrow=False,
-                xanchor="left",
-                align="left",
-                font={
-                    "size": 11 if is_selected_label else 10,
-                    "color": candidate_color if is_selected_label else _muted_rgba_from_hex(candidate_color, alpha=0.86),
-                },
-                bgcolor=theme_colors["annotation_bg"],
-                bordercolor=theme_colors["annotation_border"],
-                borderwidth=1,
-                borderpad=2,
-            )
 
     hourly_points: list[pd.Timestamp] = []
     if temperature_by_hour:
@@ -4739,7 +4859,7 @@ def build_unobstructed_altitude_area_plot(
     fig.update_layout(
         title=title,
         height=360,
-        margin={"l": 10, "r": 170, "t": 70, "b": 10},
+        margin={"l": 10, "r": 10, "t": 70, "b": 10},
         showlegend=False,
         plot_bgcolor=theme_colors["plot_bg"],
         paper_bgcolor=theme_colors["paper_bg"],
@@ -6535,6 +6655,9 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     persistence_notice = st.session_state.get("prefs_persistence_notice", "")
     if persistence_notice:
         st.warning(persistence_notice)
+    import_notice = str(st.session_state.pop("settings_import_notice", "")).strip()
+    if import_notice:
+        st.success(import_notice)
     st.subheader("Display")
     labels = list(TEMPERATURE_UNIT_OPTIONS.keys())
     reverse_options = {value: label for label, value in TEMPERATURE_UNIT_OPTIONS.items()}
@@ -6628,7 +6751,23 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
                 if imported_prefs is None:
                     st.warning("Invalid settings file format.")
                 else:
+                    imported_site_count = len(site_ids_in_order(imported_prefs))
+                    imported_list_count = len(list_ids_in_order(imported_prefs, include_auto_recent=True))
+                    imported_equipment_payload = imported_prefs.get("equipment", {})
+                    imported_equipment_count = 0
+                    if isinstance(imported_equipment_payload, dict):
+                        imported_equipment_count = sum(
+                            len(items)
+                            for items in imported_equipment_payload.values()
+                            if isinstance(items, list)
+                        )
                     st.session_state["location_notice"] = "Settings imported."
+                    st.session_state["settings_import_notice"] = (
+                        "Settings imported: "
+                        f"{imported_site_count} site(s), "
+                        f"{imported_list_count} list(s), "
+                        f"{imported_equipment_count} equipment item(s)."
+                    )
                     persist_and_rerun(imported_prefs)
 
 
@@ -6852,57 +6991,129 @@ def render_detail_panel(
 
             local_now = datetime.now(tzinfo)
             show_remaining_column = window_start <= local_now <= window_end
-            summary_col, tips_col = st.columns([3, 1], gap="medium")
-            with summary_col:
-                render_sky_position_summary_table(
-                    summary_rows,
-                    prefs,
-                    use_12_hour=use_12_hour,
-                    preview_list_id=active_preview_list_id,
-                    preview_list_name=active_preview_list_name,
-                    allow_list_membership_toggle=(not preview_list_is_system),
-                    show_remaining=show_remaining_column,
-                    now_local=pd.Timestamp(local_now),
-                )
-                summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
-                unobstructed_area_tracks = [
-                    {
-                        **preview_track,
-                        "is_selected": (
-                            bool(summary_highlight_id)
-                            and str(preview_track.get("primary_id", "")).strip() == summary_highlight_id
-                        ),
-                    }
-                    for preview_track in preview_tracks
-                ]
-                st.plotly_chart(
-                    build_unobstructed_altitude_area_plot(
-                        unobstructed_area_tracks,
-                        use_12_hour=use_12_hour,
-                        temperature_by_hour=temperatures,
-                        weather_by_hour=weather_by_hour,
-                        temperature_unit=temperature_unit,
-                    ),
-                    use_container_width=True,
-                    key="detail_unobstructed_area_plot",
-                )
-                st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
-            with tips_col:
-                with st.container(border=True):
-                    render_target_tips_panel(
-                        "",
-                        "No target selected",
-                        None,
-                        None,
+            plots_container = st.container()
+            summary_container = st.container()
+
+            unobstructed_area_tracks: list[dict[str, Any]] = []
+            focused_preview_track: dict[str, Any] | None = None
+            with summary_container:
+                summary_col, tips_col = st.columns([3, 1], gap="medium")
+                with summary_col:
+                    render_sky_position_summary_table(
                         summary_rows,
-                        nightly_weather_alert_emojis,
-                        hourly_weather_rows,
-                        temperature_unit=temperature_unit,
+                        prefs,
                         use_12_hour=use_12_hour,
-                        local_now=local_now,
-                        window_start=window_start,
-                        window_end=window_end,
+                        preview_list_id=active_preview_list_id,
+                        preview_list_name=active_preview_list_name,
+                        allow_list_membership_toggle=(not preview_list_is_system),
+                        show_remaining=show_remaining_column,
+                        now_local=pd.Timestamp(local_now),
                     )
+                    summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+                    unobstructed_area_tracks = [
+                        {
+                            **preview_track,
+                            "is_selected": (
+                                bool(summary_highlight_id)
+                                and str(preview_track.get("primary_id", "")).strip() == summary_highlight_id
+                            ),
+                        }
+                        for preview_track in preview_tracks
+                    ]
+                    focused_preview_track = next(
+                        (
+                            preview_track
+                            for preview_track in unobstructed_area_tracks
+                            if bool(preview_track.get("is_selected", False))
+                        ),
+                        (unobstructed_area_tracks[0] if unobstructed_area_tracks else None),
+                    )
+                with tips_col:
+                    with st.container(border=True):
+                        render_target_tips_panel(
+                            "",
+                            "No target selected",
+                            None,
+                            None,
+                            summary_rows,
+                            nightly_weather_alert_emojis,
+                            hourly_weather_rows,
+                            temperature_unit=temperature_unit,
+                            use_12_hour=use_12_hour,
+                            local_now=local_now,
+                            window_start=window_start,
+                            window_end=window_end,
+                        )
+
+            with plots_container:
+                path_figure: go.Figure | None = None
+                if focused_preview_track is not None:
+                    overlay_tracks_for_path = [
+                        payload
+                        for payload in unobstructed_area_tracks
+                        if str(payload.get("primary_id", "")).strip()
+                        != str(focused_preview_track.get("primary_id", "")).strip()
+                    ]
+                    path_style = st.segmented_control(
+                        "Target Paths Style",
+                        options=["Line", "Radial"],
+                        default="Line",
+                        key="path_style_preference",
+                    )
+                    if path_style == "Radial":
+                        dome_view = st.toggle("Dome View", value=True, key="dome_view_preference")
+                        path_figure = build_path_plot_radial(
+                            track=focused_preview_track.get("track"),
+                            events=focused_preview_track.get("events", {}),
+                            obstructions=prefs["obstructions"],
+                            dome_view=dome_view,
+                            selected_label=str(focused_preview_track.get("label", "Preview target")),
+                            selected_emissions=str(focused_preview_track.get("emission_lines_display") or ""),
+                            selected_color=str(focused_preview_track.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)),
+                            selected_line_width=float(
+                                focused_preview_track.get("line_width", PATH_LINE_WIDTH_PRIMARY_DEFAULT)
+                            ),
+                            use_12_hour=use_12_hour,
+                            overlay_tracks=overlay_tracks_for_path,
+                        )
+                    else:
+                        path_figure = build_path_plot(
+                            track=focused_preview_track.get("track"),
+                            events=focused_preview_track.get("events", {}),
+                            obstructions=prefs["obstructions"],
+                            selected_label=str(focused_preview_track.get("label", "Preview target")),
+                            selected_emissions=str(focused_preview_track.get("emission_lines_display") or ""),
+                            selected_color=str(focused_preview_track.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)),
+                            selected_line_width=float(
+                                focused_preview_track.get("line_width", PATH_LINE_WIDTH_PRIMARY_DEFAULT)
+                            ),
+                            use_12_hour=use_12_hour,
+                            overlay_tracks=overlay_tracks_for_path,
+                        )
+
+                path_col, area_col = st.columns([1, 1], gap="small")
+                with path_col:
+                    if path_figure is None:
+                        st.info("No preview tracks available for path rendering.")
+                    else:
+                        st.plotly_chart(
+                            path_figure,
+                            use_container_width=True,
+                            key="preview_path_plot",
+                        )
+                with area_col:
+                    st.plotly_chart(
+                        build_unobstructed_altitude_area_plot(
+                            unobstructed_area_tracks,
+                            use_12_hour=use_12_hour,
+                            temperature_by_hour=temperatures,
+                            weather_by_hour=weather_by_hour,
+                            temperature_unit=temperature_unit,
+                        ),
+                        use_container_width=True,
+                        key="preview_unobstructed_area_plot",
+                    )
+                    st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
         return
 
     target_id = str(selected["primary_id"])
@@ -7536,7 +7747,7 @@ def render_explorer_page(
 
     now_utc = datetime.now(timezone.utc)
     refresh_status_html = (
-        "<p class='small-note' style='text-align: right;'>Alt/Az auto-refresh 60s<br>"
+        "<p class='small-note' style='text-align: right;'>Alt/Az auto-refresh 15m<br>"
         f"Updated: {now_utc.strftime('%Y-%m-%d')} "
         f"{format_display_time(now_utc, use_12_hour=use_12_hour, include_seconds=True)} UTC"
         "</p>"
@@ -7590,10 +7801,6 @@ def render_explorer_page(
         browser_locale=browser_locale,
         browser_month_day_pattern=browser_month_day_pattern,
     )
-    condition_tips_title = format_condition_tips_title(
-        weather_forecast_day_offset,
-        weather_window_start,
-    )
     astronomy_summary = build_astronomy_forecast_summary(
         location_lat,
         location_lon,
@@ -7611,6 +7818,16 @@ def render_explorer_page(
         end_local_iso=weather_window_end.isoformat(),
         hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
     )
+    night_rating_details = compute_night_rating_details(
+        hourly_weather_rows,
+        temperature_unit=temperature_unit,
+    )
+    condition_tips_title = format_condition_tips_title(
+        weather_forecast_day_offset,
+        weather_window_start,
+        rating_emoji=(str(night_rating_details.get("emoji", "")).strip() if night_rating_details else None),
+    )
+    condition_tips_tooltip = format_night_rating_tooltip(night_rating_details)
     weather_matrix, weather_tooltips, weather_indicators = build_hourly_weather_matrix(
         hourly_weather_rows,
         use_12_hour=use_12_hour,
@@ -7669,6 +7886,7 @@ def render_explorer_page(
             with st.container(border=True):
                 render_condition_tips_panel(
                     title=condition_tips_title,
+                    title_tooltip=condition_tips_tooltip,
                     period_label=forecast_title_label,
                     forecast_date_text=forecast_date_text,
                     hourly_weather_rows=hourly_weather_rows,
@@ -7693,7 +7911,7 @@ def render_explorer_page(
 
 
 def main() -> None:
-    st_autorefresh(interval=60_000, key="altaz_refresh")
+    st_autorefresh(interval=900_000, key="altaz_refresh")
 
     if "prefs_bootstrap_runs" not in st.session_state:
         st.session_state["prefs_bootstrap_runs"] = 0

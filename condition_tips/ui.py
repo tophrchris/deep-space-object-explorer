@@ -46,6 +46,7 @@ def split_condition_tip_lines(tips: list[ConditionTip]) -> tuple[list[str], list
 def render_condition_tips_panel(
     *,
     title: str,
+    title_tooltip: str | None = None,
     period_label: str,
     forecast_date_text: str,
     hourly_weather_rows: list[dict[str, Any]],
@@ -53,7 +54,19 @@ def render_condition_tips_panel(
     temperature_unit: str,
     use_12_hour: bool,
 ) -> None:
-    st.markdown(f"##### {title}")
+    rendered_title = html.escape(str(title or "").strip() or "Conditions")
+    tooltip_text = str(title_tooltip or "").strip()
+    if tooltip_text:
+        tooltip_attr = html.escape(tooltip_text, quote=True).replace("\n", "&#10;")
+        st.markdown(
+            (
+                f"##### {rendered_title} "
+                f"<span title=\"{tooltip_attr}\" style=\"opacity:0.72; cursor:help;\">ⓘ</span>"
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(f"##### {rendered_title}")
 
     context = ConditionTipsContext(
         period_label=period_label,
