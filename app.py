@@ -111,6 +111,8 @@ from weather_service import (
     format_precipitation,
     format_snowfall,
     format_temperature,
+    format_visibility,
+    format_visibility_condition,
     format_wind_speed,
     resolve_temperature_unit,
 )
@@ -433,10 +435,10 @@ def load_site_date_weather_mask_bundle(
     }
 WEATHER_MATRIX_ROWS: list[tuple[str, str]] = [
     ("temperature_2m", "Temperature"),
-    ("dew_point_2m", "Dewpoint (2m)"),
+    ("dewpoint_spread", "Dewpoint Spread"),
     ("cloud_cover", "Cloud Cover"),
+    ("visibility", "Visibility"),
     ("wind_gusts_10m", "Wind Gusts"),
-    ("relative_humidity_2m", "Rel Humidity"),
 ]
 WEATHER_ALERT_INDICATOR_LEGEND_ITEMS = "❄️ Snow | ⛈️ Rain | ☔ Showers | ⚠️ 1-20% | 🚨 >20%"
 WEATHER_ALERT_INDICATOR_LEGEND_CAPTION = f"Weather Alert Indicator: {WEATHER_ALERT_INDICATOR_LEGEND_ITEMS}"
@@ -3680,6 +3682,15 @@ def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 
+def _ideal_text_color_for_hex(value: str) -> str:
+    try:
+        red, green, blue = _hex_to_rgb(value)
+    except Exception:
+        return "#111827"
+    yiq = ((red * 299) + (green * 587) + (blue * 114)) / 1000.0
+    return "#111827" if yiq >= 155.0 else "#FFFFFF"
+
+
 def _muted_rgba_from_hex(value: str, alpha: float = 0.14) -> str:
     try:
         red, green, blue = _hex_to_rgb(value)
@@ -3778,6 +3789,31 @@ def cloud_cover_cell_style(raw_value: Any) -> str:
     return f"background-color: {background_color}; color: {text_color};"
 
 
+def visibility_condition_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    condition = str(raw_value).strip().lower()
+    if not condition or condition == "-":
+        return ""
+
+    clear_color = "#FFFFFF"
+    fog_color = _interpolate_cloud_cover_color(100.0)
+    gradient_stops = [(0.0, clear_color), (100.0, fog_color)]
+    visibility_color_by_condition = {
+        "clear": clear_color,
+        "misty": _interpolate_color_stops(33.0, gradient_stops),
+        "high haze": _interpolate_color_stops(66.0, gradient_stops),
+        "fog": fog_color,
+    }
+    background_color = visibility_color_by_condition.get(condition)
+    if not background_color:
+        return ""
+
+    text_color = _ideal_text_color_for_hex(background_color)
+    return f"background-color: {background_color}; color: {text_color};"
+
+
 def _temperature_f_from_display_value(raw_value: Any, temperature_unit: str) -> float | None:
     if raw_value is None or pd.isna(raw_value):
         return None
@@ -3808,6 +3844,19 @@ def temperature_cell_style(raw_value: Any, temperature_unit: str) -> str:
     return f"color: {text_color}; font-weight: 700;"
 
 
+def _dewpoint_spread_celsius(temperature_celsius: Any, dewpoint_celsius: Any) -> float | None:
+    if temperature_celsius is None or dewpoint_celsius is None:
+        return None
+    try:
+        temperature_value = float(temperature_celsius)
+        dewpoint_value = float(dewpoint_celsius)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(temperature_value) or not np.isfinite(dewpoint_value):
+        return None
+    return max(0.0, temperature_value - dewpoint_value)
+
+
 def format_weather_matrix_value(metric_key: str, raw_value: Any, temperature_unit: str) -> str:
     if raw_value is None or pd.isna(raw_value):
         return "-"
@@ -3819,6 +3868,10 @@ def format_weather_matrix_value(metric_key: str, raw_value: Any, temperature_uni
 
     if metric_key in {"temperature_2m", "dew_point_2m"}:
         return format_temperature(numeric, temperature_unit)
+    if metric_key == "dewpoint_spread":
+        if str(temperature_unit).strip().lower() == "f":
+            return f"{(numeric * 9.0 / 5.0):.0f} F"
+        return f"{numeric:.0f} C"
     if metric_key == "precipitation_probability":
         probability = max(0.0, float(numeric))
         if probability > 20.0:
@@ -3832,6 +3885,8 @@ def format_weather_matrix_value(metric_key: str, raw_value: Any, temperature_uni
         return format_snowfall(numeric, temperature_unit)
     if metric_key in {"relative_humidity_2m", "cloud_cover"}:
         return f"{numeric:.0f}%"
+    if metric_key == "visibility":
+        return format_visibility_condition(numeric)
     if metric_key == "wind_gusts_10m":
         return format_wind_speed(numeric, temperature_unit)
     return f"{numeric:.2f}"
@@ -4000,14 +4055,27 @@ def build_hourly_weather_matrix(
     tooltip_rows: dict[str, list[str]] = {}
     indicator_rows: dict[str, list[str]] = {}
     for metric_key, metric_label in WEATHER_MATRIX_ROWS:
-        matrix_rows[metric_label] = [
-            format_weather_matrix_value(
-                metric_key,
-                by_hour[timestamp].get(metric_key),
-                temperature_unit=temperature_unit,
-            )
-            for timestamp in ordered_times
-        ]
+        if metric_key == "dewpoint_spread":
+            matrix_rows[metric_label] = [
+                format_weather_matrix_value(
+                    metric_key,
+                    _dewpoint_spread_celsius(
+                        by_hour[timestamp].get("temperature_2m"),
+                        by_hour[timestamp].get("dew_point_2m"),
+                    ),
+                    temperature_unit=temperature_unit,
+                )
+                for timestamp in ordered_times
+            ]
+        else:
+            matrix_rows[metric_label] = [
+                format_weather_matrix_value(
+                    metric_key,
+                    by_hour[timestamp].get(metric_key),
+                    temperature_unit=temperature_unit,
+                )
+                for timestamp in ordered_times
+            ]
         if metric_key == "cloud_cover":
             indicator_rows[metric_label] = [
                 build_weather_alert_indicator_html(by_hour[timestamp], temperature_unit=temperature_unit)
@@ -4015,10 +4083,29 @@ def build_hourly_weather_matrix(
             ]
         else:
             indicator_rows[metric_label] = ["" for _ in ordered_times]
-        if metric_key == "precipitation_probability":
+        if metric_key == "dewpoint_spread":
+            tooltip_rows[metric_label] = [
+                (
+                    f"RH: {float(by_hour[timestamp].get('relative_humidity_2m')):.0f}%"
+                    if by_hour[timestamp].get("relative_humidity_2m") is not None
+                    and not pd.isna(by_hour[timestamp].get("relative_humidity_2m"))
+                    else ""
+                )
+                for timestamp in ordered_times
+            ]
+        elif metric_key == "precipitation_probability":
             tooltip_rows[metric_label] = [
                 (
                     f"Precip probability: {float(by_hour[timestamp].get(metric_key)):.0f}%"
+                    if by_hour[timestamp].get(metric_key) is not None and not pd.isna(by_hour[timestamp].get(metric_key))
+                    else ""
+                )
+                for timestamp in ordered_times
+            ]
+        elif metric_key == "visibility":
+            tooltip_rows[metric_label] = [
+                (
+                    f"Visibility: {format_visibility(by_hour[timestamp].get(metric_key), temperature_unit)}"
                     if by_hour[timestamp].get(metric_key) is not None and not pd.isna(by_hour[timestamp].get(metric_key))
                     else ""
                 )
@@ -4091,6 +4178,8 @@ def render_hourly_weather_matrix(
                 cell_style += cloud_cover_cell_style(raw_value)
             elif element_key == "temperature":
                 cell_style += temperature_cell_style(raw_value, temperature_unit=temperature_unit)
+            elif element_key == "visibility":
+                cell_style += visibility_condition_cell_style(raw_value)
 
             tooltip = ""
             if aligned_tooltips is not None:
