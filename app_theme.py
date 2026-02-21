@@ -343,6 +343,23 @@ def apply_ui_theme_css(theme_name: str) -> None:
     manual_badge = badges.get("manual", {})
     browser_badge = badges.get("browser", {})
     ip_badge = badges.get("ip", {})
+    sidebar_footer_css = f"""
+                [data-testid="stSidebarUserContent"] [data-testid="stVerticalBlock"] {{
+                    min-height: calc(100vh - 3.5rem);
+                    display: flex;
+                    flex-direction: column;
+                }}
+                [data-testid="stSidebarUserContent"] [data-testid="element-container"]:has(.dso-sidebar-theme-anchor) {{
+                    margin-top: auto;
+                    padding-top: 0.7rem;
+                    border-top: 1px solid {palette.get("border_color", "rgba(148, 163, 184, 0.35)")};
+                }}
+                .dso-sidebar-theme-anchor {{
+                    display: block;
+                    height: 0;
+                    width: 100%;
+                }}
+    """
     collapsed_sidebar_css = """
                 section[data-testid="stSidebar"][aria-expanded="false"],
                 [data-testid="stSidebar"][aria-expanded="false"] {{
@@ -428,6 +445,7 @@ def apply_ui_theme_css(theme_name: str) -> None:
                     color: var(--dso-text-color);
                 }}
 {collapsed_sidebar_css}
+{sidebar_footer_css}
                 [data-testid="stMainBlockContainer"],
                 [data-testid="stAppViewBlockContainer"] {{
                     padding-top: 1.15rem !important;
@@ -543,6 +561,7 @@ def apply_ui_theme_css(theme_name: str) -> None:
                     color: var(--dso-text-color);
                 }}
 {collapsed_sidebar_css}
+{sidebar_footer_css}
                 [data-testid="stMainBlockContainer"],
                 [data-testid="stAppViewBlockContainer"] {{
                     padding-top: 1.15rem !important;
@@ -632,6 +651,7 @@ def apply_ui_theme_css(theme_name: str) -> None:
                 color: {palette.get("small_note_color", "#666666")};
             }}
 {collapsed_sidebar_css}
+{sidebar_footer_css}
             [data-testid="stMainBlockContainer"],
             [data-testid="stAppViewBlockContainer"] {{
                 padding-top: 1.15rem !important;

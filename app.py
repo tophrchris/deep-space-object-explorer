@@ -1500,6 +1500,135 @@ def load_equipment_catalog(catalog_path: str = str(EQUIPMENT_CATALOG_PATH)) -> d
     return {"categories": categories}
 
 
+def _normalize_mount_choice(value: Any, *, default_choice: str = "altaz") -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"eq", "equatorial", "equatorial-mount"}:
+        return "eq"
+    if normalized in {"altaz", "alt/az", "alt-az", "alt az"}:
+        return "altaz"
+    return default_choice
+
+
+def mount_choice_label(choice: str) -> str:
+    return "EQ" if str(choice).strip().lower() == "eq" else "Alt/Az"
+
+
+def build_owned_equipment_context(prefs: dict[str, Any]) -> dict[str, Any]:
+    equipment_catalog = load_equipment_catalog()
+    categories = equipment_catalog.get("categories", [])
+    category_items_by_id: dict[str, dict[str, dict[str, Any]]] = {}
+    if isinstance(categories, list):
+        for category in categories:
+            if not isinstance(category, dict):
+                continue
+            category_id = str(category.get("id", "")).strip()
+            if not category_id:
+                continue
+            items = category.get("items", [])
+            if not isinstance(items, list):
+                continue
+            item_lookup = {
+                str(item.get("id", "")).strip(): item
+                for item in items
+                if isinstance(item, dict) and str(item.get("id", "")).strip()
+            }
+            category_items_by_id[category_id] = item_lookup
+
+    owned_equipment = prefs.get("equipment", {})
+    if not isinstance(owned_equipment, dict):
+        owned_equipment = {}
+
+    telescope_lookup = category_items_by_id.get("telescopes", {})
+    filter_lookup = category_items_by_id.get("filters", {})
+
+    owned_telescope_ids = [
+        item_id
+        for item_id in [str(item).strip() for item in owned_equipment.get("telescopes", []) if str(item).strip()]
+        if item_id in telescope_lookup
+    ]
+    owned_filter_ids = [
+        item_id
+        for item_id in [str(item).strip() for item in owned_equipment.get("filters", []) if str(item).strip()]
+        if item_id in filter_lookup
+    ]
+    owned_accessory_ids = {
+        str(item).strip()
+        for item in owned_equipment.get("accessories", [])
+        if str(item).strip()
+    }
+    owned_telescopes = [telescope_lookup[item_id] for item_id in owned_telescope_ids]
+    owned_filters = [filter_lookup[item_id] for item_id in owned_filter_ids]
+
+    return {
+        "category_items_by_id": category_items_by_id,
+        "telescope_lookup": telescope_lookup,
+        "filter_lookup": filter_lookup,
+        "owned_telescope_ids": owned_telescope_ids,
+        "owned_filter_ids": owned_filter_ids,
+        "owned_accessory_ids": owned_accessory_ids,
+        "owned_telescopes": owned_telescopes,
+        "owned_filters": owned_filters,
+        "eq_owned": "equatorial-mount" in owned_accessory_ids,
+    }
+
+
+def sync_active_equipment_settings(
+    prefs: dict[str, Any],
+    equipment_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = equipment_context if isinstance(equipment_context, dict) else build_owned_equipment_context(prefs)
+
+    owned_telescope_ids = list(context.get("owned_telescope_ids", []))
+    owned_filter_ids = list(context.get("owned_filter_ids", []))
+    telescope_lookup = context.get("telescope_lookup", {})
+    filter_lookup = context.get("filter_lookup", {})
+
+    default_mount_choice = "eq" if bool(context.get("eq_owned", False)) else "altaz"
+    current_mount_choice = _normalize_mount_choice(
+        prefs.get("active_mount_choice", default_mount_choice),
+        default_choice=default_mount_choice,
+    )
+
+    current_telescope_id = str(prefs.get("active_telescope_id", "")).strip()
+    if owned_telescope_ids:
+        active_telescope_id = (
+            current_telescope_id if current_telescope_id in owned_telescope_ids else owned_telescope_ids[0]
+        )
+    else:
+        active_telescope_id = ""
+
+    current_filter_id = str(prefs.get("active_filter_id", "__none__")).strip()
+    valid_filter_ids = {"__none__"} | set(owned_filter_ids)
+    active_filter_id = current_filter_id if current_filter_id in valid_filter_ids else "__none__"
+
+    changed = False
+    if str(prefs.get("active_telescope_id", "")).strip() != active_telescope_id:
+        prefs["active_telescope_id"] = active_telescope_id
+        changed = True
+    if str(prefs.get("active_filter_id", "__none__")).strip() != active_filter_id:
+        prefs["active_filter_id"] = active_filter_id
+        changed = True
+    if _normalize_mount_choice(
+        prefs.get("active_mount_choice", default_mount_choice),
+        default_choice=default_mount_choice,
+    ) != current_mount_choice:
+        prefs["active_mount_choice"] = current_mount_choice
+        changed = True
+
+    active_telescope = telescope_lookup.get(active_telescope_id) if active_telescope_id else None
+    active_filter = filter_lookup.get(active_filter_id) if active_filter_id != "__none__" else None
+
+    return {
+        "changed": changed,
+        "active_telescope_id": active_telescope_id,
+        "active_filter_id": active_filter_id,
+        "active_mount_choice": current_mount_choice,
+        "active_telescope": active_telescope,
+        "active_filter": active_filter,
+        **context,
+    }
+
+
 def format_equipment_value(value: Any) -> str:
     if value is None:
         return "-"
@@ -2596,47 +2725,31 @@ def render_target_recommendations(
     location_lon = float(location["lon"])
     obstructions = prefs["obstructions"]
 
-    equipment_catalog = load_equipment_catalog()
-    categories = equipment_catalog.get("categories", [])
-    category_items_by_id: dict[str, dict[str, dict[str, Any]]] = {}
-    if isinstance(categories, list):
-        for category in categories:
-            if not isinstance(category, dict):
-                continue
-            category_id = str(category.get("id", "")).strip()
-            if not category_id:
-                continue
-            items = category.get("items", [])
-            if not isinstance(items, list):
-                continue
-            item_lookup = {
-                str(item.get("id", "")).strip(): item
-                for item in items
-                if isinstance(item, dict) and str(item.get("id", "")).strip()
-            }
-            category_items_by_id[category_id] = item_lookup
+    equipment_context = build_owned_equipment_context(prefs)
+    active_equipment = sync_active_equipment_settings(prefs, equipment_context)
+    if bool(active_equipment.get("changed", False)):
+        st.session_state["prefs"] = prefs
+        save_preferences(prefs)
 
-    owned_equipment = prefs.get("equipment", {})
-    if not isinstance(owned_equipment, dict):
-        owned_equipment = {}
+    telescope_lookup = dict(active_equipment.get("telescope_lookup", {}))
+    filter_lookup = dict(active_equipment.get("filter_lookup", {}))
+    owned_telescopes = list(active_equipment.get("owned_telescopes", []))
+    owned_filters = list(active_equipment.get("owned_filters", []))
 
-    owned_telescope_ids = [str(item).strip() for item in owned_equipment.get("telescopes", []) if str(item).strip()]
-    owned_filter_ids = [str(item).strip() for item in owned_equipment.get("filters", []) if str(item).strip()]
-    owned_accessory_ids = {
-        str(item).strip()
-        for item in owned_equipment.get("accessories", [])
-        if str(item).strip()
-    }
+    active_telescope_id = str(active_equipment.get("active_telescope_id", "")).strip()
+    active_telescope = active_equipment.get("active_telescope")
+    if not isinstance(active_telescope, dict):
+        active_telescope = telescope_lookup.get(active_telescope_id) if active_telescope_id else None
 
-    telescope_lookup = category_items_by_id.get("telescopes", {})
-    owned_telescopes = [telescope_lookup[item_id] for item_id in owned_telescope_ids if item_id in telescope_lookup]
+    active_filter_id = str(active_equipment.get("active_filter_id", "__none__")).strip() or "__none__"
+    active_filter = active_equipment.get("active_filter")
+    if not isinstance(active_filter, dict):
+        active_filter = filter_lookup.get(active_filter_id) if active_filter_id != "__none__" else None
 
-    filter_lookup = category_items_by_id.get("filters", {})
-    owned_filters = [filter_lookup[item_id] for item_id in owned_filter_ids if item_id in filter_lookup]
-    owned_filter_band_sets = [_parse_emission_band_set(item.get("emission_bands", [])) for item in owned_filters]
-    owned_filter_band_sets = [item for item in owned_filter_band_sets if item]
-
-    eq_owned = "equatorial-mount" in owned_accessory_ids
+    active_mount_choice = _normalize_mount_choice(
+        active_equipment.get("active_mount_choice", "altaz"),
+        default_choice="altaz",
+    )
 
     hour_starts = build_full_dark_hour_starts(window_start, window_end)
     hour_options = [hour_start.isoformat() for hour_start in hour_starts]
@@ -2710,10 +2823,9 @@ def render_target_recommendations(
     visible_hour_key = "recommended_targets_visible_hours"
     object_type_key = "recommended_targets_object_types"
     keyword_key = "recommended_targets_keyword"
-    filter_key = "recommended_targets_filter_id"
-    mount_key = "recommended_targets_mount_mode"
-    telescope_radio_key = "recommended_targets_telescope_id"
-    telescope_single_key = "recommended_targets_single_telescope_enabled"
+    include_telescope_key = "recommended_targets_include_telescope_details"
+    include_filter_key = "recommended_targets_include_filter_criteria"
+    include_mount_key = "recommended_targets_include_mount_adaptation"
     min_size_enabled_key = "recommended_targets_min_size_enabled"
     min_size_value_key = "recommended_targets_min_size_pct"
     page_size_key = "recommended_targets_page_size"
@@ -2754,31 +2866,12 @@ def render_target_recommendations(
     if not isinstance(st.session_state.get(keyword_key), str):
         st.session_state[keyword_key] = ""
 
-    filter_options = ["__none__"] + [str(item.get("id", "")).strip() for item in owned_filters if str(item.get("id", "")).strip()]
-    if str(st.session_state.get(filter_key, "__none__")).strip() not in filter_options:
-        st.session_state[filter_key] = "__none__"
-
-    default_mount_option = "EQ" if eq_owned else "Alt/Az"
-    normalized_mount_selection = str(st.session_state.get(mount_key, default_mount_option)).strip()
-    if normalized_mount_selection == "none":
-        normalized_mount_selection = "None"
-    if normalized_mount_selection not in {"None", "EQ", "Alt/Az"}:
-        normalized_mount_selection = default_mount_option
-    st.session_state[mount_key] = normalized_mount_selection
-
-    if len(owned_telescopes) > 1:
-        telescope_options = ["__any__"] + [
-            str(item.get("id", "")).strip()
-            for item in owned_telescopes
-            if str(item.get("id", "")).strip()
-        ]
-        if str(st.session_state.get(telescope_radio_key, "__any__")).strip() not in telescope_options:
-            st.session_state[telescope_radio_key] = "__any__"
-    else:
-        st.session_state[telescope_radio_key] = "__any__"
-
-    if telescope_single_key not in st.session_state:
-        st.session_state[telescope_single_key] = True
+    if include_telescope_key not in st.session_state:
+        st.session_state[include_telescope_key] = active_telescope is not None
+    if include_filter_key not in st.session_state:
+        st.session_state[include_filter_key] = active_filter is not None
+    if include_mount_key not in st.session_state:
+        st.session_state[include_mount_key] = True
     if min_size_enabled_key not in st.session_state:
         st.session_state[min_size_enabled_key] = False
     if min_size_value_key not in st.session_state:
@@ -2820,76 +2913,51 @@ def render_target_recommendations(
         st.caption("Optional. Leave blank to search all targets.")
 
     selected_telescope: dict[str, Any] | None = None
-    selected_filter_id = "__none__"
+    include_telescope_details = False
+    include_filter_criteria = False
+    include_mount_adaptation = False
     with criteria_col_2:
-        if len(owned_telescopes) == 1:
-            only_telescope = owned_telescopes[0]
-            only_name = str(only_telescope.get("name", "")).strip() or "Selected telescope"
-            use_single_telescope = st.checkbox(
-                f"Telescope: {only_name}",
-                key=telescope_single_key,
+        if isinstance(active_telescope, dict):
+            active_telescope_name = str(active_telescope.get("name", "Selected telescope")).strip() or "Selected telescope"
+            include_telescope_details = st.checkbox(
+                "Include telescope details in recommendations",
+                key=include_telescope_key,
+                help=f"Equipped telescope: {active_telescope_name}",
             )
-            if use_single_telescope:
-                selected_telescope = only_telescope
-        elif len(owned_telescopes) > 1:
-            telescope_choice = st.radio(
-                "Telescope",
-                options=["__any__"] + [str(item.get("id", "")).strip() for item in owned_telescopes],
-                horizontal=False,
-                key=telescope_radio_key,
-                format_func=lambda item_id: (
-                    "Any telescope (none selected)"
-                    if item_id == "__any__"
-                    else str(telescope_lookup.get(item_id, {}).get("name", item_id))
-                ),
-            )
-            if telescope_choice != "__any__":
-                selected_telescope = telescope_lookup.get(telescope_choice)
-        else:
-            st.caption("Telescope: unavailable (no owned telescopes).")
 
         if owned_filters:
-            selected_filter_id = st.selectbox(
-                "Camera Filter",
-                options=filter_options,
-                key=filter_key,
-                format_func=lambda item_id: (
-                    "Any (no filter selected)"
-                    if item_id == "__none__"
-                    else str(filter_lookup.get(item_id, {}).get("name", item_id))
-                ),
+            active_filter_name = (
+                str(active_filter.get("name", active_filter_id)).strip()
+                if isinstance(active_filter, dict)
+                else "None"
             )
-        else:
-            st.caption("Camera Filter: unavailable (no owned filters).")
+            include_filter_criteria = st.checkbox(
+                "Include filter choice as criteria for recommendations",
+                key=include_filter_key,
+                help=f"Equipped filter: {active_filter_name or 'None'}",
+            )
 
-        mount_selection = st.segmented_control(
-            "Mount accomodations:",
-            options=["None", "EQ", "Alt/Az"],
-            default=str(st.session_state.get(mount_key, default_mount_option)),
-            key=mount_key,
-            help="Used to refine visibility time to account for edge cases for each mount type",
+        include_mount_adaptation = st.checkbox(
+            "Adapt visibility calculations to selected mount",
+            key=include_mount_key,
+            help=f"Active mount choice: {mount_choice_label(active_mount_choice)}",
         )
-        mount_selection = str(mount_selection or st.session_state.get(mount_key, default_mount_option)).strip()
-        if mount_selection == "none":
-            mount_selection = "None"
-        if mount_selection not in {"None", "EQ", "Alt/Az"}:
-            mount_selection = default_mount_option
-        mount_note_text = ""
-        if mount_selection == "EQ":
-            mount_note_text = "increased likelyhood of star trails when target is below 30 degrees"
-        elif mount_selection == "Alt/Az":
-            mount_note_text = "increased likelyhood of field rotation artifacts above 80 degrees"
-        if mount_note_text:
-            st.caption(mount_note_text)
-        if mount_selection == "EQ":
-            mount_mode = "eq"
-        elif mount_selection == "Alt/Az":
-            mount_mode = "altaz"
-        else:
-            mount_mode = "none"
+        if include_mount_adaptation:
+            mount_note_text = ""
+            if active_mount_choice == "eq":
+                mount_note_text = "increased likelihood of star trails when target is below 30 degrees"
+            elif active_mount_choice == "altaz":
+                mount_note_text = "increased likelihood of field rotation artifacts above 80 degrees"
+            if mount_note_text:
+                st.caption(mount_note_text)
 
-    selected_filter_item = filter_lookup.get(selected_filter_id) if selected_filter_id != "__none__" else None
+    if include_telescope_details and isinstance(active_telescope, dict):
+        selected_telescope = active_telescope
+
+    mount_mode = active_mount_choice if include_mount_adaptation else "none"
+    selected_filter_item = active_filter if (include_filter_criteria and isinstance(active_filter, dict)) else None
     selected_filter_bands = _parse_emission_band_set(selected_filter_item.get("emission_bands", [])) if selected_filter_item else set()
+    filter_reference_band_sets: list[set[str]] = []
 
     telescope_fov_maj = _safe_positive_float(selected_telescope.get("fov_maj_deg")) if selected_telescope else None
     telescope_fov_min = _safe_positive_float(selected_telescope.get("fov_min_deg")) if selected_telescope else None
@@ -2958,7 +3026,10 @@ def render_target_recommendations(
             "visible_hours": sorted(selected_visible_hour_keys),
             "object_types": sorted(selected_object_types),
             "keyword": str(keyword_query).strip().lower(),
-            "filter_id": selected_filter_id,
+            "include_telescope": bool(include_telescope_details),
+            "include_filter": bool(include_filter_criteria),
+            "include_mount": bool(include_mount_adaptation),
+            "filter_id": active_filter_id if include_filter_criteria else "__disabled__",
             "mount_mode": mount_mode,
             "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
             "min_size_enabled": bool(use_minimum_size),
@@ -3185,10 +3256,10 @@ def render_target_recommendations(
                         )
                         filter_visibility_mask = filter_match_tier > 0
                     else:
-                        if owned_filter_band_sets:
+                        if filter_reference_band_sets:
                             filter_match_tier = np.array(
                                 [
-                                    max(_filter_match_tier(target_bands, reference_bands) for reference_bands in owned_filter_band_sets)
+                                    max(_filter_match_tier(target_bands, reference_bands) for reference_bands in filter_reference_band_sets)
                                     for target_bands in target_emission_sets
                                 ],
                                 dtype=int,
@@ -3372,11 +3443,11 @@ def render_target_recommendations(
         st.info(empty_query_message)
         return
 
-    if selected_filter_item is not None:
+    if include_filter_criteria and selected_filter_item is not None:
         filter_name = str(selected_filter_item.get("name", "selected filter")).strip() or "selected filter"
         st.caption(f"Camera filter applied: {filter_name} (hard-filter: any emission-band overlap required).")
-    elif owned_filter_band_sets:
-        st.caption("No camera filter selected; results are ranked by best filter-match tier across owned filters.")
+    elif include_filter_criteria and active_filter_id == "__none__":
+        st.caption("Filter criteria enabled, but Camera Filter is set to None.")
 
     if total_results_uncapped <= 0:
         total_results_uncapped = int(len(recommended))
@@ -6401,6 +6472,8 @@ def render_sites_page(prefs: dict[str, Any]) -> None:
         st.info(location_notice)
 
     site_ids = site_ids_in_order(prefs)
+    if not site_ids:
+        site_ids = [DEFAULT_SITE_ID]
     active_site_id = get_active_site_id(prefs)
     if active_site_id not in site_ids and site_ids:
         active_site_id = site_ids[0]
@@ -6860,10 +6933,8 @@ def render_detail_panel(
         preview_list_is_system = is_system_list(prefs, active_preview_list_id)
 
         available_preview_list_ids = list_ids_in_order(prefs, include_auto_recent=True)
-        if not available_preview_list_ids:
-            available_preview_list_ids = [AUTO_RECENT_LIST_ID]
         if active_preview_list_id not in available_preview_list_ids:
-            active_preview_list_id = AUTO_RECENT_LIST_ID
+            active_preview_list_id = get_active_preview_list_id(prefs)
             active_preview_list_name = get_list_name(prefs, active_preview_list_id)
             active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
             active_preview_list_members = set(active_preview_list_ids)
@@ -6882,23 +6953,6 @@ def render_detail_panel(
 
         with st.container(border=True):
             st.markdown("### Night Sky Preview")
-            current_preview_idx = available_preview_list_ids.index(active_preview_list_id)
-            selected_preview_list_id = st.selectbox(
-                "Preview List",
-                options=available_preview_list_ids,
-                index=current_preview_idx,
-                format_func=lambda list_id: get_list_name(prefs, list_id),
-                key="night_sky_preview_list_select",
-            )
-            if selected_preview_list_id != active_preview_list_id:
-                if set_active_preview_list_id(prefs, selected_preview_list_id):
-                    persist_and_rerun(prefs)
-
-            active_preview_list_id = get_active_preview_list_id(prefs)
-            active_preview_list_name = get_list_name(prefs, active_preview_list_id)
-            active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
-            active_preview_list_members = set(active_preview_list_ids)
-            preview_list_is_system = is_system_list(prefs, active_preview_list_id)
 
             st.caption(
                 f"{forecast_period_label} ({tzinfo.key}): "
@@ -7373,10 +7427,10 @@ def render_detail_panel(
     )
 
     available_preview_list_ids = list_ids_in_order(prefs, include_auto_recent=True)
-    if not available_preview_list_ids:
-        available_preview_list_ids = [AUTO_RECENT_LIST_ID]
     if active_preview_list_id not in available_preview_list_ids:
-        active_preview_list_id = AUTO_RECENT_LIST_ID
+        fallback_preview_list_id = available_preview_list_ids[0] if available_preview_list_ids else AUTO_RECENT_LIST_ID
+        set_active_preview_list_id(prefs, fallback_preview_list_id)
+        active_preview_list_id = fallback_preview_list_id
         active_preview_list_name = get_list_name(prefs, active_preview_list_id)
         active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
         active_preview_list_members = set(active_preview_list_ids)
@@ -7508,24 +7562,6 @@ def render_detail_panel(
 
     with st.container(border=True):
         st.markdown("### Night Sky Preview")
-        current_preview_idx = available_preview_list_ids.index(active_preview_list_id)
-        selected_preview_list_id = st.selectbox(
-            "Preview List",
-            options=available_preview_list_ids,
-            index=current_preview_idx,
-            format_func=lambda list_id: get_list_name(prefs, list_id),
-            key="night_sky_preview_list_select",
-        )
-        if selected_preview_list_id != active_preview_list_id:
-            if set_active_preview_list_id(prefs, selected_preview_list_id):
-                persist_and_rerun(prefs)
-
-        active_preview_list_id = get_active_preview_list_id(prefs)
-        active_preview_list_name = get_list_name(prefs, active_preview_list_id)
-        active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
-        active_preview_list_members = set(active_preview_list_ids)
-        preview_list_is_system = is_system_list(prefs, active_preview_list_id)
-
         st.caption(
             f"Tonight ({tzinfo.key}): "
             f"{format_display_time(window_start, use_12_hour=use_12_hour)} -> "
@@ -7731,6 +7767,138 @@ def render_detail_panel(
     forecast_cloud_cover_legend_placeholder.markdown(cloud_cover_color_legend_html(), unsafe_allow_html=True)
 
 
+def render_sidebar_active_settings(
+    prefs: dict[str, Any],
+    *,
+    theme_label_to_id: dict[str, str],
+) -> str:
+    current_theme = str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
+    theme_id_to_label = {value: key for key, value in theme_label_to_id.items()}
+    if current_theme not in theme_id_to_label:
+        current_theme = UI_THEME_LIGHT
+
+    site_ids = site_ids_in_order(prefs)
+    if not site_ids:
+        site_ids = [DEFAULT_SITE_ID]
+    active_site_id = get_active_site_id(prefs)
+    if active_site_id not in site_ids and site_ids:
+        active_site_id = site_ids[0]
+
+    available_list_ids = list_ids_in_order(prefs, include_auto_recent=True)
+    if not available_list_ids:
+        available_list_ids = [AUTO_RECENT_LIST_ID]
+    active_preview_list_id = get_active_preview_list_id(prefs)
+    if active_preview_list_id not in available_list_ids:
+        active_preview_list_id = available_list_ids[0]
+
+    equipment_context = build_owned_equipment_context(prefs)
+    active_equipment = sync_active_equipment_settings(prefs, equipment_context)
+    if bool(active_equipment.get("changed", False)):
+        st.session_state["prefs"] = prefs
+        save_preferences(prefs)
+
+    owned_telescope_ids = list(active_equipment.get("owned_telescope_ids", []))
+    owned_filter_ids = list(active_equipment.get("owned_filter_ids", []))
+    telescope_lookup = dict(active_equipment.get("telescope_lookup", {}))
+    filter_lookup = dict(active_equipment.get("filter_lookup", {}))
+    active_telescope_id = str(active_equipment.get("active_telescope_id", "")).strip()
+    active_filter_id = str(active_equipment.get("active_filter_id", "__none__")).strip() or "__none__"
+    active_mount_choice = _normalize_mount_choice(
+        active_equipment.get("active_mount_choice", "altaz"),
+        default_choice="altaz",
+    )
+
+    with st.sidebar:
+        st.markdown("### Observation settings")
+        selected_site_id = st.selectbox(
+            "Site",
+            options=site_ids,
+            index=site_ids.index(active_site_id) if active_site_id in site_ids else 0,
+            format_func=lambda site_id: get_site_name(prefs, site_id),
+            key="sidebar_active_site_selector",
+        )
+        if selected_site_id != active_site_id and set_active_site(prefs, selected_site_id):
+            persist_and_rerun(prefs)
+
+        selected_list_id = st.selectbox(
+            "List",
+            options=available_list_ids,
+            index=available_list_ids.index(active_preview_list_id),
+            format_func=lambda list_id: get_list_name(prefs, list_id),
+            key="sidebar_active_list_selector",
+        )
+        if selected_list_id != active_preview_list_id:
+            if set_active_preview_list_id(prefs, selected_list_id):
+                persist_and_rerun(prefs)
+
+        if owned_filter_ids:
+            filter_options = ["__none__"] + owned_filter_ids
+            selected_filter_option = st.selectbox(
+                "Camera Filter",
+                options=filter_options,
+                index=filter_options.index(active_filter_id) if active_filter_id in filter_options else 0,
+                format_func=lambda item_id: (
+                    "None"
+                    if item_id == "__none__"
+                    else str(filter_lookup.get(item_id, {}).get("name", item_id))
+                ),
+                key="sidebar_active_filter_selector",
+            )
+            if selected_filter_option != active_filter_id:
+                prefs["active_filter_id"] = selected_filter_option
+                persist_and_rerun(prefs)
+
+        mount_selection_label = st.segmented_control(
+            "Mount Choice",
+            options=["EQ", "Alt/Az"],
+            default=mount_choice_label(active_mount_choice),
+            key="sidebar_active_mount_selector",
+        )
+        mount_selection_label = str(mount_selection_label or mount_choice_label(active_mount_choice)).strip()
+        selected_mount_choice = "eq" if mount_selection_label == "EQ" else "altaz"
+        if selected_mount_choice != active_mount_choice:
+            prefs["active_mount_choice"] = selected_mount_choice
+            persist_and_rerun(prefs)
+
+        if owned_telescope_ids:
+            st.markdown("### Equipment")
+            if len(owned_telescope_ids) == 1:
+                only_telescope = telescope_lookup.get(owned_telescope_ids[0], {})
+                only_name = str(only_telescope.get("name", "Selected telescope")).strip() or "Selected telescope"
+                st.caption(f"Telescope: {only_name}")
+            else:
+                selected_telescope_id = st.selectbox(
+                    "Telescope",
+                    options=owned_telescope_ids,
+                    index=(
+                        owned_telescope_ids.index(active_telescope_id)
+                        if active_telescope_id in owned_telescope_ids
+                        else 0
+                    ),
+                    format_func=lambda item_id: str(telescope_lookup.get(item_id, {}).get("name", item_id)),
+                    key="sidebar_active_telescope_selector",
+                )
+                if selected_telescope_id != active_telescope_id:
+                    prefs["active_telescope_id"] = selected_telescope_id
+                    persist_and_rerun(prefs)
+
+        theme_container = st.container()
+        with theme_container:
+            st.markdown("<div class='dso-sidebar-theme-anchor'></div>", unsafe_allow_html=True)
+            st.markdown("### Appearance")
+            selected_theme_label = st.selectbox(
+                "Theme",
+                options=list(theme_label_to_id.keys()),
+                index=list(theme_label_to_id.values()).index(current_theme),
+                key="ui_theme_selector",
+            )
+    selected_ui_theme = theme_label_to_id[selected_theme_label]
+    if selected_ui_theme != current_theme:
+        prefs["ui_theme"] = selected_ui_theme
+        persist_and_rerun(prefs)
+    return selected_ui_theme
+
+
 def render_explorer_page(
     catalog: pd.DataFrame,
     catalog_meta: dict[str, Any],
@@ -7758,22 +7926,8 @@ def render_explorer_page(
     if active_site_id not in site_ids and site_ids:
         active_site_id = site_ids[0]
         set_active_site(prefs, active_site_id)
-
-    title_col, site_col = st.columns([4, 2], gap="medium")
-    with title_col:
-        st.title("Observation Planner")
-        st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
-    with site_col:
-        if len(site_ids) > 1:
-            selected_site_id = st.selectbox(
-                "Site",
-                options=site_ids,
-                index=site_ids.index(active_site_id) if active_site_id in site_ids else 0,
-                format_func=lambda site_id: get_site_name(prefs, site_id),
-                key="explorer_active_site_selector",
-            )
-            if selected_site_id != active_site_id and set_active_site(prefs, selected_site_id):
-                persist_and_rerun(prefs)
+    st.title("Observation Planner")
+    st.caption(f"Catalog rows loaded: {int(catalog_meta.get('row_count', len(catalog)))}")
 
     location = prefs["location"]
     if not is_location_configured(location):
@@ -7975,23 +8129,10 @@ def main() -> None:
         "Aura Dracula": UI_THEME_AURA_DRACULA,
         "Monokai ST3": UI_THEME_MONOKAI_ST3,
     }
-    theme_id_to_label = {value: key for key, value in theme_label_to_id.items()}
     current_theme = str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
-    if current_theme not in theme_id_to_label:
+    if current_theme not in set(theme_label_to_id.values()):
         current_theme = UI_THEME_LIGHT
-
-    with st.sidebar:
-        selected_theme_label = st.selectbox(
-            "Theme",
-            options=list(theme_label_to_id.keys()),
-            index=list(theme_label_to_id.values()).index(current_theme),
-            key="ui_theme_selector",
-        )
-    selected_ui_theme = theme_label_to_id[selected_theme_label]
-    if selected_ui_theme != str(prefs.get("ui_theme", UI_THEME_LIGHT)).strip().lower():
-        prefs["ui_theme"] = selected_ui_theme
-        persist_and_rerun(prefs)
-    apply_ui_theme_css(selected_ui_theme)
+    apply_ui_theme_css(current_theme)
 
     browser_language_raw = eval_js_hidden("window.navigator.language", key="browser_language_pref")
     if isinstance(browser_language_raw, str) and browser_language_raw.strip():
@@ -8079,6 +8220,10 @@ def main() -> None:
                 st.Page(settings_page, title="Settings", icon="⚙️"),
             ]
         )
+        render_sidebar_active_settings(
+            prefs=prefs,
+            theme_label_to_id=theme_label_to_id,
+        )
         navigation.run()
         return
 
@@ -8086,6 +8231,10 @@ def main() -> None:
         "Page",
         ["Explorer", "Sites", "Equipment", "Lists", "Settings"],
         key="app_page_selector",
+    )
+    render_sidebar_active_settings(
+        prefs=prefs,
+        theme_label_to_id=theme_label_to_id,
     )
     if selected_page == "Sites":
         sites_page()
