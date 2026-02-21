@@ -94,6 +94,13 @@ try:
     from streamlit_extras.let_it_rain import rain as let_it_rain
 except Exception:
     let_it_rain = None
+try:
+    from streamlit_modal import Modal
+except Exception:
+    try:
+        from streamlit_modal_compat import Modal
+    except Exception:
+        Modal = None
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
 from streamlit_autorefresh import st_autorefresh
 from target_tips.ui import render_target_tips_panel
@@ -437,6 +444,8 @@ WEATHER_ALERT_RAIN_PRIORITY = ["❄️", "⛈️", "☔", "🚨", "⚠️"]
 WEATHER_ALERT_RAIN_INTERVAL_SECONDS = 5 * 60
 WEATHER_ALERT_RAIN_DURATION_SECONDS = 30
 WEATHER_ALERT_RAIN_BUCKET_STATE_KEY = "weather_alert_rain_last_bucket"
+TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY = "target_detail_modal_open_request"
+TARGET_DETAIL_MODAL_LAST_TARGET_STATE_KEY = "target_detail_modal_last_target_id"
 WEATHER_FORECAST_PERIOD_STATE_KEY = "weather_forecast_period"
 WEATHER_FORECAST_PERIOD_TONIGHT = "tonight"
 WEATHER_FORECAST_PERIOD_TOMORROW = "tomorrow"
@@ -2342,6 +2351,15 @@ def render_sky_position_summary_table(
 
     if (
         selection_changed
+        and selected_primary_id
+        and (selected_column_index is None or selected_column_index != list_col_index)
+    ):
+        st.session_state["selected_id"] = selected_primary_id
+        st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
+        st.rerun()
+
+    if (
+        selection_changed
         and selected_index is not None
         and selected_column_index == list_col_index
         and allow_list_membership_toggle
@@ -3639,6 +3657,7 @@ def render_target_recommendations(
     current_selected_id = str(st.session_state.get("selected_id") or "").strip()
     if selected_primary_id != current_selected_id:
         st.session_state["selected_id"] = selected_primary_id
+        st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
         st.rerun()
 
 
@@ -7250,170 +7269,213 @@ def render_detail_panel(
     emission_details = clean_text(selected.get("emission_lines"))
     emission_details_display = re.sub(r"[\[\]]", "", emission_details)
     description = clean_text(selected.get("description"))
+    forecast_placeholder: Any | None = None
+    forecast_legend_placeholder: Any | None = None
+    forecast_cloud_cover_legend_placeholder: Any | None = None
 
-    with st.container(border=True):
-        st.markdown(f"### {title}")
-        st.caption(f"Catalog: {selected['catalog']} | Type: {selected.get('object_type') or '-'}")
+    detail_modal = Modal(title, key="target_detail_modal") if Modal is not None else None
+    if detail_modal is not None:
+        st.markdown(
+            """
+            <style>
+            div[data-modal-container='true'][key='target_detail_modal'] > div:first-child {
+                width: 80vw !important;
+                max-width: 80vw !important;
+            }
+            div[data-modal-container='true'][key='target_detail_modal'] > div:first-child > div:first-child > div:first-child {
+                max-width: 80vw !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        last_modal_target = str(st.session_state.get(TARGET_DETAIL_MODAL_LAST_TARGET_STATE_KEY, "")).strip()
+        if target_id != last_modal_target:
+            st.session_state[TARGET_DETAIL_MODAL_LAST_TARGET_STATE_KEY] = target_id
+            st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
+        if bool(st.session_state.pop(TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY, False)):
+            detail_modal.open()
 
-        if detail_stack_vertical:
-            image_container = st.container()
-            description_container = st.container()
-            property_container = st.container()
-            forecast_container = st.container()
-        else:
-            detail_cols = st.columns([1, 1, 1, 2])
-            image_container = detail_cols[0]
-            description_container = detail_cols[1]
-            property_container = detail_cols[2]
-            forecast_container = detail_cols[3]
+        detail_header_cols = st.columns([4, 1], gap="small")
+        detail_header_cols[0].caption(f"Selected target: {title}")
+        if detail_header_cols[1].button(
+            "Open details",
+            key="target_detail_modal_reopen_button",
+            use_container_width=True,
+        ):
+            detail_modal.open()
 
-        with image_container:
-            if image_url:
-                image_url_html = html.escape(image_url, quote=True)
-                image_tag = (
-                    '<div style="width:200px; height:200px; max-width:100%; display:flex; align-items:center; justify-content:center;">'
-                    f'<img src="{image_url_html}" '
-                    'style="max-width:200px; max-height:200px; width:auto; height:auto; object-fit:contain; object-position:center;" />'
-                    "</div>"
-                )
-                st.markdown(image_tag, unsafe_allow_html=True)
+    render_detail_pane = detail_modal is None or detail_modal.is_open()
+    detail_container_context = (
+        (detail_modal.container() if detail_modal is not None else st.container(border=True))
+        if render_detail_pane
+        else None
+    )
+    if detail_container_context is not None:
+        with detail_container_context:
+            st.markdown(f"### {title}")
+            st.caption(f"Catalog: {selected['catalog']} | Type: {selected.get('object_type') or '-'}")
+
+            if detail_stack_vertical:
+                image_container = st.container()
+                description_container = st.container()
+                property_container = st.container()
+                forecast_container = st.container()
             else:
-                st.info("No image URL available for this target.")
+                detail_cols = st.columns([1, 1, 1, 2])
+                image_container = detail_cols[0]
+                description_container = detail_cols[1]
+                property_container = detail_cols[2]
+                forecast_container = detail_cols[3]
 
-        with description_container:
-            st.markdown("**Description**")
-            st.write(description or "-")
-            if image_source_url:
-                st.caption(f"Image source: [Open link]({image_source_url})")
-            if info_url:
-                st.caption(f"Background: [Open object page]({info_url})")
-            if image_license:
-                st.caption(f"License/Credit: {image_license}")
-
-        with property_container:
-            editable_list_ids = editable_list_ids_in_order(prefs)
-            if not editable_list_ids:
-                st.caption("No editable lists available yet.")
-            else:
-                preferred_action_list_id = (
-                    active_preview_list_id if active_preview_list_id in editable_list_ids else editable_list_ids[0]
-                )
-                action_select_key = "detail_add_to_list_select"
-                current_action_selection = str(st.session_state.get(action_select_key, "")).strip()
-                if current_action_selection not in editable_list_ids:
-                    st.session_state[action_select_key] = preferred_action_list_id
-                    current_action_selection = preferred_action_list_id
-
-                selected_action_list_id = st.selectbox(
-                    "Add to list...",
-                    options=editable_list_ids,
-                    index=editable_list_ids.index(current_action_selection),
-                    key=action_select_key,
-                    format_func=lambda list_id: get_list_name(prefs, list_id),
-                )
-                selected_action_list_name = get_list_name(prefs, selected_action_list_id)
-                selected_action_list_members = set(get_list_ids(prefs, selected_action_list_id))
-                is_in_selected_action_list = target_id in selected_action_list_members
-                list_action_label = "Remove" if is_in_selected_action_list else "Add"
-                if st.button(list_action_label, use_container_width=True, key="detail_add_to_list_apply"):
-                    if toggle_target_in_list(prefs, selected_action_list_id, target_id):
-                        st.session_state["selected_id"] = target_id
-                        persist_and_rerun(prefs)
-                st.caption(
-                    f"{'In' if is_in_selected_action_list else 'Not in'} list: {selected_action_list_name}"
-                )
-
-            coord_format_key = "detail_coord_format_mode"
-            coord_format_mode = str(st.session_state.get(coord_format_key, "sexagesimal")).strip().lower()
-            if coord_format_mode not in {"sexagesimal", "degrees"}:
-                coord_format_mode = "sexagesimal"
-                st.session_state[coord_format_key] = coord_format_mode
-
-            ra_deg_value = parse_numeric(selected.get("ra_deg"))
-            dec_deg_value = parse_numeric(selected.get("dec_deg"))
-
-            if coord_format_mode == "degrees":
-                ra_display = f"{ra_deg_value:.4f} deg" if ra_deg_value is not None else "-"
-                dec_display = f"{dec_deg_value:.4f} deg" if dec_deg_value is not None else "-"
-            else:
-                ra_display = format_ra_hms(ra_deg_value)
-                dec_display = format_dec_dms(dec_deg_value)
-
-            coord_toggle_label = f"RA: {ra_display}\nDEC: {dec_display}"
-            if st.button(
-                coord_toggle_label,
-                key="detail_coord_format_toggle",
-                use_container_width=True,
-                help="Click to switch RA/DEC between sexagesimal and degrees.",
-            ):
-                st.session_state[coord_format_key] = (
-                    "degrees" if coord_format_mode == "sexagesimal" else "sexagesimal"
-                )
-                st.rerun()
-            st.caption("Click coordinates to toggle display format.")
-
-            property_items = [
-                {
-                    "Property": "RA",
-                    "Value": ra_display,
-                },
-                {
-                    "Property": "DEC",
-                    "Value": dec_display,
-                },
-                {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
-                {
-                    "Property": "Alt / Az (now)",
-                    "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
-                },
-                {"Property": "Direction", "Value": str(selected["wind16"])},
-                {"Property": "Distance Value", "Value": dist_value or "-"},
-                {"Property": "Distance Unit", "Value": dist_unit or "-"},
-                {"Property": "Redshift", "Value": redshift or "-"},
-                {"Property": "Angular Size", "Value": ang_size_display or "-", "Tooltip": ang_size_tooltip},
-                {"Property": "Morphology", "Value": morphology or "-"},
-                {"Property": "Emissions Details", "Value": emission_details_display or "-"},
-            ]
-            property_rows = pd.DataFrame(
-                [
-                    row
-                    for row in property_items
-                    if (clean_text(row.get("Value", "")) and clean_text(row.get("Value", "")) != "-")
-                ]
-            )
-            if not property_rows.empty:
-                table_rows_html: list[str] = []
-                for _, row in property_rows.iterrows():
-                    property_label = html.escape(str(row.get("Property", "")))
-                    value_text = clean_text(row.get("Value")) or "-"
-                    tooltip_text = clean_text(row.get("Tooltip"))
-                    value_html = html.escape(value_text)
-                    if tooltip_text and tooltip_text != value_text:
-                        tooltip_html = html.escape(tooltip_text, quote=True)
-                        value_html = (
-                            f'<span title="{tooltip_html}" style="text-decoration: underline dotted; cursor: help;">'
-                            f"{value_html}</span>"
-                        )
-                    table_rows_html.append(
-                        "<tr>"
-                        f'<td style="padding:0.35rem 0.5rem; vertical-align:top; border-bottom:1px solid rgba(120,120,120,0.18);">{property_label}</td>'
-                        f'<td style="padding:0.35rem 0.5rem; vertical-align:top; border-bottom:1px solid rgba(120,120,120,0.18);">{value_html}</td>'
-                        "</tr>"
+            with image_container:
+                if image_url:
+                    image_url_html = html.escape(image_url, quote=True)
+                    image_tag = (
+                        '<div style="width:200px; height:200px; max-width:100%; display:flex; align-items:center; justify-content:center;">'
+                        f'<img src="{image_url_html}" '
+                        'style="max-width:200px; max-height:200px; width:auto; height:auto; object-fit:contain; object-position:center;" />'
+                        "</div>"
                     )
-                attributes_table_html = (
-                    '<table style="width:100%; border-collapse:collapse; font-size:0.92rem;">'
-                    "<thead><tr>"
-                    '<th style="text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(120,120,120,0.28);">Property</th>'
-                    '<th style="text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(120,120,120,0.28);">Value</th>'
-                    "</tr></thead>"
-                    f"<tbody>{''.join(table_rows_html)}</tbody>"
-                    "</table>"
+                    st.markdown(image_tag, unsafe_allow_html=True)
+                else:
+                    st.info("No image URL available for this target.")
+
+            with description_container:
+                st.markdown("**Description**")
+                st.write(description or "-")
+                if image_source_url:
+                    st.caption(f"Image source: [Open link]({image_source_url})")
+                if info_url:
+                    st.caption(f"Background: [Open object page]({info_url})")
+                if image_license:
+                    st.caption(f"License/Credit: {image_license}")
+
+            with property_container:
+                editable_list_ids = editable_list_ids_in_order(prefs)
+                if not editable_list_ids:
+                    st.caption("No editable lists available yet.")
+                else:
+                    preferred_action_list_id = (
+                        active_preview_list_id if active_preview_list_id in editable_list_ids else editable_list_ids[0]
+                    )
+                    action_select_key = "detail_add_to_list_select"
+                    current_action_selection = str(st.session_state.get(action_select_key, "")).strip()
+                    if current_action_selection not in editable_list_ids:
+                        st.session_state[action_select_key] = preferred_action_list_id
+                        current_action_selection = preferred_action_list_id
+
+                    selected_action_list_id = st.selectbox(
+                        "Add to list...",
+                        options=editable_list_ids,
+                        index=editable_list_ids.index(current_action_selection),
+                        key=action_select_key,
+                        format_func=lambda list_id: get_list_name(prefs, list_id),
+                    )
+                    selected_action_list_name = get_list_name(prefs, selected_action_list_id)
+                    selected_action_list_members = set(get_list_ids(prefs, selected_action_list_id))
+                    is_in_selected_action_list = target_id in selected_action_list_members
+                    list_action_label = "Remove" if is_in_selected_action_list else "Add"
+                    if st.button(list_action_label, use_container_width=True, key="detail_add_to_list_apply"):
+                        if toggle_target_in_list(prefs, selected_action_list_id, target_id):
+                            st.session_state["selected_id"] = target_id
+                            st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
+                            persist_and_rerun(prefs)
+                    st.caption(
+                        f"{'In' if is_in_selected_action_list else 'Not in'} list: {selected_action_list_name}"
+                    )
+
+                coord_format_key = "detail_coord_format_mode"
+                coord_format_mode = str(st.session_state.get(coord_format_key, "sexagesimal")).strip().lower()
+                if coord_format_mode not in {"sexagesimal", "degrees"}:
+                    coord_format_mode = "sexagesimal"
+                    st.session_state[coord_format_key] = coord_format_mode
+
+                ra_deg_value = parse_numeric(selected.get("ra_deg"))
+                dec_deg_value = parse_numeric(selected.get("dec_deg"))
+
+                if coord_format_mode == "degrees":
+                    ra_display = f"{ra_deg_value:.4f} deg" if ra_deg_value is not None else "-"
+                    dec_display = f"{dec_deg_value:.4f} deg" if dec_deg_value is not None else "-"
+                else:
+                    ra_display = format_ra_hms(ra_deg_value)
+                    dec_display = format_dec_dms(dec_deg_value)
+
+                coord_toggle_label = f"RA: {ra_display}\nDEC: {dec_display}"
+                if st.button(
+                    coord_toggle_label,
+                    key="detail_coord_format_toggle",
+                    use_container_width=True,
+                    help="Click to switch RA/DEC between sexagesimal and degrees.",
+                ):
+                    st.session_state[coord_format_key] = (
+                        "degrees" if coord_format_mode == "sexagesimal" else "sexagesimal"
+                    )
+                    st.rerun()
+                st.caption("Click coordinates to toggle display format.")
+
+                property_items = [
+                    {
+                        "Property": "RA",
+                        "Value": ra_display,
+                    },
+                    {
+                        "Property": "DEC",
+                        "Value": dec_display,
+                    },
+                    {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
+                    {
+                        "Property": "Alt / Az (now)",
+                        "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
+                    },
+                    {"Property": "Direction", "Value": str(selected["wind16"])},
+                    {"Property": "Distance Value", "Value": dist_value or "-"},
+                    {"Property": "Distance Unit", "Value": dist_unit or "-"},
+                    {"Property": "Redshift", "Value": redshift or "-"},
+                    {"Property": "Angular Size", "Value": ang_size_display or "-", "Tooltip": ang_size_tooltip},
+                    {"Property": "Morphology", "Value": morphology or "-"},
+                    {"Property": "Emissions Details", "Value": emission_details_display or "-"},
+                ]
+                property_rows = pd.DataFrame(
+                    [
+                        row
+                        for row in property_items
+                        if (clean_text(row.get("Value", "")) and clean_text(row.get("Value", "")) != "-")
+                    ]
                 )
-                st.markdown(attributes_table_html, unsafe_allow_html=True)
-        with forecast_container:
-            forecast_placeholder = st.empty()
-            forecast_legend_placeholder = st.empty()
-            forecast_cloud_cover_legend_placeholder = st.empty()
+                if not property_rows.empty:
+                    table_rows_html: list[str] = []
+                    for _, row in property_rows.iterrows():
+                        property_label = html.escape(str(row.get("Property", "")))
+                        value_text = clean_text(row.get("Value")) or "-"
+                        tooltip_text = clean_text(row.get("Tooltip"))
+                        value_html = html.escape(value_text)
+                        if tooltip_text and tooltip_text != value_text:
+                            tooltip_html = html.escape(tooltip_text, quote=True)
+                            value_html = (
+                                f'<span title="{tooltip_html}" style="text-decoration: underline dotted; cursor: help;">'
+                                f"{value_html}</span>"
+                            )
+                        table_rows_html.append(
+                            "<tr>"
+                            f'<td style="padding:0.35rem 0.5rem; vertical-align:top; border-bottom:1px solid rgba(120,120,120,0.18);">{property_label}</td>'
+                            f'<td style="padding:0.35rem 0.5rem; vertical-align:top; border-bottom:1px solid rgba(120,120,120,0.18);">{value_html}</td>'
+                            "</tr>"
+                        )
+                    attributes_table_html = (
+                        '<table style="width:100%; border-collapse:collapse; font-size:0.92rem;">'
+                        "<thead><tr>"
+                        '<th style="text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(120,120,120,0.28);">Property</th>'
+                        '<th style="text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(120,120,120,0.28);">Value</th>'
+                        "</tr></thead>"
+                        f"<tbody>{''.join(table_rows_html)}</tbody>"
+                        "</table>"
+                    )
+                    st.markdown(attributes_table_html, unsafe_allow_html=True)
+            with forecast_container:
+                forecast_placeholder = st.empty()
+                forecast_legend_placeholder = st.empty()
+                forecast_cloud_cover_legend_placeholder = st.empty()
 
     window_start, window_end, tzinfo = tonight_window(location_lat, location_lon)
     forecast_window_start, forecast_window_end, _ = weather_forecast_window(
@@ -7754,22 +7816,27 @@ def render_detail_panel(
                     window_end=window_end,
                 )
 
-    forecast_placeholder.plotly_chart(
-        build_night_plot(
-            track=forecast_track,
-            temperature_by_hour=temperatures,
-            cloud_cover_by_hour=cloud_cover_by_hour,
-            weather_by_hour=weather_by_hour,
-            temperature_unit=temperature_unit,
-            target_label=selected_label,
-            period_label=detail_hourly_period_label,
-            use_12_hour=use_12_hour,
-        ),
-        use_container_width=True,
-        key="detail_night_plot",
-    )
-    forecast_legend_placeholder.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
-    forecast_cloud_cover_legend_placeholder.markdown(cloud_cover_color_legend_html(), unsafe_allow_html=True)
+    if (
+        forecast_placeholder is not None
+        and forecast_legend_placeholder is not None
+        and forecast_cloud_cover_legend_placeholder is not None
+    ):
+        forecast_placeholder.plotly_chart(
+            build_night_plot(
+                track=forecast_track,
+                temperature_by_hour=temperatures,
+                cloud_cover_by_hour=cloud_cover_by_hour,
+                weather_by_hour=weather_by_hour,
+                temperature_unit=temperature_unit,
+                target_label=selected_label,
+                period_label=detail_hourly_period_label,
+                use_12_hour=use_12_hour,
+            ),
+            use_container_width=True,
+            key="detail_night_plot",
+        )
+        forecast_legend_placeholder.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
+        forecast_cloud_cover_legend_placeholder.markdown(cloud_cover_color_legend_html(), unsafe_allow_html=True)
 
 
 def render_sidebar_active_settings(
