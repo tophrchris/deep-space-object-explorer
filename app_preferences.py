@@ -125,6 +125,9 @@ def default_preferences() -> dict[str, Any]:
         "site_order": default_site_order(),
         "active_site_id": active_site_id,
         "equipment": {},
+        "active_telescope_id": "",
+        "active_filter_id": "__none__",
+        "active_mount_choice": "altaz",
         # Legacy convenience fields mirror the active site.
         "obstructions": copy.deepcopy(active_site["obstructions"]),
         "location": copy.deepcopy(active_site["location"]),
@@ -199,6 +202,13 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
         prefs["site_order"] = site_order
         prefs["active_site_id"] = active_site_id
         prefs["equipment"] = _normalize_equipment(raw.get("equipment", {}))
+        prefs["active_telescope_id"] = str(raw.get("active_telescope_id", "")).strip()
+        raw_filter_id = str(raw.get("active_filter_id", "__none__")).strip()
+        prefs["active_filter_id"] = raw_filter_id if raw_filter_id else "__none__"
+        raw_mount_choice = str(raw.get("active_mount_choice", "altaz")).strip().lower()
+        if raw_mount_choice not in {"eq", "altaz"}:
+            raw_mount_choice = "altaz"
+        prefs["active_mount_choice"] = raw_mount_choice
 
         active_site = normalized_sites.get(active_site_id) or default_site_payload()
         prefs["location"] = copy.deepcopy(active_site.get("location", DEFAULT_LOCATION))
