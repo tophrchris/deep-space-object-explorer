@@ -118,7 +118,7 @@ Notes:
 - for each wind4, for each hour, find the best target of each type (emission? galaxy? cluster?) in terms of number of minutes in the sweet zone (unobstructed, not too high/low based on mount)
 
 - object type based colors for paths
-
+- seestarS 30 has 4.3x2.4
 ## Notes
 
 - Catalog ingest loads full OpenNGC data and augments it with SIMBAD (`NAME` objects are retained, with unmatched rows kept as `SIMBAD` catalog entries).
