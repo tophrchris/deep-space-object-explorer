@@ -679,30 +679,6 @@ def wind_bin_center(direction: str) -> float:
     return idx * 22.5
 
 
-def compute_altaz_now(targets: pd.DataFrame, lat: float, lon: float) -> pd.DataFrame:
-    if targets.empty:
-        enriched = targets.copy()
-        enriched["alt_now"] = pd.Series(dtype=float)
-        enriched["az_now"] = pd.Series(dtype=float)
-        enriched["wind16"] = pd.Series(dtype=str)
-        return enriched
-
-    location = EarthLocation(lat=lat * u.deg, lon=lon * u.deg)
-    obstime = Time(datetime.now(timezone.utc))
-    coords = SkyCoord(
-        ra=targets["ra_deg"].to_numpy(dtype=float) * u.deg,
-        dec=targets["dec_deg"].to_numpy(dtype=float) * u.deg,
-    )
-    frame = AltAz(obstime=obstime, location=location)
-    altaz = coords.transform_to(frame)
-
-    enriched = targets.copy()
-    enriched["alt_now"] = np.round(altaz.alt.deg, 1)
-    enriched["az_now"] = np.round(altaz.az.deg % 360.0, 1)
-    enriched["wind16"] = [az_to_wind16(value) for value in enriched["az_now"]]
-    return enriched
-
-
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def resolve_timezone(lat: float, lon: float) -> str:
     finder = TimezoneFinder()
@@ -2851,6 +2827,7 @@ def render_target_recommendations(
     signature_key = "recommended_targets_criteria_signature"
     selection_token_key = "recommended_targets_selection_token"
     query_cache_key = "recommended_targets_query_cache"
+    table_instance_key = "recommended_targets_table_instance"
 
     if visible_hour_key not in st.session_state:
         st.session_state[visible_hour_key] = [best_visible_hour_option] if best_visible_hour_option else []
@@ -2897,11 +2874,38 @@ def render_target_recommendations(
         st.session_state[page_size_key] = 20
     if not isinstance(st.session_state.get(page_number_key), int):
         st.session_state[page_number_key] = 1
+    if not isinstance(st.session_state.get(table_instance_key), int):
+        st.session_state[table_instance_key] = 0
     if str(st.session_state.get(sort_direction_key, "Descending")).strip() not in {"Descending", "Ascending"}:
         st.session_state[sort_direction_key] = "Descending"
 
-    criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 3, 2], gap="small")
+    criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 3, 3], gap="small")
+    search_notes_placeholder: Any | None = None
+    sort_controls_placeholder: Any | None = None
     with criteria_col_1:
+        keyword_query = st.text_input(
+            "Keyword",
+            key=keyword_key,
+            placeholder="id, name, alias, description, emissions",
+        )
+        st.caption("Optional. Leave blank to search all targets.")
+        search_clicked = st.button(
+            "Search",
+            key="recommended_targets_search_button",
+            type="primary",
+            use_container_width=True,
+        )
+        if search_clicked:
+            st.session_state["selected_id"] = ""
+            st.session_state[selection_token_key] = ""
+            st.session_state.pop(TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY, None)
+            st.session_state[table_instance_key] = int(st.session_state.get(table_instance_key, 0)) + 1
+        _ = search_clicked
+        st.caption("Adjust criteria and click Search to refresh recommendations.")
+        sort_controls_placeholder = st.empty()
+        search_notes_placeholder = st.empty()
+
+    with criteria_col_2:
         selected_visible_hours = st.multiselect(
             "Visible Hour",
             options=hour_options,
@@ -2920,18 +2924,18 @@ def render_target_recommendations(
             key=object_type_key,
             help="Optional. If empty, any object type can be returned.",
         )
-        keyword_query = st.text_input(
-            "Keyword",
-            key=keyword_key,
-            placeholder="id, name, alias, description, emissions",
-        )
-        st.caption("Optional. Leave blank to search all targets.")
 
     selected_telescope: dict[str, Any] | None = None
     include_telescope_details = False
     include_filter_criteria = False
     include_mount_adaptation = False
-    with criteria_col_2:
+    use_minimum_size = False
+    minimum_size_pct: float | None = None
+    telescope_fov_maj: float | None = None
+    telescope_fov_min: float | None = None
+    telescope_fov_area: float | None = None
+
+    with criteria_col_3:
         if isinstance(active_telescope, dict):
             active_telescope_name = str(active_telescope.get("name", "Selected telescope")).strip() or "Selected telescope"
             include_telescope_details = st.checkbox(
@@ -2965,53 +2969,104 @@ def render_target_recommendations(
                 mount_note_text = "increased likelihood of field rotation artifacts above 80 degrees"
             if mount_note_text:
                 st.caption(mount_note_text)
+        if include_telescope_details and isinstance(active_telescope, dict):
+            selected_telescope = active_telescope
 
-    if include_telescope_details and isinstance(active_telescope, dict):
-        selected_telescope = active_telescope
+        telescope_fov_maj = _safe_positive_float(selected_telescope.get("fov_maj_deg")) if selected_telescope else None
+        telescope_fov_min = _safe_positive_float(selected_telescope.get("fov_min_deg")) if selected_telescope else None
+        telescope_fov_area = (
+            float(telescope_fov_maj * telescope_fov_min)
+            if telescope_fov_maj is not None and telescope_fov_min is not None
+            else None
+        )
+
+        if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
+            use_minimum_size = st.checkbox("Enable Minimum Size", key=min_size_enabled_key)
+            slider_disabled = not use_minimum_size
+            min_size_slider_col, _ = st.columns([1, 1], gap="small")
+            with min_size_slider_col:
+                min_size_value = st.slider(
+                    "Minimum Size (% of FOV)",
+                    min_value=0,
+                    max_value=250,
+                    value=int(st.session_state.get(min_size_value_key, 0)),
+                    step=1,
+                    key=min_size_value_key,
+                    disabled=slider_disabled,
+                )
+                st.markdown(
+                    """
+                    <div style="display:flex; justify-content:space-between; margin-top:0.2rem; color:#6b7280; font-size:0.72rem;">
+                      <span style="text-align:center;">|<br/>0.5x</span>
+                      <span style="text-align:center;">|<br/>1x</span>
+                      <span style="text-align:center;">|<br/>1.5x</span>
+                      <span style="text-align:center;">|<br/>&gt;2x</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            if use_minimum_size:
+                minimum_size_pct = float(min_size_value)
+        else:
+            st.caption("Minimum Size filter requires a selected telescope with FOV dimensions.")
 
     mount_mode = active_mount_choice if include_mount_adaptation else "none"
     selected_filter_item = active_filter if (include_filter_criteria and isinstance(active_filter, dict)) else None
     selected_filter_bands = _parse_emission_band_set(selected_filter_item.get("emission_bands", [])) if selected_filter_item else set()
     filter_reference_band_sets: list[set[str]] = []
 
-    telescope_fov_maj = _safe_positive_float(selected_telescope.get("fov_maj_deg")) if selected_telescope else None
-    telescope_fov_min = _safe_positive_float(selected_telescope.get("fov_min_deg")) if selected_telescope else None
-    telescope_fov_area = (
-        float(telescope_fov_maj * telescope_fov_min)
-        if telescope_fov_maj is not None and telescope_fov_min is not None
-        else None
-    )
+    if search_notes_placeholder is not None:
+        with search_notes_placeholder.container():
+            if include_filter_criteria and selected_filter_item is not None:
+                filter_name = str(selected_filter_item.get("name", "selected filter")).strip() or "selected filter"
+                st.caption(f"Camera filter applied: {filter_name} (hard-filter: any emission-band overlap required).")
+            elif include_filter_criteria and active_filter_id == "__none__":
+                st.caption("Filter criteria enabled, but Camera Filter is set to None.")
 
-    use_minimum_size = False
-    minimum_size_pct: float | None = None
-    with criteria_col_3:
-        if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
-            use_minimum_size = st.checkbox("Enable Minimum Size", key=min_size_enabled_key)
-            slider_disabled = not use_minimum_size
-            min_size_value = st.slider(
-                "Minimum Size (% of FOV)",
-                min_value=0,
-                max_value=200,
-                value=int(st.session_state.get(min_size_value_key, 0)),
-                step=1,
-                key=min_size_value_key,
-                disabled=slider_disabled,
+    sort_options: list[tuple[str, str]] = [
+        ("ranking", "Recommended"),
+        ("target_name", "Target Name"),
+        ("visible_minutes", "Duration of visibility"),
+        ("object_type", "Object Type"),
+        ("emissions", "Emissions"),
+        ("apparent_size_sort_arcmin", "Apparent size"),
+        ("peak_time_local", "Peak"),
+        ("peak_altitude", "Altitude at Peak"),
+        ("peak_direction", "Direction"),
+    ]
+    if selected_telescope is not None:
+        sort_options.insert(6, ("framing_percent", "Framing"))
+    sort_option_labels = {option_value: option_label for option_value, option_label in sort_options}
+    sort_option_values = [option_value for option_value, _ in sort_options]
+    if str(st.session_state.get(sort_field_key, "ranking")).strip() not in sort_option_labels:
+        st.session_state[sort_field_key] = "ranking"
+
+    if sort_controls_placeholder is not None:
+        with sort_controls_placeholder.container():
+            sort_col, sort_order_col = st.columns([2, 1], gap="small")
+            sort_field = sort_col.selectbox(
+                "Sort results by",
+                options=sort_option_values,
+                key=sort_field_key,
+                format_func=lambda option_value: sort_option_labels.get(option_value, option_value),
             )
-            if use_minimum_size:
-                minimum_size_pct = float(min_size_value)
-        else:
-            st.caption("Minimum Size filter requires a selected telescope with FOV dimensions.")
-        st.caption("Minimum Brightness filter deferred to #86.")
+            sort_direction = sort_order_col.segmented_control(
+                "Order",
+                options=["Descending", "Ascending"],
+                key=sort_direction_key,
+            )
+    else:
+        sort_field = str(st.session_state.get(sort_field_key, "ranking"))
+        sort_direction = str(st.session_state.get(sort_direction_key, "Descending"))
 
-    action_row = st.columns([1, 4], gap="small")
-    search_clicked = action_row[0].button(
-        "Search",
-        key="recommended_targets_search_button",
-        type="primary",
-        use_container_width=True,
-    )
-    action_row[1].caption("Adjust criteria and click Search to refresh recommendations.")
-    _ = search_clicked
+    sort_direction = str(sort_direction or st.session_state.get(sort_direction_key, "Descending")).strip()
+    if sort_direction not in {"Descending", "Ascending"}:
+        sort_direction = "Descending"
+
+    sort_signature = f"{sort_field}|{sort_direction}"
+    if str(st.session_state.get(sort_signature_key, "")) != sort_signature:
+        st.session_state[sort_signature_key] = sort_signature
+        st.session_state[page_number_key] = 1
 
     query_started_at = perf_counter()
     query_progress_placeholder = st.empty()
@@ -3484,53 +3539,8 @@ def render_target_recommendations(
         st.info(empty_query_message)
         return
 
-    if include_filter_criteria and selected_filter_item is not None:
-        filter_name = str(selected_filter_item.get("name", "selected filter")).strip() or "selected filter"
-        st.caption(f"Camera filter applied: {filter_name} (hard-filter: any emission-band overlap required).")
-    elif include_filter_criteria and active_filter_id == "__none__":
-        st.caption("Filter criteria enabled, but Camera Filter is set to None.")
-
     if total_results_uncapped <= 0:
         total_results_uncapped = int(len(recommended))
-
-    sort_options: list[tuple[str, str]] = [
-        ("ranking", "Recommended"),
-        ("target_name", "Target Name"),
-        ("visible_minutes", "Duration of visibility"),
-        ("object_type", "Object Type"),
-        ("emissions", "Emissions"),
-        ("apparent_size_sort_arcmin", "Apparent size"),
-        ("peak_time_local", "Peak"),
-        ("peak_altitude", "Altitude at Peak"),
-        ("peak_direction", "Direction"),
-    ]
-    if selected_telescope is not None:
-        sort_options.insert(6, ("framing_percent", "Framing"))
-    sort_option_labels = {option_value: option_label for option_value, option_label in sort_options}
-    sort_option_values = [option_value for option_value, _ in sort_options]
-    if str(st.session_state.get(sort_field_key, "ranking")).strip() not in sort_option_labels:
-        st.session_state[sort_field_key] = "ranking"
-
-    sort_col, sort_order_col = st.columns([2, 1], gap="small")
-    sort_field = sort_col.selectbox(
-        "Sort results by",
-        options=sort_option_values,
-        key=sort_field_key,
-        format_func=lambda option_value: sort_option_labels.get(option_value, option_value),
-    )
-    sort_direction = sort_order_col.segmented_control(
-        "Order",
-        options=["Descending", "Ascending"],
-        key=sort_direction_key,
-    )
-    sort_direction = str(sort_direction or st.session_state.get(sort_direction_key, "Descending")).strip()
-    if sort_direction not in {"Descending", "Ascending"}:
-        sort_direction = "Descending"
-
-    sort_signature = f"{sort_field}|{sort_direction}"
-    if str(st.session_state.get(sort_signature_key, "")) != sort_signature:
-        st.session_state[sort_signature_key] = sort_signature
-        st.session_state[page_number_key] = 1
 
     if sort_field == "ranking":
         if sort_direction == "Ascending":
@@ -3619,7 +3629,7 @@ def render_target_recommendations(
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
-        key="recommended_targets_table",
+        key=f"recommended_targets_table_{int(st.session_state.get(table_instance_key, 0))}",
         column_config=column_config,
     )
 
@@ -6196,18 +6206,10 @@ def sanitize_saved_lists(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
         save_preferences(prefs)
 
 
-def resolve_selected_row(catalog: pd.DataFrame, prefs: dict[str, Any]) -> pd.Series | None:
+def resolve_selected_row(catalog: pd.DataFrame) -> pd.Series | None:
     selected_id = st.session_state.get("selected_id")
     selected = get_object_by_id(catalog, str(selected_id) if selected_id else "")
-    if selected is None:
-        return None
-
-    location = prefs["location"]
-    target = pd.DataFrame([selected])
-    enriched = compute_altaz_now(target, lat=float(location["lat"]), lon=float(location["lon"]))
-    if enriched.empty:
-        return None
-    return enriched.iloc[0]
+    return selected
 
 
 def render_location_settings_section(prefs: dict[str, Any]) -> None:
@@ -7440,7 +7442,8 @@ def render_detail_panel(
     )
     if detail_container_context is not None:
         with detail_container_context:
-            st.markdown(f"### {title}")
+            if detail_modal is None:
+                st.markdown(f"### {title}")
             st.caption(f"Catalog: {selected['catalog']} | Type: {selected.get('object_type') or '-'}")
 
             if detail_stack_vertical:
@@ -7467,16 +7470,16 @@ def render_detail_panel(
                     st.markdown(image_tag, unsafe_allow_html=True)
                 else:
                     st.info("No image URL available for this target.")
-
-            with description_container:
-                st.markdown("**Description**")
-                st.write(description or "-")
                 if image_source_url:
                     st.caption(f"Image source: [Open link]({image_source_url})")
                 if info_url:
                     st.caption(f"Background: [Open object page]({info_url})")
                 if image_license:
                     st.caption(f"License/Credit: {image_license}")
+
+            with description_container:
+                st.markdown("**Description**")
+                st.write(description or "-")
 
             with property_container:
                 editable_list_ids = editable_list_ids_in_order(prefs)
@@ -7512,50 +7515,33 @@ def render_detail_panel(
                         f"{'In' if is_in_selected_action_list else 'Not in'} list: {selected_action_list_name}"
                     )
 
-                coord_format_key = "detail_coord_format_mode"
-                coord_format_mode = str(st.session_state.get(coord_format_key, "sexagesimal")).strip().lower()
-                if coord_format_mode not in {"sexagesimal", "degrees"}:
-                    coord_format_mode = "sexagesimal"
-                    st.session_state[coord_format_key] = coord_format_mode
-
                 ra_deg_value = parse_numeric(selected.get("ra_deg"))
                 dec_deg_value = parse_numeric(selected.get("dec_deg"))
+                ra_sexagesimal = format_ra_hms(ra_deg_value)
+                dec_sexagesimal = format_dec_dms(dec_deg_value)
+                ra_decimal = f"{ra_deg_value:.4f} deg" if ra_deg_value is not None else "-"
+                dec_decimal = f"{dec_deg_value:.4f} deg" if dec_deg_value is not None else "-"
 
-                if coord_format_mode == "degrees":
-                    ra_display = f"{ra_deg_value:.4f} deg" if ra_deg_value is not None else "-"
-                    dec_display = f"{dec_deg_value:.4f} deg" if dec_deg_value is not None else "-"
-                else:
-                    ra_display = format_ra_hms(ra_deg_value)
-                    dec_display = format_dec_dms(dec_deg_value)
-
-                coord_toggle_label = f"RA: {ra_display}\nDEC: {dec_display}"
-                if st.button(
-                    coord_toggle_label,
-                    key="detail_coord_format_toggle",
-                    use_container_width=True,
-                    help="Click to switch RA/DEC between sexagesimal and degrees.",
-                ):
-                    st.session_state[coord_format_key] = (
-                        "degrees" if coord_format_mode == "sexagesimal" else "sexagesimal"
+                def _format_coordinate_value_html(primary_value: str, secondary_value: str) -> str:
+                    primary_html = html.escape(str(primary_value or "-"))
+                    secondary_html = html.escape(str(secondary_value or "-"))
+                    return (
+                        f"{primary_html} "
+                        f'<span style="font-size:0.82em; color:var(--dso-muted-text-color);">({secondary_html})</span>'
                     )
-                    st.rerun()
-                st.caption("Click coordinates to toggle display format.")
 
                 property_items = [
                     {
                         "Property": "RA",
-                        "Value": ra_display,
+                        "Value": ra_sexagesimal,
+                        "ValueHtml": _format_coordinate_value_html(ra_sexagesimal, ra_decimal),
                     },
                     {
                         "Property": "DEC",
-                        "Value": dec_display,
+                        "Value": dec_sexagesimal,
+                        "ValueHtml": _format_coordinate_value_html(dec_sexagesimal, dec_decimal),
                     },
-                    {"Property": "Constellation", "Value": str(selected.get("constellation") or "-")},
-                    {
-                        "Property": "Alt / Az (now)",
-                        "Value": f"{float(selected['alt_now']):.1f} deg / {float(selected['az_now']):.1f} deg",
-                    },
-                    {"Property": "Direction", "Value": str(selected["wind16"])},
+                    {"Property": "Constellation", "Value": clean_text(selected.get("constellation")) or "-"},
                     {"Property": "Distance Value", "Value": dist_value or "-"},
                     {"Property": "Distance Unit", "Value": dist_unit or "-"},
                     {"Property": "Redshift", "Value": redshift or "-"},
@@ -7576,7 +7562,8 @@ def render_detail_panel(
                         property_label = html.escape(str(row.get("Property", "")))
                         value_text = clean_text(row.get("Value")) or "-"
                         tooltip_text = clean_text(row.get("Tooltip"))
-                        value_html = html.escape(value_text)
+                        raw_value_html = clean_text(row.get("ValueHtml"))
+                        value_html = raw_value_html if raw_value_html else html.escape(value_text)
                         if tooltip_text and tooltip_text != value_text:
                             tooltip_html = html.escape(tooltip_text, quote=True)
                             value_html = (
@@ -8248,7 +8235,7 @@ def render_explorer_page(
                     use_12_hour=use_12_hour,
                 )
 
-    selected_row = resolve_selected_row(catalog, prefs)
+    selected_row = resolve_selected_row(catalog)
     active_preview_list_ids = get_list_ids(prefs, get_active_preview_list_id(prefs))
     if selected_row is not None or bool(active_preview_list_ids):
         render_detail_panel(
