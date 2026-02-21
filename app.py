@@ -2441,10 +2441,15 @@ def apparent_size_sort_key_arcmin(major_arcmin: Any, minor_arcmin: Any) -> float
 
     major_value = _coerce(major_arcmin)
     minor_value = _coerce(minor_arcmin)
-    candidates = [value for value in (major_value, minor_value) if value is not None]
-    if not candidates:
+    if major_value is None and minor_value is None:
         return -1.0
-    return float(max(candidates))
+    if major_value is None:
+        major_value = minor_value
+    if minor_value is None:
+        minor_value = major_value
+    if major_value is None or minor_value is None:
+        return -1.0
+    return float(major_value * minor_value)
 
 
 def format_description_preview(value: Any, max_chars: int = 100) -> str:
@@ -3409,10 +3414,10 @@ def render_target_recommendations(
                                 by=[
                                     "filter_match_tier",
                                     "visibility_bin_15",
-                                    "selected_visible_minutes",
                                     "peak_alt_band_10",
-                                    "peak_altitude",
                                     "sort_size_metric",
+                                    "selected_visible_minutes",
+                                    "peak_altitude",
                                     "primary_id",
                                 ],
                                 ascending=[False, False, False, False, False, False, True],
