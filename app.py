@@ -2782,30 +2782,16 @@ def render_target_recommendations(
     }
     hour_option_to_key = {option: normalize_hour_key(option) for option in hour_options}
 
-    recommendation_feature_catalog = load_catalog_recommendation_features(CATALOG_CACHE_PATH)
     catalog_fingerprint = _catalog_cache_fingerprint(CATALOG_CACHE_PATH.expanduser().resolve())
-    altaz_bundle = load_site_date_altaz_bundle(
-        CATALOG_CACHE_PATH,
-        lat=location_lat,
-        lon=location_lon,
-        window_start=window_start,
-        window_end=window_end,
-        sample_minutes=RECOMMENDATION_CACHE_SAMPLE_MINUTES,
-    )
-    sample_hour_keys_for_weather = tuple(
-        str(hour_key or "").strip()
-        for hour_key in altaz_bundle.get("sample_hour_keys", ())
-    )
-    weather_bundle = load_site_date_weather_mask_bundle(
+
+    weather_rows = fetch_hourly_weather(
         lat=location_lat,
         lon=location_lon,
         tz_name=tzinfo.key,
-        window_start_iso=pd.Timestamp(window_start).isoformat(),
-        window_end_iso=pd.Timestamp(window_end).isoformat(),
-        sample_hour_keys=sample_hour_keys_for_weather,
-        cloud_cover_threshold=RECOMMENDATION_CLOUD_COVER_THRESHOLD,
+        start_local_iso=pd.Timestamp(window_start).isoformat(),
+        end_local_iso=pd.Timestamp(window_end).isoformat(),
+        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
     )
-    weather_rows = list(weather_bundle.get("weather_rows", []))
     weather_by_hour: dict[str, dict[str, Any]] = {}
     for weather_row in weather_rows:
         hour_key = normalize_hour_key(weather_row.get("time_iso"))
@@ -2838,7 +2824,7 @@ def render_target_recommendations(
             ranked_hours.append((cloud_cover_rank, wind_rank, humidity_rank, option_idx, hour_option))
         best_visible_hour_option = min(ranked_hours)[-1]
 
-    groups_series = recommendation_feature_catalog["object_type_group"].map(normalize_object_type_group)
+    groups_series = catalog["object_type_group"].map(normalize_object_type_group)
     group_options = [str(group).strip() for group in groups_series.value_counts().index.tolist() if str(group).strip()]
     if not group_options:
         group_options = ["other"]
@@ -3096,7 +3082,33 @@ def render_target_recommendations(
         clear_query_progress()
     else:
         trace_cache_event(f"Hydrating session recommendation query cache ({criteria_signature[:12]}...)")
-        update_query_progress(12, "Searching recommendations: evaluating weather conditions...")
+        update_query_progress(12, "Searching recommendations: loading catalog features...")
+        recommendation_feature_catalog = load_catalog_recommendation_features(CATALOG_CACHE_PATH)
+
+        update_query_progress(20, "Searching recommendations: loading site/date altitude cache...")
+        altaz_bundle = load_site_date_altaz_bundle(
+            CATALOG_CACHE_PATH,
+            lat=location_lat,
+            lon=location_lon,
+            window_start=window_start,
+            window_end=window_end,
+            sample_minutes=RECOMMENDATION_CACHE_SAMPLE_MINUTES,
+        )
+        sample_hour_keys_for_weather = tuple(
+            str(hour_key or "").strip()
+            for hour_key in altaz_bundle.get("sample_hour_keys", ())
+        )
+        update_query_progress(24, "Searching recommendations: loading weather masks...")
+        weather_bundle = load_site_date_weather_mask_bundle(
+            lat=location_lat,
+            lon=location_lon,
+            tz_name=tzinfo.key,
+            window_start_iso=pd.Timestamp(window_start).isoformat(),
+            window_end_iso=pd.Timestamp(window_end).isoformat(),
+            sample_hour_keys=sample_hour_keys_for_weather,
+            cloud_cover_threshold=RECOMMENDATION_CLOUD_COVER_THRESHOLD,
+        )
+        update_query_progress(28, "Searching recommendations: evaluating weather conditions...")
 
         cloud_cover_by_hour: dict[str, float] = {}
         cloud_cover_payload = weather_bundle.get("cloud_cover_by_hour", {})
