@@ -2341,7 +2341,10 @@ def render_sky_position_summary_table(
     )
     last_selection_token = str(st.session_state.get("sky_summary_last_selection_token", ""))
     selection_changed = bool(selection_token) and selection_token != last_selection_token
-    st.session_state["sky_summary_last_selection_token"] = selection_token
+    # Keep the last non-empty selection token so unrelated reruns (for example,
+    # style toggles) do not turn a stale row/cell selection into a "new" click.
+    if selection_token:
+        st.session_state["sky_summary_last_selection_token"] = selection_token
 
     current_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", ""))
     if selection_changed and selected_primary_id and selected_primary_id != current_highlight_id:
@@ -2352,11 +2355,14 @@ def render_sky_position_summary_table(
     if (
         selection_changed
         and selected_primary_id
-        and (selected_column_index is None or selected_column_index != list_col_index)
+        and selected_column_index is not None
+        and selected_column_index != list_col_index
     ):
-        st.session_state["selected_id"] = selected_primary_id
-        st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
-        st.rerun()
+        current_selected_id = str(st.session_state.get("selected_id") or "").strip()
+        if selected_primary_id != current_selected_id:
+            st.session_state["selected_id"] = selected_primary_id
+            st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
+            st.rerun()
 
     if (
         selection_changed
