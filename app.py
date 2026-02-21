@@ -111,8 +111,6 @@ from weather_service import (
     format_precipitation,
     format_snowfall,
     format_temperature,
-    format_visibility,
-    format_visibility_condition,
     format_wind_speed,
     resolve_temperature_unit,
 )
@@ -3844,6 +3842,28 @@ def temperature_cell_style(raw_value: Any, temperature_unit: str) -> str:
     return f"color: {text_color}; font-weight: 700;"
 
 
+def format_visibility_value(distance_meters: float | None, temperature_unit: str) -> str:
+    if distance_meters is None or pd.isna(distance_meters):
+        return "-"
+    numeric = max(0.0, float(distance_meters))
+    if str(temperature_unit).strip().lower() == "f":
+        return f"{(numeric * 0.000621371):.1f} mi"
+    return f"{(numeric * 0.001):.1f} km"
+
+
+def format_visibility_condition(distance_meters: float | None) -> str:
+    if distance_meters is None or pd.isna(distance_meters):
+        return "-"
+    miles = max(0.0, float(distance_meters)) * 0.000621371
+    if miles > 6.0:
+        return "Clear"
+    if miles >= 4.0:
+        return "misty"
+    if miles >= 2.0:
+        return "high haze"
+    return "fog"
+
+
 def _dewpoint_spread_celsius(temperature_celsius: Any, dewpoint_celsius: Any) -> float | None:
     if temperature_celsius is None or dewpoint_celsius is None:
         return None
@@ -4105,7 +4125,7 @@ def build_hourly_weather_matrix(
         elif metric_key == "visibility":
             tooltip_rows[metric_label] = [
                 (
-                    f"Visibility: {format_visibility(by_hour[timestamp].get(metric_key), temperature_unit)}"
+                    f"Visibility: {format_visibility_value(by_hour[timestamp].get(metric_key), temperature_unit)}"
                     if by_hour[timestamp].get(metric_key) is not None and not pd.isna(by_hour[timestamp].get(metric_key))
                     else ""
                 )
