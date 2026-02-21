@@ -20,12 +20,15 @@ EXTENDED_FORECAST_HOURLY_FIELDS = (
     "showers",
     "snowfall",
     "cloud_cover",
+    "visibility",
     "wind_gusts_10m",
 )
 FAHRENHEIT_COUNTRY_CODES = {"US", "BS", "BZ", "KY", "PW", "FM", "MH", "LR"}
 KMH_TO_MPH = 0.621371
 MM_TO_IN = 0.0393701
 CM_TO_IN = 0.393701
+M_TO_KM = 0.001
+M_TO_MI = 0.000621371
 
 
 def infer_temperature_unit_from_locale(locale_value: str | None) -> str:
@@ -92,6 +95,30 @@ def format_snowfall(depth_cm: float | None, temperature_unit: str) -> str:
     if str(temperature_unit).strip().lower() == "f":
         return f"{(numeric * CM_TO_IN):.2f} in"
     return f"{numeric:.1f} cm"
+
+
+def format_visibility(distance_meters: float | None, temperature_unit: str) -> str:
+    if distance_meters is None or pd.isna(distance_meters):
+        return "-"
+
+    numeric = max(0.0, float(distance_meters))
+    if str(temperature_unit).strip().lower() == "f":
+        return f"{(numeric * M_TO_MI):.1f} mi"
+    return f"{(numeric * M_TO_KM):.1f} km"
+
+
+def format_visibility_condition(distance_meters: float | None) -> str:
+    if distance_meters is None or pd.isna(distance_meters):
+        return "-"
+
+    miles = max(0.0, float(distance_meters)) * M_TO_MI
+    if miles > 6.0:
+        return "Clear"
+    if miles >= 4.0:
+        return "misty"
+    if miles >= 2.0:
+        return "high haze"
+    return "fog"
 
 
 def _normalize_hourly_fields(hourly_fields: Iterable[str] | None) -> tuple[str, ...]:
