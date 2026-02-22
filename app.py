@@ -95,6 +95,10 @@ try:
 except Exception:
     let_it_rain = None
 try:
+    from st_mui_table import st_mui_table
+except Exception:
+    st_mui_table = None
+try:
     from streamlit_modal import Modal
 except Exception:
     try:
@@ -4403,11 +4407,14 @@ def build_astronomy_forecast_summary(
         )
         rating_emoji = str(rating_details.get("emoji", "")).strip() if rating_details else ""
 
-        label = format_weather_forecast_month_day(
+        label = format_weather_forecast_date(
             window_start,
             browser_locale=browser_locale,
             browser_month_day_pattern=browser_month_day_pattern,
         )
+        if "," in label:
+            day_name, date_part = label.split(",", 1)
+            label = f"{day_name[:3]}, {date_part.strip()}"
         if rating_emoji:
             label = f"{label} {rating_emoji}"
 
@@ -4502,7 +4509,7 @@ def build_astronomy_forecast_summary(
         summary_rows.append(
             {
                 "day_offset": day_offset,
-                "Date": label,
+                "Night": label,
                 "Dark": dark_duration,
                 "Sunset": sunset_text,
                 "Sunrise": sunrise_text,
@@ -4532,7 +4539,7 @@ def render_astronomy_forecast_summary(
         return
 
     ordered_columns = [
-        "Date",
+        "Night",
         "Clear",
         "Calm",
         "Crisp",
@@ -4547,6 +4554,125 @@ def render_astronomy_forecast_summary(
     display_frame = source_frame.reindex(columns=ordered_columns, fill_value="").reset_index(drop=True)
     source_frame = source_frame.reset_index(drop=True)
 
+    if st_mui_table is not None:
+        center_columns = {"Clear", "Calm", "Crisp", "Dark"}
+
+        def _mui_cell_html(text: str, style_parts: list[str], *, full_bleed: bool = False) -> str:
+            safe_text = html.escape(text) if text else "&nbsp;"
+            local_style_parts = [part for part in style_parts if str(part).strip()]
+            if full_bleed:
+                local_style_parts.extend(
+                    [
+                        "display:block;",
+                        "width:calc(100% + 16px);",
+                        "margin:-6px -8px;",
+                        "padding:6px 8px;",
+                        "box-sizing:border-box;",
+                    ]
+                )
+            style = " ".join(local_style_parts)
+            return f"<div style='{style}'>{safe_text}</div>"
+
+        mui_frame = display_frame.copy()
+        for row_idx, row in display_frame.iterrows():
+            row_day_offset = normalize_weather_forecast_day_offset(
+                source_frame.at[int(row_idx), "day_offset"],
+                max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+            )
+            row_is_selected = row_day_offset == selected_day_offset
+            for column_name in ordered_columns:
+                raw_cell_value = row.get(column_name)
+                cell_text = "" if raw_cell_value is None or pd.isna(raw_cell_value) else str(raw_cell_value).strip()
+                style_parts = ["white-space: nowrap;"]
+                if row_is_selected:
+                    style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
+                if column_name == "Night" and row_is_selected:
+                    style_parts.append("font-weight: 700;")
+                if column_name in center_columns:
+                    style_parts.append("text-align: center;")
+                if column_name == "Clear":
+                    clear_style = clarity_percentage_cell_style(cell_text)
+                    if clear_style:
+                        style_parts.append(clear_style)
+                if column_name == "Avg. Temp":
+                    avg_style = temperature_cell_style(cell_text, temperature_unit=temperature_unit)
+                    if avg_style:
+                        style_parts.append(avg_style)
+                mui_frame.at[int(row_idx), column_name] = _mui_cell_html(
+                    cell_text,
+                    style_parts,
+                    full_bleed=(column_name == "Clear"),
+                )
+
+        mui_custom_css = """
+.MuiTableCell-root {
+  padding: 6px 8px !important;
+}
+.MuiTableCell-root:nth-child(2),
+.MuiTableCell-root:nth-child(3),
+.MuiTableCell-root:nth-child(4),
+.MuiTableCell-root:nth-child(5) {
+  text-align: center !important;
+}
+.MuiTableHead-root .MuiTableCell-root:nth-child(2),
+.MuiTableHead-root .MuiTableCell-root:nth-child(3),
+.MuiTableHead-root .MuiTableCell-root:nth-child(4),
+.MuiTableHead-root .MuiTableCell-root:nth-child(5) {
+  text-align: center !important;
+}
+.MuiTablePagination-root {
+  display: none !important;
+}
+"""
+        clicked_cell = st_mui_table(
+            mui_frame,
+            enablePagination=True,
+            customCss=mui_custom_css,
+            paginationSizes=[10],
+            showHeaders=True,
+            key="astronomy_forecast_mui_table",
+            stickyHeader=False,
+            showIndex=False,
+            enable_sorting=False,
+            return_clicked_cell=True,
+            paperStyle={
+                "width": "100%",
+                "overflow": "visible",
+                "paddingBottom": "0px",
+                "border": "1px solid rgba(148, 163, 184, 0.35)",
+            },
+        )
+
+        selected_index: int | None = None
+        if isinstance(clicked_cell, dict):
+            try:
+                parsed_row_index = int(clicked_cell.get("row"))
+            except (TypeError, ValueError):
+                parsed_row_index = -1
+            if 0 <= parsed_row_index < len(source_frame):
+                selected_index = parsed_row_index
+
+        if selected_index is None:
+            return
+
+        selected_offset = normalize_weather_forecast_day_offset(
+            source_frame.at[selected_index, "day_offset"],
+            max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+        )
+        selection_token = f"{selected_index}:{selected_offset}"
+        last_selection_token = str(st.session_state.get("astronomy_forecast_last_selection_token", ""))
+        if selection_token == last_selection_token:
+            return
+
+        st.session_state["astronomy_forecast_last_selection_token"] = selection_token
+        if selected_offset != selected_day_offset:
+            st.session_state[WEATHER_FORECAST_DAY_OFFSET_STATE_KEY] = selected_offset
+            st.session_state[WEATHER_FORECAST_PERIOD_STATE_KEY] = (
+                WEATHER_FORECAST_PERIOD_TONIGHT if selected_offset <= 0 else WEATHER_FORECAST_PERIOD_TOMORROW
+            )
+            st.rerun()
+        return
+
     def _style_forecast_row(row: pd.Series) -> list[str]:
         row_idx = int(row.name)
         row_day_offset = normalize_weather_forecast_day_offset(
@@ -4560,7 +4686,7 @@ def render_astronomy_forecast_summary(
             style_parts = ["white-space: nowrap;"]
             if row_is_selected:
                 style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
-            if column == "Date" and row_is_selected:
+            if column == "Night" and row_is_selected:
                 style_parts.append("font-weight: 700;")
             if column in {"Dark", "Clear", "Calm", "Crisp"}:
                 style_parts.append("text-align: center !important;")
@@ -4590,7 +4716,7 @@ def render_astronomy_forecast_summary(
         selection_mode="single-cell",
         key="astronomy_forecast_table",
         column_config={
-            "Date": st.column_config.TextColumn(width="small"),
+            "Night": st.column_config.TextColumn(width="small"),
             "Clear": st.column_config.TextColumn(width="small"),
             "Calm": st.column_config.TextColumn(width="small"),
             "Crisp": st.column_config.TextColumn(width="small"),
