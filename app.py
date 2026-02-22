@@ -452,10 +452,11 @@ WEATHER_FORECAST_PERIOD_TOMORROW = "tomorrow"
 WEATHER_FORECAST_DAY_OFFSET_STATE_KEY = "weather_forecast_day_offset"
 ASTRONOMY_FORECAST_NIGHTS = 5
 NIGHT_RATING_FACTOR_WEIGHTS: dict[str, float] = {
-    "precipitation": 0.40,
-    "cloud_coverage": 0.30,
-    "wind": 0.20,
-    "dew_spread": 0.10,
+    "precipitation": 0.05,
+    "cloud_coverage": 0.45,
+    "visibility": 0.25,
+    "wind": 0.15,
+    "dew_risk": 0.10,
 }
 NIGHT_RATING_EMOJIS: dict[int, str] = {
     1: "🚩🚩",
@@ -833,46 +834,128 @@ def compute_night_rating_details(
             return None
         return float(numeric)
 
-    def _fraction_true(values: list[bool]) -> float | None:
+    def _average(values: list[float]) -> float | None:
         if not values:
             return None
-        true_count = sum(1 for value in values if bool(value))
-        return float(true_count) / float(len(values))
+        return float(sum(values)) / float(len(values))
 
-    precip_clear_scores: list[bool] = []
-    cloud_scores: list[bool] = []
-    wind_scores: list[bool] = []
-    dew_scores: list[bool] = []
+    def _score_precip_accum_mm(accum_mm: float) -> float:
+        if accum_mm <= 0.0:
+            return 1.0
+        if accum_mm <= 0.1:
+            return 0.80
+        if accum_mm <= 0.5:
+            return 0.45
+        if accum_mm <= 1.5:
+            return 0.15
+        return 0.0
+
+    def _score_cloud_cover(cloud_cover_pct: float) -> float:
+        if cloud_cover_pct <= 5.0:
+            return 1.0
+        if cloud_cover_pct <= 15.0:
+            return 0.92
+        if cloud_cover_pct <= 30.0:
+            return 0.75
+        if cloud_cover_pct <= 50.0:
+            return 0.50
+        if cloud_cover_pct <= 70.0:
+            return 0.25
+        return 0.05
+
+    def _score_visibility_meters(distance_meters: float) -> float:
+        miles = max(0.0, float(distance_meters)) * 0.000621371
+        if miles > 6.0:
+            return 1.0
+        if miles >= 4.0:
+            return 0.75
+        if miles >= 2.0:
+            return 0.40
+        return 0.10
+
+    def _score_wind_mph(wind_mph: float) -> float:
+        if wind_mph <= 8.0:
+            return 1.0
+        if wind_mph <= 12.0:
+            return 0.85
+        if wind_mph <= 18.0:
+            return 0.65
+        if wind_mph <= 25.0:
+            return 0.40
+        return 0.20
+
+    def _score_relative_humidity(rh_pct: float) -> float:
+        if rh_pct <= 65.0:
+            return 1.0
+        if rh_pct <= 75.0:
+            return 0.90
+        if rh_pct <= 85.0:
+            return 0.75
+        if rh_pct <= 92.0:
+            return 0.50
+        return 0.30
+
+    def _score_dew_spread_c(spread_c: float) -> float:
+        if spread_c >= 5.0:
+            return 1.0
+        if spread_c >= 3.0:
+            return 0.80
+        if spread_c >= 2.0:
+            return 0.60
+        if spread_c >= 1.0:
+            return 0.40
+        return 0.20
+
+    precip_scores: list[float] = []
+    cloud_scores: list[float] = []
+    visibility_scores: list[float] = []
+    wind_scores: list[float] = []
+    dew_scores: list[float] = []
+    precip_accum_mm_values: list[float] = []
+    wind_mph_values: list[float] = []
 
     for row in hourly_weather_rows:
         rain_mm = _finite(row.get("rain")) or 0.0
         showers_mm = _finite(row.get("showers")) or 0.0
         snowfall_cm = _finite(row.get("snowfall")) or 0.0
-        precip_clear_scores.append((rain_mm + showers_mm + snowfall_cm) <= 0.0)
+        precip_accum_mm = max(0.0, rain_mm + showers_mm + (snowfall_cm * 10.0))
+        precip_accum_mm_values.append(precip_accum_mm)
+        precip_scores.append(_score_precip_accum_mm(precip_accum_mm))
 
         cloud_cover = _finite(row.get("cloud_cover"))
         if cloud_cover is not None:
-            cloud_scores.append(cloud_cover < 20.0)
+            cloud_scores.append(_score_cloud_cover(cloud_cover))
+
+        visibility_meters = _finite(row.get("visibility"))
+        if visibility_meters is not None:
+            visibility_scores.append(_score_visibility_meters(visibility_meters))
 
         gust_kmh = _finite(row.get("wind_gusts_10m"))
         if gust_kmh is None:
             gust_kmh = _finite(row.get("wind_speed_10m"))
         if gust_kmh is not None:
             wind_mph = gust_kmh * 0.621371
-            wind_scores.append(wind_mph < 10.0)
+            wind_mph_values.append(wind_mph)
+            wind_scores.append(_score_wind_mph(wind_mph))
 
+        dew_component_scores: list[float] = []
+        humidity_pct = _finite(row.get("relative_humidity_2m"))
+        if humidity_pct is not None:
+            dew_component_scores.append(_score_relative_humidity(humidity_pct))
         temp_c = _finite(row.get("temperature_2m"))
         dew_c = _finite(row.get("dew_point_2m"))
         if temp_c is not None and dew_c is not None:
             spread_c = abs(temp_c - dew_c)
-            spread_display = spread_c * 9.0 / 5.0 if str(temperature_unit).strip().lower() == "f" else spread_c
-            dew_scores.append(spread_display >= 3.0)
+            dew_component_scores.append(_score_dew_spread_c(spread_c))
+        if dew_component_scores:
+            dew_scores.append(min(dew_component_scores))
 
     factor_scores: dict[str, float | None] = {
-        "precipitation": _fraction_true(precip_clear_scores),
-        "cloud_coverage": _fraction_true(cloud_scores),
-        "wind": _fraction_true(wind_scores),
-        "dew_spread": _fraction_true(dew_scores),
+        "precipitation": _average(precip_scores),
+        "cloud_coverage": _average(cloud_scores),
+        "visibility": _average(visibility_scores),
+        "wind": _average(wind_scores),
+        "dew_risk": _average(dew_scores),
     }
     weighted_total = 0.0
     available_weight = 0.0
@@ -887,20 +970,73 @@ def compute_night_rating_details(
         return None
 
     normalized_score = weighted_total / available_weight
-    rating = int(np.clip(np.ceil(normalized_score * 5.0), 1, 5))
+    raw_rating = int(np.clip(np.ceil(normalized_score * 5.0), 1, 5))
+    rating = raw_rating
+    rating_caps: list[dict[str, Any]] = []
+
+    if precip_accum_mm_values:
+        serious_precip_hours = sum(1 for value in precip_accum_mm_values if value >= 0.1)
+        heavy_precip_hours = sum(1 for value in precip_accum_mm_values if value >= 0.5)
+        total_precip_mm = float(sum(precip_accum_mm_values))
+        precip_cap: int | None = None
+        precip_reason = ""
+        if heavy_precip_hours > 0 or total_precip_mm >= 2.0:
+            precip_cap = 2
+            precip_reason = "Heavy precipitation accumulation risk."
+        elif serious_precip_hours > 0 or total_precip_mm >= 0.5:
+            precip_cap = 3
+            precip_reason = "Serious precipitation accumulation risk."
+        elif total_precip_mm > 0.0:
+            precip_cap = 4
+            precip_reason = "Light precipitation accumulation risk."
+
+        if precip_cap is not None and rating > precip_cap:
+            rating = precip_cap
+            rating_caps.append({"max_rating": precip_cap, "reason": precip_reason})
+
+    cloud_score = factor_scores.get("cloud_coverage")
+    visibility_score = factor_scores.get("visibility")
+    if (
+        wind_mph_values
+        and cloud_score is not None
+        and visibility_score is not None
+        and cloud_score >= 0.80
+        and visibility_score >= 0.80
+    ):
+        max_wind_mph = max(wind_mph_values)
+        if max_wind_mph >= 20.0 and rating > 4:
+            rating = 4
+            rating_caps.append(
+                {
+                    "max_rating": 4,
+                    "reason": "Strong wind prevents a 5/5 despite clear sky and visibility.",
+                }
+            )
+
+    dew_score = factor_scores.get("dew_risk")
+    if dew_score is not None and dew_score < 0.75 and rating > 4:
+        rating = 4
+        rating_caps.append(
+            {
+                "max_rating": 4,
+                "reason": "Elevated dew risk prevents a 5/5 night.",
+            }
+        )
+
     emoji = NIGHT_RATING_EMOJIS.get(rating, "⭐️")
     factor_rows: list[dict[str, Any]] = []
     factor_definitions = (
-        ("precipitation", "Precipitation = 0", precip_clear_scores),
-        ("cloud_coverage", "Cloud < 20%", cloud_scores),
-        ("wind", "Wind < 10 mph", wind_scores),
-        ("dew_spread", "Dew spread >= 3°", dew_scores),
+        ("precipitation", "Precip accumulation risk", precip_scores),
+        ("cloud_coverage", "Cloud cover quality", cloud_scores),
+        ("visibility", "Visibility quality", visibility_scores),
+        ("wind", "Wind stability", wind_scores),
+        ("dew_risk", "Dew risk (humidity/spread)", dew_scores),
     )
     for factor_key, factor_label, factor_values in factor_definitions:
         factor_weight = float(NIGHT_RATING_FACTOR_WEIGHTS.get(factor_key, 0.0))
         factor_score = factor_scores.get(factor_key)
         data_hours = len(factor_values)
-        pass_hours = sum(1 for value in factor_values if bool(value))
+        pass_hours = sum(1 for value in factor_values if float(value) >= 0.70)
         factor_rows.append(
             {
                 "key": factor_key,
@@ -917,10 +1053,12 @@ def compute_night_rating_details(
 
     return {
         "rating": rating,
+        "raw_rating": raw_rating,
         "emoji": emoji,
         "normalized_score": normalized_score,
         "available_weight": available_weight,
         "factors": factor_rows,
+        "caps": rating_caps,
     }
 
 
@@ -946,6 +1084,10 @@ def format_night_rating_tooltip(rating_details: dict[str, Any] | None) -> str:
         rating = int(rating_details.get("rating", 0))
     except (TypeError, ValueError):
         rating = 0
+    try:
+        raw_rating = int(rating_details.get("raw_rating", rating))
+    except (TypeError, ValueError):
+        raw_rating = rating
     emoji = str(rating_details.get("emoji", "")).strip()
     normalized_score = rating_details.get("normalized_score")
     available_weight = rating_details.get("available_weight")
@@ -961,8 +1103,26 @@ def format_night_rating_tooltip(rating_details: dict[str, Any] | None) -> str:
     lines: list[str] = [
         f"Night rating: {rating}/5 {emoji}".strip(),
         f"Weighted score: {weighted_pct_text} (weights in use: {available_weight_pct_text})",
-        "Factors:",
     ]
+    if raw_rating != rating:
+        lines.append(f"Raw rating before caps: {raw_rating}/5")
+    caps = rating_details.get("caps", [])
+    if isinstance(caps, list) and caps:
+        lines.append("Caps applied:")
+        for cap in caps:
+            if not isinstance(cap, dict):
+                continue
+            reason = str(cap.get("reason", "")).strip()
+            try:
+                max_rating = int(cap.get("max_rating", 0))
+            except (TypeError, ValueError):
+                max_rating = 0
+            if max_rating > 0 and reason:
+                lines.append(f"- max {max_rating}/5: {reason}")
+            elif reason:
+                lines.append(f"- {reason}")
+
+    lines.append("Factors:")
 
     raw_factors = rating_details.get("factors", [])
     if isinstance(raw_factors, list):
@@ -4323,6 +4483,11 @@ def build_astronomy_forecast_summary(
         temperature_values = _extract_finite_weather_values(night_rows, "temperature_2m")
         gust_values = _extract_finite_weather_values(night_rows, "wind_gusts_10m")
         alert_emojis = collect_night_weather_alert_emojis(night_rows, temperature_unit)
+        rating_details = compute_night_rating_details(
+            night_rows,
+            temperature_unit=temperature_unit,
+        )
+        rating_emoji = str((rating_details or {}).get("emoji", "")).strip()
 
         label = format_weather_forecast_date(
             window_start,
@@ -4363,7 +4528,7 @@ def build_astronomy_forecast_summary(
         summary_rows.append(
             {
                 "day_offset": day_offset,
-                "Night": label,
+                "Night": f"{label} {rating_emoji}".strip(),
                 "Astronomic Night": night_time,
                 "Cloud Avg": f"{float(np.mean(cloud_values)):.0f}%" if cloud_values else "-",
                 "Low-Hi": temp_range_display,
