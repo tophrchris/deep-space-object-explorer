@@ -82,8 +82,26 @@ python scripts/ingest_catalog.py
 Notes:
 - The app uses `requirements.txt` automatically for Python dependencies.
 - `runtime.txt` pins Python to 3.11 for cloud parity.
-- Preferences persist in browser `localStorage` (not shared across users).
+- Preferences persist in browser `localStorage` by default; optional Google Drive sync can mirror prefs/session state.
 - For private repos, make sure Streamlit has GitHub access to this repository.
+
+Google sign-in + Drive appData sync setup:
+- Configure OIDC in `.streamlit/secrets.toml` with Google as provider.
+- Include `expose_tokens = ["access"]` and Drive appData scope.
+- Minimal example:
+
+```toml
+[auth]
+redirect_uri = "https://<your-app-url>/oauth2callback"
+cookie_secret = "<random-secret>"
+expose_tokens = ["access"]
+
+[auth.google]
+client_id = "<google-client-id>"
+client_secret = "<google-client-secret>"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+client_kwargs = { scope = "openid profile email https://www.googleapis.com/auth/drive.appdata", prompt = "select_account" }
+```
 
 ## Release milestones
 

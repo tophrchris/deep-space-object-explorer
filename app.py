@@ -34,6 +34,8 @@ from app_constants import (
     WIND16,
 )
 from app_preferences import (
+    CLOUD_SYNC_PROVIDER_GOOGLE,
+    CLOUD_SYNC_PROVIDER_NONE,
     PREFS_BOOTSTRAP_MAX_RUNS,
     PREFS_BOOTSTRAP_RETRY_INTERVAL_MS,
     build_settings_export_payload,
@@ -56,6 +58,12 @@ from dso_enricher.catalog_service import (
     get_object_by_id,
     load_catalog_from_cache,
     search_catalog,
+)
+from google_drive_sync import (
+    DEFAULT_SETTINGS_FILENAME,
+    find_settings_file,
+    read_settings_payload,
+    upsert_settings_file,
 )
 from lists.list_subsystem import (
     AUTO_RECENT_LIST_ID,
@@ -105,6 +113,11 @@ except Exception:
         from streamlit_modal_compat import Modal
     except Exception:
         Modal = None
+try:
+    import authlib  # type: ignore
+    AUTHLIB_AVAILABLE = True
+except Exception:
+    AUTHLIB_AVAILABLE = False
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
 from streamlit_autorefresh import st_autorefresh
 from target_tips.ui import render_target_tips_panel
@@ -174,6 +187,409 @@ RECOMMENDATION_QUERY_SESSION_CACHE_LIMIT = 8
 def trace_cache_event(message: str) -> None:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"[DSO CACHE {timestamp}] {message}", flush=True)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_utc_timestamp(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_user_logged_in() -> bool:
+    try:
+        return bool(getattr(st.user, "is_logged_in", False))
+    except Exception:
+        return False
+
+
+def _get_user_claim(name: str) -> str:
+    key = str(name or "").strip()
+    if not key:
+        return ""
+    try:
+        value = st.user.get(key)
+    except Exception:
+        value = None
+    return str(value or "").strip()
+
+
+def _get_google_access_token() -> str:
+    if not _is_user_logged_in():
+        return ""
+    try:
+        tokens = getattr(st.user, "tokens", None)
+        if tokens is None:
+            return ""
+        raw = tokens.get("access") or tokens.get("access_token")
+    except Exception:
+        return ""
+    return str(raw or "").strip()
+
+
+_SESSION_STATE_UNSERIALIZABLE = object()
+
+
+def _session_value_to_jsonable(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return _SESSION_STATE_UNSERIALIZABLE
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            parsed = _session_value_to_jsonable(item, depth=depth + 1)
+            if parsed is not _SESSION_STATE_UNSERIALIZABLE:
+                items.append(parsed)
+        return items
+    if isinstance(value, tuple):
+        items = []
+        for item in value:
+            parsed = _session_value_to_jsonable(item, depth=depth + 1)
+            if parsed is not _SESSION_STATE_UNSERIALIZABLE:
+                items.append(parsed)
+        return items
+    if isinstance(value, set):
+        items = []
+        for item in sorted(value, key=lambda current: str(current)):
+            parsed = _session_value_to_jsonable(item, depth=depth + 1)
+            if parsed is not _SESSION_STATE_UNSERIALIZABLE:
+                items.append(parsed)
+        return items
+    if isinstance(value, dict):
+        parsed_dict: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            parsed_key = str(raw_key).strip()
+            if not parsed_key:
+                continue
+            parsed_value = _session_value_to_jsonable(raw_value, depth=depth + 1)
+            if parsed_value is _SESSION_STATE_UNSERIALIZABLE:
+                continue
+            parsed_dict[parsed_key] = parsed_value
+        return parsed_dict
+    return _SESSION_STATE_UNSERIALIZABLE
+
+
+def build_syncable_session_snapshot() -> dict[str, Any]:
+    excluded_exact = {
+        "prefs",
+        "prefs_bootstrap_runs",
+        "prefs_bootstrapped",
+        "altaz_refresh",
+        "recommended_targets_query_cache",
+        "browser_language",
+        "browser_hour_cycle",
+        "browser_month_day_pattern",
+        "browser_viewport_width",
+        "prefs_persistence_notice",
+        "settings_import_notice",
+        GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY,
+        GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY,
+        GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY,
+        GOOGLE_DRIVE_SYNC_LAST_APPLIED_TOKEN_STATE_KEY,
+    }
+    excluded_prefixes = (
+        "FormSubmitter:",
+        "prefs_bootstrap_wait_",
+        "browser_prefs_",
+        "cloud_sync_",
+        "google_drive_sync_",
+        "settings_import_",
+    )
+
+    snapshot: dict[str, Any] = {}
+    for raw_key, raw_value in st.session_state.items():
+        key = str(raw_key).strip()
+        if not key:
+            continue
+        if key in excluded_exact:
+            continue
+        if any(key.startswith(prefix) for prefix in excluded_prefixes):
+            continue
+        parsed_value = _session_value_to_jsonable(raw_value)
+        if parsed_value is _SESSION_STATE_UNSERIALIZABLE:
+            continue
+        snapshot[key] = parsed_value
+    return snapshot
+
+
+def apply_session_snapshot(snapshot: Any) -> int:
+    if not isinstance(snapshot, dict):
+        return 0
+    restore_excluded_exact = {
+        "altaz_refresh",
+        "recommended_targets_query_cache",
+    }
+    restore_excluded_prefixes = (
+        "prefs_bootstrap_wait_",
+        "google_drive_sync_",
+        "cloud_sync_",
+    )
+    applied = 0
+    for raw_key, raw_value in snapshot.items():
+        key = str(raw_key).strip()
+        if not key or key == "prefs":
+            continue
+        if key in restore_excluded_exact:
+            continue
+        if any(key.startswith(prefix) for prefix in restore_excluded_prefixes):
+            continue
+        parsed_value = _session_value_to_jsonable(raw_value)
+        if parsed_value is _SESSION_STATE_UNSERIALIZABLE:
+            continue
+        try:
+            st.session_state[key] = parsed_value
+        except Exception as exc:
+            # Some widget-managed keys (e.g. auto-refresh) may already be instantiated
+            # before cloud session restore runs. Skip them instead of crashing.
+            if "cannot be modified after the widget" in str(exc):
+                continue
+            raise
+        applied += 1
+    return applied
+
+
+def _build_cloud_settings_payload(prefs: dict[str, Any], owner_sub: str) -> dict[str, Any]:
+    return {
+        "format": "dso_explorer_cloud_settings",
+        "version": GOOGLE_DRIVE_SYNC_SESSION_SNAPSHOT_VERSION,
+        "updated_at_utc": _utc_now_iso(),
+        "owner_sub": str(owner_sub).strip(),
+        "preferences": ensure_preferences_shape(prefs),
+        "session_state": build_syncable_session_snapshot(),
+    }
+
+
+def _payload_updated_at_utc(payload: dict[str, Any], *, fallback_modified_time: str = "") -> datetime:
+    payload_time = _parse_utc_timestamp(payload.get("updated_at_utc"))
+    if payload_time > datetime.fromtimestamp(0, tz=timezone.utc):
+        return payload_time
+    return _parse_utc_timestamp(fallback_modified_time)
+
+
+def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
+    def _persist_cloud_sync_error(message: str) -> None:
+        error_message = str(message).strip()
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+            f"Error while syncing with Google Drive: {error_message}"
+        )
+        if str(prefs.get("cloud_sync_last_error", "")).strip() == error_message:
+            return
+        prefs["cloud_sync_last_error"] = error_message
+        st.session_state["prefs"] = prefs
+        save_preferences(prefs)
+        st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+
+    is_logged_in = _is_user_logged_in()
+    if not is_logged_in:
+        st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = False
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY] = ""
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = "Not signed in; cloud sync idle."
+        return
+
+    access_token = _get_google_access_token()
+    if not access_token:
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+            "Signed in, but Google access token is unavailable."
+        )
+        _persist_cloud_sync_error(
+            "Google access token not available. Configure auth expose_tokens=[\"access\"]."
+        )
+        st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+        return
+
+    account_sub = _get_user_claim("sub") or _get_user_claim("email")
+    was_cloud_sync_initialized = bool(prefs.get("cloud_sync_initialized", False))
+    last_account_sub = str(st.session_state.get(GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY, "")).strip()
+    first_sign_in_for_session = bool(account_sub) and account_sub != last_account_sub
+    registration_sign_in = first_sign_in_for_session and (not was_cloud_sync_initialized)
+    if first_sign_in_for_session:
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY] = account_sub
+        prefs_changed = False
+        if str(prefs.get("cloud_sync_provider", "")).strip().lower() != CLOUD_SYNC_PROVIDER_GOOGLE:
+            prefs["cloud_sync_provider"] = CLOUD_SYNC_PROVIDER_GOOGLE
+            prefs_changed = True
+        if registration_sign_in:
+            prefs["cloud_sync_initialized"] = True
+            prefs_changed = True
+            if not bool(prefs.get("cloud_sync_enabled", False)):
+                prefs["cloud_sync_enabled"] = True
+                prefs_changed = True
+        if str(prefs.get("cloud_sync_last_error", "")).strip():
+            prefs["cloud_sync_last_error"] = ""
+            prefs_changed = True
+        if prefs_changed:
+            st.session_state["prefs"] = prefs
+            save_preferences(prefs)
+
+    if not bool(prefs.get("cloud_sync_enabled", False)):
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = "Signed in; cloud sync is disabled."
+        return
+
+    cloud_file_id = str(prefs.get("cloud_sync_file_id", "")).strip()
+    if not bool(st.session_state.get(GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY, False)):
+        local_updated_at = _parse_utc_timestamp(prefs.get("last_updated_utc", ""))
+        try:
+            remote_file = find_settings_file(access_token, filename=DEFAULT_SETTINGS_FILENAME)
+        except Exception as exc:
+            _persist_cloud_sync_error(str(exc))
+            st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+            st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
+            return
+
+        remote_file_id = ""
+        remote_payload: dict[str, Any] | None = None
+        remote_modified_time = ""
+        if isinstance(remote_file, dict):
+            remote_file_id = str(remote_file.get("id", "")).strip()
+            remote_modified_time = str(remote_file.get("modifiedTime", "")).strip()
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_REMOTE_FILE_MODIFIED_STATE_KEY] = remote_modified_time
+        if not remote_file_id:
+            st.session_state[GOOGLE_DRIVE_SYNC_LAST_REMOTE_PAYLOAD_UPDATED_STATE_KEY] = ""
+        if remote_file_id:
+            try:
+                remote_payload = read_settings_payload(access_token, remote_file_id)
+            except Exception as exc:
+                _persist_cloud_sync_error(str(exc))
+                st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+                st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
+                return
+
+        remote_settings_present = False
+        remote_updated_at = datetime.fromtimestamp(0, tz=timezone.utc)
+        if remote_payload:
+            remote_prefs_raw = remote_payload.get("preferences")
+            if isinstance(remote_prefs_raw, dict):
+                remote_settings_present = True
+                remote_updated_at = _payload_updated_at_utc(
+                    remote_payload,
+                    fallback_modified_time=remote_modified_time,
+                )
+                st.session_state[GOOGLE_DRIVE_SYNC_LAST_REMOTE_PAYLOAD_UPDATED_STATE_KEY] = (
+                    remote_updated_at.isoformat()
+                )
+                if remote_updated_at > local_updated_at:
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                        "Remote cloud settings are newer than local settings; applying remote snapshot."
+                    )
+                    restored_prefs = ensure_preferences_shape(remote_prefs_raw)
+                    restored_prefs["cloud_sync_provider"] = CLOUD_SYNC_PROVIDER_GOOGLE
+                    restored_prefs["cloud_sync_enabled"] = bool(prefs.get("cloud_sync_enabled", True))
+                    restored_prefs["cloud_sync_initialized"] = True
+                    restored_prefs["cloud_sync_file_id"] = remote_file_id
+                    restored_prefs["cloud_sync_last_ok_utc"] = _utc_now_iso()
+                    restored_prefs["cloud_sync_last_error"] = ""
+                    st.session_state["prefs"] = restored_prefs
+                    save_preferences(restored_prefs)
+                    st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+                    restored_session_keys = apply_session_snapshot(remote_payload.get("session_state", {}))
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_APPLIED_TOKEN_STATE_KEY] = (
+                        f"{remote_file_id}:{remote_updated_at.isoformat()}"
+                    )
+                    st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+                        "Pulled newer settings from Google Drive and applied them locally."
+                    )
+                    st.session_state["cloud_sync_notice"] = (
+                        "Google Drive settings restored "
+                        f"({restored_session_keys} session key(s) applied)."
+                    )
+                    st.rerun()
+                if local_updated_at > remote_updated_at:
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                        "Local settings are newer than cloud settings; upload queued."
+                    )
+                    st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = True
+                elif local_updated_at == remote_updated_at:
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                        "Local and cloud settings timestamps match; no sync required."
+                    )
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+                        "Cloud settings already match local settings."
+                    )
+        elif remote_file_id:
+            st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+                "Found Google Drive settings file, but it does not contain a valid preferences payload."
+            )
+        else:
+            st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                "No Google Drive settings file found yet."
+            )
+
+        should_push_after_bootstrap = bool(st.session_state.get(GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY, False))
+
+        if remote_file_id and remote_file_id != cloud_file_id:
+            prefs["cloud_sync_file_id"] = remote_file_id
+            prefs["cloud_sync_last_error"] = ""
+            st.session_state["prefs"] = prefs
+            save_preferences(prefs)
+            st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = should_push_after_bootstrap
+
+        if (
+            registration_sign_in
+            and not remote_file_id
+            and not remote_settings_present
+            and bool(prefs.get("cloud_sync_enabled", False))
+        ):
+            # First-time cloud registration with no remote settings file yet:
+            # seed local settings/session state to Drive.
+            st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+                "First sign-in detected with no cloud settings file; seeding Google Drive from local settings."
+            )
+            st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = True
+
+        st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
+
+    if not bool(st.session_state.get(GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY, False)):
+        return
+
+    try:
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = "Uploading local settings to Google Drive..."
+        payload = _build_cloud_settings_payload(prefs, account_sub)
+        updated_file = upsert_settings_file(
+            access_token,
+            payload,
+            preferred_file_id=str(prefs.get("cloud_sync_file_id", "")).strip(),
+            filename=DEFAULT_SETTINGS_FILENAME,
+        )
+        next_file_id = str(updated_file.get("id", "")).strip()
+        if next_file_id:
+            prefs["cloud_sync_file_id"] = next_file_id
+        remote_modified_time = str(updated_file.get("modifiedTime", "")).strip()
+        if remote_modified_time:
+            st.session_state[GOOGLE_DRIVE_SYNC_LAST_REMOTE_FILE_MODIFIED_STATE_KEY] = remote_modified_time
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_REMOTE_PAYLOAD_UPDATED_STATE_KEY] = (
+            str(payload.get("updated_at_utc", "")).strip()
+        )
+        prefs["cloud_sync_last_ok_utc"] = _utc_now_iso()
+        prefs["cloud_sync_last_error"] = ""
+        st.session_state["prefs"] = prefs
+        save_preferences(prefs)
+        st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+            "Local settings uploaded to Google Drive successfully."
+        )
+        st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+            "Uploaded local settings to Google Drive."
+        )
+    except Exception as exc:
+        _persist_cloud_sync_error(str(exc))
+        st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
 
 
 def normalize_emission_band_token(value: Any) -> str:
@@ -450,6 +866,15 @@ WEATHER_ALERT_RAIN_DURATION_SECONDS = 30
 WEATHER_ALERT_RAIN_BUCKET_STATE_KEY = "weather_alert_rain_last_bucket"
 TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY = "target_detail_modal_open_request"
 TARGET_DETAIL_MODAL_LAST_TARGET_STATE_KEY = "target_detail_modal_last_target_id"
+GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY = "google_drive_sync_bootstrapped"
+GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY = "cloud_sync_pending"
+GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY = "google_drive_sync_last_account_sub"
+GOOGLE_DRIVE_SYNC_LAST_APPLIED_TOKEN_STATE_KEY = "google_drive_sync_last_applied_token"
+GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY = "google_drive_sync_last_action"
+GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY = "google_drive_sync_last_compare_summary"
+GOOGLE_DRIVE_SYNC_LAST_REMOTE_FILE_MODIFIED_STATE_KEY = "google_drive_sync_last_remote_file_modified_utc"
+GOOGLE_DRIVE_SYNC_LAST_REMOTE_PAYLOAD_UPDATED_STATE_KEY = "google_drive_sync_last_remote_payload_updated_utc"
+GOOGLE_DRIVE_SYNC_SESSION_SNAPSHOT_VERSION = 1
 WEATHER_FORECAST_PERIOD_STATE_KEY = "weather_forecast_period"
 WEATHER_FORECAST_PERIOD_TONIGHT = "tonight"
 WEATHER_FORECAST_PERIOD_TOMORROW = "tomorrow"
@@ -3304,6 +3729,36 @@ def render_target_recommendations(
     if not isinstance(query_cache_store, dict):
         query_cache_store = {}
     query_cache_payload = query_cache_store.get(criteria_signature)
+    if isinstance(query_cache_payload, dict):
+        cached_status = str(query_cache_payload.get("status", "ok")).strip().lower()
+        cached_recommended = query_cache_payload.get("recommended")
+        required_cached_columns = {
+            "primary_id",
+            "target_name",
+            "visible_minutes",
+            "selected_visible_minutes",
+            "visibility_reason",
+            "object_type",
+            "emissions",
+            "apparent_size",
+            "apparent_size_sort_arcmin",
+            "peak_time_local",
+            "peak_altitude",
+            "peak_direction",
+        }
+        if selected_telescope is not None:
+            required_cached_columns.add("framing_percent")
+        if sort_field != "ranking":
+            required_cached_columns.add(str(sort_field))
+        if cached_status == "ok" and (
+            not isinstance(cached_recommended, pd.DataFrame)
+            or not required_cached_columns.issubset(set(cached_recommended.columns))
+        ):
+            trace_cache_event(
+                f"Discarding malformed session recommendation cache payload ({criteria_signature[:12]}...)"
+            )
+            query_cache_store.pop(criteria_signature, None)
+            query_cache_payload = None
     recommended = pd.DataFrame()
     total_results_uncapped = 0
     empty_query_message: str | None = None
@@ -7512,6 +7967,105 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
     st.caption(f"Active temperature unit: {effective_unit.upper()} ({source_note})")
 
     st.divider()
+    st.subheader("Cloud Sync (Google Drive)")
+    cloud_sync_notice = str(st.session_state.pop("cloud_sync_notice", "")).strip()
+    if cloud_sync_notice:
+        st.success(cloud_sync_notice)
+    is_logged_in = _is_user_logged_in()
+    if not is_logged_in:
+        st.caption("Sign in with Google to sync preferences and session state across devices.")
+        if not AUTHLIB_AVAILABLE:
+            st.warning(
+                "Google sign-in is unavailable because Authlib is not installed in this environment. "
+                "Install dependencies from requirements.txt or run `pip install Authlib>=1.3.2`."
+            )
+        if st.button(
+            "Sign in with Google",
+            key="settings_google_sign_in",
+            use_container_width=True,
+            disabled=not AUTHLIB_AVAILABLE,
+        ):
+            try:
+                st.login("google")
+            except Exception as exc:
+                st.warning(f"Google sign-in could not start: {str(exc).strip()}")
+    else:
+        account_email = _get_user_claim("email")
+        if account_email:
+            st.caption(f"Signed in as {account_email}")
+        else:
+            st.caption("Signed in with Google")
+        if st.button("Sign out of Google", key="settings_google_sign_out", use_container_width=True):
+            st.logout()
+
+        cloud_sync_enabled = bool(prefs.get("cloud_sync_enabled", False))
+        next_cloud_sync_enabled = st.toggle(
+            "Save settings to Google Drive",
+            value=cloud_sync_enabled,
+            key="settings_cloud_sync_enabled",
+        )
+        if next_cloud_sync_enabled != cloud_sync_enabled:
+            prefs["cloud_sync_provider"] = (
+                CLOUD_SYNC_PROVIDER_GOOGLE if next_cloud_sync_enabled else CLOUD_SYNC_PROVIDER_NONE
+            )
+            prefs["cloud_sync_enabled"] = next_cloud_sync_enabled
+            prefs["cloud_sync_last_error"] = ""
+            persist_and_rerun(prefs)
+
+        cloud_file_id = str(prefs.get("cloud_sync_file_id", "")).strip()
+        local_last_saved = str(prefs.get("last_updated_utc", "")).strip()
+        cloud_last_ok = str(prefs.get("cloud_sync_last_ok_utc", "")).strip()
+        cloud_last_error = str(prefs.get("cloud_sync_last_error", "")).strip()
+        pending_cloud_sync = bool(st.session_state.get(GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY, False))
+        cloud_bootstrapped = bool(st.session_state.get(GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY, False))
+        remote_file_modified_seen = str(
+            st.session_state.get(GOOGLE_DRIVE_SYNC_LAST_REMOTE_FILE_MODIFIED_STATE_KEY, "")
+        ).strip()
+        remote_payload_updated_seen = str(
+            st.session_state.get(GOOGLE_DRIVE_SYNC_LAST_REMOTE_PAYLOAD_UPDATED_STATE_KEY, "")
+        ).strip()
+        last_sync_action = str(st.session_state.get(GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY, "")).strip()
+        last_compare_summary = str(st.session_state.get(GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY, "")).strip()
+        if local_last_saved:
+            st.caption(f"Local settings last saved: {local_last_saved}")
+        if cloud_last_ok:
+            st.caption(f"Last successful cloud sync (app timestamp): {cloud_last_ok}")
+        if remote_payload_updated_seen:
+            st.caption(f"Latest cloud payload timestamp seen: {remote_payload_updated_seen}")
+        if remote_file_modified_seen:
+            st.caption(f"Latest Google Drive file modified time seen: {remote_file_modified_seen}")
+        st.caption(
+            "Cloud sync state: "
+            f"pending_upload={'yes' if pending_cloud_sync else 'no'} | "
+            f"bootstrapped_this_session={'yes' if cloud_bootstrapped else 'no'}"
+        )
+        if cloud_file_id:
+            st.caption(f"Cloud settings file: {cloud_file_id}")
+        if last_compare_summary:
+            st.caption(f"Last compare result: {last_compare_summary}")
+        if last_sync_action:
+            st.caption(f"Last sync action: {last_sync_action}")
+        if cloud_last_error:
+            st.warning(f"Last cloud sync error: {cloud_last_error}")
+
+        token_available = bool(_get_google_access_token())
+        if not token_available:
+            st.warning(
+                "Google access token unavailable. Configure auth with expose_tokens=[\"access\"] "
+                "and include Drive appData scope."
+            )
+        sync_now_disabled = not token_available or not bool(next_cloud_sync_enabled)
+        if st.button(
+            "Sync now",
+            key="settings_cloud_sync_now",
+            use_container_width=True,
+            disabled=sync_now_disabled,
+        ):
+            st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = False
+            st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = True
+            st.rerun()
+
+    st.divider()
     st.subheader("Catalog")
     st.caption(
         f"Rows: {int(catalog_meta.get('row_count', 0))} | "
@@ -8886,6 +9440,7 @@ def main() -> None:
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     sync_active_site_to_legacy_fields(prefs)
     st.session_state["prefs"] = prefs
+    maybe_sync_prefs_with_google_drive(prefs)
 
     if not is_location_configured(prefs.get("location")):
         if not bool(st.session_state.get("initial_location_fallback_attempted", False)):
