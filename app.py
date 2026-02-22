@@ -385,6 +385,7 @@ def _payload_updated_at_utc(payload: dict[str, Any], *, fallback_modified_time: 
 def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
     def _persist_cloud_sync_error(message: str) -> None:
         error_message = str(message).strip()
+        st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
             f"Error while syncing with Google Drive: {error_message}"
         )
@@ -399,11 +400,13 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
     if not is_logged_in:
         st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = False
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY] = ""
+        st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = "Not signed in; cloud sync idle."
         return
 
     access_token = _get_google_access_token()
     if not access_token:
+        st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
             "Signed in, but Google access token is unavailable."
         )
@@ -414,6 +417,11 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
         return
 
     account_sub = _get_user_claim("sub") or _get_user_claim("email")
+    manual_sync_action = str(st.session_state.get(GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY, "")).strip().lower()
+    if manual_sync_action not in {"pull", "push"}:
+        manual_sync_action = ""
+    manual_pull_requested = manual_sync_action == "pull"
+    manual_push_requested = manual_sync_action == "push"
     was_cloud_sync_initialized = bool(prefs.get("cloud_sync_initialized", False))
     last_account_sub = str(st.session_state.get(GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY, "")).strip()
     first_sign_in_for_session = bool(account_sub) and account_sub != last_account_sub
@@ -438,11 +446,13 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
             save_preferences(prefs)
 
     if not bool(prefs.get("cloud_sync_enabled", False)):
+        st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = "Signed in; cloud sync is disabled."
         return
 
     cloud_file_id = str(prefs.get("cloud_sync_file_id", "")).strip()
-    if not bool(st.session_state.get(GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY, False)):
+    bootstrap_complete = bool(st.session_state.get(GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY, False))
+    if (not bootstrap_complete and not manual_push_requested) or manual_pull_requested:
         local_updated_at = _parse_utc_timestamp(prefs.get("last_updated_utc", ""))
         try:
             remote_file = find_settings_file(access_token, filename=DEFAULT_SETTINGS_FILENAME)
@@ -483,9 +493,12 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
                 st.session_state[GOOGLE_DRIVE_SYNC_LAST_REMOTE_PAYLOAD_UPDATED_STATE_KEY] = (
                     remote_updated_at.isoformat()
                 )
-                if remote_updated_at > local_updated_at:
+                should_apply_remote_snapshot = manual_pull_requested or (remote_updated_at > local_updated_at)
+                if should_apply_remote_snapshot:
                     st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
-                        "Remote cloud settings are newer than local settings; applying remote snapshot."
+                        "Manual pull requested; applying cloud settings snapshot."
+                        if manual_pull_requested
+                        else "Remote cloud settings are newer than local settings; applying remote snapshot."
                     )
                     restored_prefs = ensure_preferences_shape(remote_prefs_raw)
                     restored_prefs["cloud_sync_provider"] = CLOUD_SYNC_PROVIDER_GOOGLE
@@ -502,34 +515,55 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
                         f"{remote_file_id}:{remote_updated_at.isoformat()}"
                     )
                     st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
+                    st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
                     st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
-                        "Pulled newer settings from Google Drive and applied them locally."
+                        "Pulled settings from Google Drive and applied them locally."
+                        if manual_pull_requested
+                        else "Pulled newer settings from Google Drive and applied them locally."
                     )
                     st.session_state["cloud_sync_notice"] = (
                         "Google Drive settings restored "
                         f"({restored_session_keys} session key(s) applied)."
                     )
                     st.rerun()
-                if local_updated_at > remote_updated_at:
+                if (not manual_pull_requested) and (local_updated_at > remote_updated_at):
                     st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
                         "Local settings are newer than cloud settings; upload queued."
                     )
                     st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = True
-                elif local_updated_at == remote_updated_at:
+                elif (not manual_pull_requested) and (local_updated_at == remote_updated_at):
                     st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
                         "Local and cloud settings timestamps match; no sync required."
                     )
                     st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
                         "Cloud settings already match local settings."
                     )
+                elif manual_pull_requested:
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                        "Manual pull requested, but cloud payload was not newer; no changes were applied."
+                    )
+                    st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+                        "Manual pull completed; local settings already match or exceed cloud timestamp."
+                    )
+                    st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         elif remote_file_id:
             st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
                 "Found Google Drive settings file, but it does not contain a valid preferences payload."
             )
+            if manual_pull_requested:
+                st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                    "Manual pull requested, but the cloud settings file payload is invalid."
+                )
+                st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         else:
             st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
                 "No Google Drive settings file found yet."
             )
+            if manual_pull_requested:
+                st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
+                    "Manual pull requested, but no cloud settings file exists yet."
+                )
+                st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
 
         should_push_after_bootstrap = bool(st.session_state.get(GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY, False))
 
@@ -556,9 +590,15 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
         st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
 
     if not bool(st.session_state.get(GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY, False)):
+        if manual_push_requested:
+            st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         return
 
     try:
+        if manual_push_requested:
+            st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
+                "Manual push requested; uploading current local settings to Google Drive."
+            )
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = "Uploading local settings to Google Drive..."
         payload = _build_cloud_settings_payload(prefs, account_sub)
         updated_file = upsert_settings_file(
@@ -581,11 +621,16 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
         st.session_state["prefs"] = prefs
         save_preferences(prefs)
         st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+        st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
-            "Local settings uploaded to Google Drive successfully."
+            "Manual push completed successfully."
+            if manual_push_requested
+            else "Local settings uploaded to Google Drive successfully."
         )
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY] = (
-            "Uploaded local settings to Google Drive."
+            "Uploaded local settings to Google Drive (manual push)."
+            if manual_push_requested
+            else "Uploaded local settings to Google Drive."
         )
     except Exception as exc:
         _persist_cloud_sync_error(str(exc))
@@ -870,6 +915,7 @@ GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY = "google_drive_sync_bootstrapped"
 GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY = "cloud_sync_pending"
 GOOGLE_DRIVE_SYNC_LAST_ACCOUNT_STATE_KEY = "google_drive_sync_last_account_sub"
 GOOGLE_DRIVE_SYNC_LAST_APPLIED_TOKEN_STATE_KEY = "google_drive_sync_last_applied_token"
+GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY = "google_drive_sync_manual_action"
 GOOGLE_DRIVE_SYNC_LAST_ACTION_STATE_KEY = "google_drive_sync_last_action"
 GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY = "google_drive_sync_last_compare_summary"
 GOOGLE_DRIVE_SYNC_LAST_REMOTE_FILE_MODIFIED_STATE_KEY = "google_drive_sync_last_remote_file_modified_utc"
@@ -8054,14 +8100,30 @@ def render_settings_page(catalog_meta: dict[str, Any], prefs: dict[str, Any], br
                 "Google access token unavailable. Configure auth with expose_tokens=[\"access\"] "
                 "and include Drive appData scope."
             )
-        sync_now_disabled = not token_available or not bool(next_cloud_sync_enabled)
-        if st.button(
-            "Sync now",
-            key="settings_cloud_sync_now",
+        sync_controls_disabled = not token_available or not bool(next_cloud_sync_enabled)
+        pull_col, push_col = st.columns([1, 1], gap="small")
+        pull_clicked = pull_col.button(
+            "Pull from Google Drive",
+            key="settings_cloud_sync_pull_now",
             use_container_width=True,
-            disabled=sync_now_disabled,
-        ):
+            disabled=sync_controls_disabled,
+            help="Fetch cloud settings and apply them locally (latest cloud snapshot wins).",
+        )
+        push_clicked = push_col.button(
+            "Push to Google Drive",
+            key="settings_cloud_sync_push_now",
+            use_container_width=True,
+            disabled=sync_controls_disabled,
+            help="Upload the current local settings and session snapshot to Google Drive.",
+        )
+        if pull_clicked:
+            st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = "pull"
             st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = False
+            st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
+            st.rerun()
+        if push_clicked:
+            st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = "push"
+            st.session_state[GOOGLE_DRIVE_SYNC_BOOTSTRAP_STATE_KEY] = True
             st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = True
             st.rerun()
 
