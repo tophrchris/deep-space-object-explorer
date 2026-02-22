@@ -95,6 +95,10 @@ try:
 except Exception:
     let_it_rain = None
 try:
+    from st_mui_table import st_mui_table
+except Exception:
+    st_mui_table = None
+try:
     from streamlit_modal import Modal
 except Exception:
     try:
@@ -1291,6 +1295,21 @@ def format_weather_forecast_date(
     browser_month_day_pattern: str | None = None,
 ) -> str:
     local_date = pd.Timestamp(value).date()
+    date_part = format_weather_forecast_month_day(
+        value,
+        browser_locale=browser_locale,
+        browser_month_day_pattern=browser_month_day_pattern,
+    )
+    return f"{local_date.strftime('%A')}, {date_part}"
+
+
+def format_weather_forecast_month_day(
+    value: datetime,
+    *,
+    browser_locale: str | None = None,
+    browser_month_day_pattern: str | None = None,
+) -> str:
+    local_date = pd.Timestamp(value).date()
     parsed_pattern = parse_browser_month_day_pattern(browser_month_day_pattern)
     if parsed_pattern is not None:
         month_day_order, separator = parsed_pattern
@@ -1303,7 +1322,7 @@ def format_weather_forecast_date(
         if month_day_order == "md"
         else f"{local_date.day}{separator}{local_date.month}"
     )
-    return f"{local_date.strftime('%A')}, {date_part}"
+    return date_part
 
 
 def resolve_location_display_name(location: dict[str, Any]) -> str:
@@ -3953,6 +3972,28 @@ def cloud_cover_color_legend_html() -> str:
     )
 
 
+def night_time_clarity_scale_legend_html() -> str:
+    swatches: list[str] = []
+    total_boxes = 10
+    for idx in range(total_boxes):
+        clear_percent = 100.0 - (float(idx) * (100.0 / float(max(1, total_boxes - 1))))
+        cloud_equivalent = max(0.0, min(100.0, 100.0 - clear_percent))
+        color = _interpolate_cloud_cover_color(cloud_equivalent)
+        swatches.append(
+            "<span style='display:inline-block; width:0.58rem; height:0.58rem; border-radius:2px; "
+            f"margin-right:0.12rem; border:1px solid rgba(17,24,39,0.28); background:{color};'></span>"
+        )
+
+    return (
+        "<div style='font-size:0.88rem; color:#6b7280; margin:0.08rem 0 0.12rem;'>"
+        "☁️ night time clarity scale: "
+        "<span style='margin-right:0.2rem;'>Good</span>"
+        f"{''.join(swatches)}"
+        "<span style='margin-left:0.12rem;'>Bad</span>"
+        "</div>"
+    )
+
+
 def cloud_cover_cell_style(raw_value: Any) -> str:
     if raw_value is None or pd.isna(raw_value):
         return ""
@@ -3972,6 +4013,30 @@ def cloud_cover_cell_style(raw_value: Any) -> str:
 
     background_color = _interpolate_cloud_cover_color(cloud_cover_percent)
     text_color = "#111827" if cloud_cover_percent >= 65.0 else "#FFFFFF"
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def clarity_percentage_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    text = str(raw_value).strip()
+    if not text or text == "-":
+        return ""
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if match is None:
+        return ""
+
+    try:
+        clarity_percent = float(match.group(0))
+    except ValueError:
+        return ""
+
+    clamped_clear = max(0.0, min(100.0, clarity_percent))
+    cloud_equivalent = 100.0 - clamped_clear
+    background_color = _interpolate_cloud_cover_color(cloud_equivalent)
+    text_color = "#111827" if cloud_equivalent >= 65.0 else "#FFFFFF"
     return f"background-color: {background_color}; color: {text_color};"
 
 
@@ -4351,6 +4416,134 @@ def render_hourly_weather_matrix(
         if "Element" in aligned_indicators.columns:
             aligned_indicators["Element"] = ""
 
+    if st_mui_table is not None:
+        def _mui_cell_html(
+            text: str,
+            style_parts: list[str],
+            *,
+            title_text: str = "",
+            extra_html: str = "",
+            full_bleed: bool = False,
+        ) -> str:
+            safe_text = html.escape(text) if text else "&nbsp;"
+            content_html = safe_text
+            if extra_html:
+                spacer = "&nbsp;" if content_html != "&nbsp;" else ""
+                content_html = f"{content_html}{spacer}{extra_html}"
+
+            local_style_parts = [part for part in style_parts if str(part).strip()]
+            if full_bleed:
+                local_style_parts.extend(
+                    [
+                        "display:block;",
+                        "width:calc(100% + 16px);",
+                        "margin:-6px -8px;",
+                        "padding:6px 8px;",
+                        "box-sizing:border-box;",
+                    ]
+                )
+            style = " ".join(local_style_parts)
+            title_attr = f" title=\"{html.escape(title_text)}\"" if title_text else ""
+            return f"<div{title_attr} style='{style}'>{content_html}</div>"
+
+        mui_frame = frame.copy()
+        if "Element" in mui_frame.columns:
+            mui_frame = mui_frame.rename(columns={"Element": ""})
+        for row_idx, row in frame.iterrows():
+            element = str(row.get("Element", "")).strip()
+            element_key = element.lower()
+            for column in frame.columns:
+                raw_value = row.get(column)
+                cell_text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
+
+                if str(column) == "Element":
+                    mui_frame.at[row_idx, ""] = _mui_cell_html(
+                        cell_text,
+                        ["font-weight: 600;", "white-space: nowrap;", "text-align: left;"],
+                    )
+                    continue
+
+                style_parts = ["white-space: nowrap;", "text-align: center;"]
+                if element_key == "cloud cover":
+                    cloud_style = cloud_cover_cell_style(raw_value)
+                    if cloud_style:
+                        style_parts.append(cloud_style)
+                elif element_key == "temperature":
+                    temp_style = temperature_cell_style(raw_value, temperature_unit=temperature_unit)
+                    if temp_style:
+                        style_parts.append(temp_style)
+                elif element_key == "visibility":
+                    visibility_style = visibility_condition_cell_style(raw_value)
+                    if visibility_style:
+                        style_parts.append(visibility_style)
+
+                tooltip_text = ""
+                if aligned_tooltips is not None:
+                    tooltip_text = str(aligned_tooltips.at[row_idx, column]).strip()
+
+                indicator_html = ""
+                if aligned_indicators is not None and element_key == "cloud cover":
+                    indicator_html = str(aligned_indicators.at[row_idx, column]).strip()
+
+                full_bleed = element_key in {"cloud cover", "visibility"}
+                mui_frame.at[row_idx, column] = _mui_cell_html(
+                    cell_text,
+                    style_parts,
+                    title_text=tooltip_text,
+                    extra_html=indicator_html,
+                    full_bleed=full_bleed,
+                )
+
+        mui_custom_css = """
+.MuiTableCell-root {
+  padding: 6px 8px !important;
+  border-bottom: none !important;
+  border-top: none !important;
+  border-right: 1px solid rgba(148, 163, 184, 0.28) !important;
+}
+.MuiTableCell-root:last-child {
+  border-right: none !important;
+}
+.MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:not(:first-child),
+.MuiTableHead-root .MuiTableCell-root:not(:first-child) {
+  text-align: center !important;
+}
+.MuiTableHead-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 4 !important;
+  background: #f3f4f6 !important;
+}
+.MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 3 !important;
+  background: #ffffff !important;
+}
+.MuiTablePagination-root {
+  display: none !important;
+}
+"""
+        st_mui_table(
+            mui_frame,
+            enablePagination=True,
+            paginationSizes=[24],
+            customCss=mui_custom_css,
+            showHeaders=True,
+            key="hourly_weather_mui_table",
+            stickyHeader=False,
+            showIndex=False,
+            enable_sorting=False,
+            return_clicked_cell=False,
+            paperStyle={
+                "width": "100%",
+                "overflow": "visible",
+                "paddingBottom": "0px",
+                "border": "1px solid rgba(148, 163, 184, 0.35)",
+            },
+        )
+        return
+
     header_cells = "".join(
         f'<th style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
         f'background: #f3f4f6; color: #6b7280; text-align: left; white-space: nowrap;">'
@@ -4471,6 +4664,21 @@ def build_astronomy_forecast_summary(
             continue
         rows_with_time.append((timestamp, row))
 
+    def _finite(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric):
+            return None
+        return float(numeric)
+
+    def _format_ratio_percent(pass_count: int, total_count: int) -> str:
+        if total_count <= 0:
+            return "-"
+        percent = (float(pass_count) / float(total_count)) * 100.0
+        return f"{percent:.0f}%"
+
     summary_rows: list[dict[str, Any]] = []
     for day_offset, (window_start, window_end) in enumerate(windows):
         night_rows = [
@@ -4479,9 +4687,7 @@ def build_astronomy_forecast_summary(
             if window_start <= timestamp <= window_end
         ]
 
-        cloud_values = _extract_finite_weather_values(night_rows, "cloud_cover")
         temperature_values = _extract_finite_weather_values(night_rows, "temperature_2m")
-        gust_values = _extract_finite_weather_values(night_rows, "wind_gusts_10m")
         alert_emojis = collect_night_weather_alert_emojis(night_rows, temperature_unit)
         rating_details = compute_night_rating_details(
             night_rows,
@@ -4497,6 +4703,9 @@ def build_astronomy_forecast_summary(
         if "," in label:
             day_name, date_part = label.split(",", 1)
             label = f"{day_name[:3]}, {date_part.strip()}"
+        if rating_emoji:
+            label = f"{label} {rating_emoji}"
+
         temp_unit = str(temperature_unit).strip().lower()
         temp_unit_suffix = "F" if temp_unit == "f" else "C"
         low_temp = (
@@ -4519,24 +4728,88 @@ def build_astronomy_forecast_summary(
             temp_range_display = f"{low_temp_numeric:.0f}-{high_temp_numeric:.0f} {temp_unit_suffix}"
         else:
             temp_range_display = "-"
-        night_time = (
-            f"{format_display_time(window_start, use_12_hour=True)}"
-            f"-{format_display_time(window_end, use_12_hour=True)} "
-            f"({format_duration_hhmm(window_end - window_start)})"
+        avg_temp_display = (
+            format_temperature(float(np.mean(temperature_values)), temperature_unit)
+            if temperature_values
+            else "-"
         )
+
+        clear_hour_count = 0
+        calm_hour_count = 0
+        crisp_hour_count = 0
+        total_hour_count = len(night_rows)
+        for weather_row in night_rows:
+            cloud_cover = _finite(weather_row.get("cloud_cover"))
+            visibility_m = _finite(weather_row.get("visibility"))
+            visibility_miles = visibility_m * 0.000621371 if visibility_m is not None else None
+            if cloud_cover is not None and visibility_miles is not None:
+                if cloud_cover < 30.0 and visibility_miles >= 4.0:
+                    clear_hour_count += 1
+
+            gust_kmh = _finite(weather_row.get("wind_gusts_10m"))
+            if gust_kmh is None:
+                gust_kmh = _finite(weather_row.get("wind_speed_10m"))
+            if gust_kmh is not None and (gust_kmh * 0.621371) <= 12.0:
+                calm_hour_count += 1
+
+            humidity = _finite(weather_row.get("relative_humidity_2m"))
+            temperature_c = _finite(weather_row.get("temperature_2m"))
+            dewpoint_c = _finite(weather_row.get("dew_point_2m"))
+            if humidity is not None and temperature_c is not None and dewpoint_c is not None:
+                spread_c = max(0.0, temperature_c - dewpoint_c)
+                spread_value = spread_c * 9.0 / 5.0 if temp_unit == "f" else spread_c
+                if humidity <= 65.0 and spread_value >= 5.0:
+                    crisp_hour_count += 1
+
+        clear_percent_text = _format_ratio_percent(clear_hour_count, total_hour_count)
+        calm_percent_text = _format_ratio_percent(calm_hour_count, total_hour_count)
+        crisp_percent_text = _format_ratio_percent(crisp_hour_count, total_hour_count)
+        primary_alert_emoji = str(alert_emojis[0]) if alert_emojis else ""
+        clear_display = clear_percent_text
+        if primary_alert_emoji:
+            clear_display = (
+                f"{clear_percent_text} {primary_alert_emoji}"
+                if clear_percent_text != "-"
+                else primary_alert_emoji
+            )
+
+        sunset_start, sunrise_end, _ = weather_forecast_window(
+            lat,
+            lon,
+            day_offset=day_offset,
+        )
+        sunset_text = re.sub(
+            r"\b(am|pm)\b",
+            lambda match: str(match.group(1)).upper(),
+            format_display_time(sunset_start, use_12_hour=True),
+            flags=re.IGNORECASE,
+        )
+        sunrise_text = re.sub(
+            r"\b(am|pm)\b",
+            lambda match: str(match.group(1)).upper(),
+            format_display_time(sunrise_end, use_12_hour=True),
+            flags=re.IGNORECASE,
+        )
+        dark_total_minutes = max(0, int(round((window_end - window_start).total_seconds() / 60.0)))
+        dark_hours, dark_minutes = divmod(dark_total_minutes, 60)
+        dark_duration = f"{dark_hours}h {dark_minutes:02d}m"
 
         summary_rows.append(
             {
                 "day_offset": day_offset,
-                "Night": f"{label} {rating_emoji}".strip(),
-                "Astronomic Night": night_time,
-                "Cloud Avg": f"{float(np.mean(cloud_values)):.0f}%" if cloud_values else "-",
+                "Night": label,
+                "Dark": dark_duration,
+                "Sunset": sunset_text,
+                "Sunrise": sunrise_text,
+                "Clear": clear_display,
+                "Calm": calm_percent_text,
+                "Crisp": crisp_percent_text,
                 "Low-Hi": temp_range_display,
                 "Temp Range": temp_range_display,
                 "temp_low_display": low_temp,
                 "temp_high_display": high_temp,
-                "Peak Gust": format_wind_speed(max(gust_values), temperature_unit) if gust_values else "-",
-                "Warnings": str(alert_emojis[0]) if alert_emojis else "",
+                "Avg. Temp": avg_temp_display,
+                "Warnings": primary_alert_emoji,
             }
         )
 
@@ -4555,11 +4828,13 @@ def render_astronomy_forecast_summary(
 
     ordered_columns = [
         "Night",
-        "Astronomic Night",
-        "Cloud Avg",
-        "Low-Hi",
-        "Peak Gust",
-        "Warnings",
+        "Clear",
+        "Calm",
+        "Crisp",
+        "Dark",
+        "Sunset",
+        "Sunrise",
+        "Avg. Temp",
     ]
     source_frame = frame.copy()
     if "day_offset" not in source_frame.columns:
@@ -4567,18 +4842,136 @@ def render_astronomy_forecast_summary(
     display_frame = source_frame.reindex(columns=ordered_columns, fill_value="").reset_index(drop=True)
     source_frame = source_frame.reset_index(drop=True)
 
-    def _temperature_range_cell_style(low_value: str, high_value: str) -> str:
-        low_f = _temperature_f_from_display_value(low_value, temperature_unit=temperature_unit)
-        high_f = _temperature_f_from_display_value(high_value, temperature_unit=temperature_unit)
-        if low_f is not None and high_f is not None:
-            midpoint_f = (low_f + high_f) / 2.0
-            midpoint_color = _interpolate_temperature_color_f(midpoint_f)
-            return f"color: {midpoint_color}; font-weight: 700;"
+    if st_mui_table is not None:
+        center_columns = {"Clear", "Calm", "Crisp", "Dark"}
 
-        high_style = temperature_cell_style(high_value, temperature_unit=temperature_unit)
-        if high_style:
-            return high_style
-        return temperature_cell_style(low_value, temperature_unit=temperature_unit)
+        def _mui_cell_html(text: str, style_parts: list[str], *, full_bleed: bool = False) -> str:
+            safe_text = html.escape(text) if text else "&nbsp;"
+            local_style_parts = [part for part in style_parts if str(part).strip()]
+            if full_bleed:
+                local_style_parts.extend(
+                    [
+                        "display:block;",
+                        "width:calc(100% + 16px);",
+                        "margin:-6px -8px;",
+                        "padding:6px 8px;",
+                        "box-sizing:border-box;",
+                    ]
+                )
+            style = " ".join(local_style_parts)
+            return f"<div style='{style}'>{safe_text}</div>"
+
+        mui_frame = display_frame.copy()
+        for row_idx, row in display_frame.iterrows():
+            row_day_offset = normalize_weather_forecast_day_offset(
+                source_frame.at[int(row_idx), "day_offset"],
+                max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+            )
+            row_is_selected = row_day_offset == selected_day_offset
+            for column_name in ordered_columns:
+                raw_cell_value = row.get(column_name)
+                cell_text = "" if raw_cell_value is None or pd.isna(raw_cell_value) else str(raw_cell_value).strip()
+                style_parts = ["white-space: nowrap;"]
+                if row_is_selected:
+                    style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
+                if column_name == "Night" and row_is_selected:
+                    style_parts.append("font-weight: 700;")
+                if column_name in center_columns:
+                    style_parts.append("text-align: center;")
+                if column_name == "Clear":
+                    clear_style = clarity_percentage_cell_style(cell_text)
+                    if clear_style:
+                        style_parts.append(clear_style)
+                if column_name == "Avg. Temp":
+                    avg_style = temperature_cell_style(cell_text, temperature_unit=temperature_unit)
+                    if avg_style:
+                        style_parts.append(avg_style)
+                mui_frame.at[int(row_idx), column_name] = _mui_cell_html(
+                    cell_text,
+                    style_parts,
+                    full_bleed=(column_name == "Clear"),
+                )
+
+        mui_custom_css = """
+.MuiTableCell-root {
+  padding: 6px 8px !important;
+}
+.MuiTableCell-root:nth-child(2),
+.MuiTableCell-root:nth-child(3),
+.MuiTableCell-root:nth-child(4),
+.MuiTableCell-root:nth-child(5) {
+  text-align: center !important;
+}
+.MuiTableHead-root .MuiTableCell-root:nth-child(2),
+.MuiTableHead-root .MuiTableCell-root:nth-child(3),
+.MuiTableHead-root .MuiTableCell-root:nth-child(4),
+.MuiTableHead-root .MuiTableCell-root:nth-child(5) {
+  text-align: center !important;
+}
+.MuiTableHead-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 4 !important;
+  background: #f3f4f6 !important;
+}
+.MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 3 !important;
+  background: #ffffff !important;
+}
+.MuiTablePagination-root {
+  display: none !important;
+}
+"""
+        clicked_cell = st_mui_table(
+            mui_frame,
+            enablePagination=True,
+            customCss=mui_custom_css,
+            paginationSizes=[10],
+            showHeaders=True,
+            key="astronomy_forecast_mui_table",
+            stickyHeader=False,
+            showIndex=False,
+            enable_sorting=False,
+            return_clicked_cell=True,
+            paperStyle={
+                "width": "100%",
+                "overflow": "visible",
+                "paddingBottom": "0px",
+                "border": "1px solid rgba(148, 163, 184, 0.35)",
+            },
+        )
+
+        selected_index: int | None = None
+        if isinstance(clicked_cell, dict):
+            try:
+                parsed_row_index = int(clicked_cell.get("row"))
+            except (TypeError, ValueError):
+                parsed_row_index = -1
+            if 0 <= parsed_row_index < len(source_frame):
+                selected_index = parsed_row_index
+
+        if selected_index is None:
+            return
+
+        selected_offset = normalize_weather_forecast_day_offset(
+            source_frame.at[selected_index, "day_offset"],
+            max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+        )
+        selection_token = f"{selected_index}:{selected_offset}"
+        last_selection_token = str(st.session_state.get("astronomy_forecast_last_selection_token", ""))
+        if selection_token == last_selection_token:
+            return
+
+        st.session_state["astronomy_forecast_last_selection_token"] = selection_token
+        if selected_offset != selected_day_offset:
+            st.session_state[WEATHER_FORECAST_DAY_OFFSET_STATE_KEY] = selected_offset
+            st.session_state[WEATHER_FORECAST_PERIOD_STATE_KEY] = (
+                WEATHER_FORECAST_PERIOD_TONIGHT if selected_offset <= 0 else WEATHER_FORECAST_PERIOD_TOMORROW
+            )
+            st.rerun()
+        return
 
     def _style_forecast_row(row: pd.Series) -> list[str]:
         row_idx = int(row.name)
@@ -4595,17 +4988,25 @@ def render_astronomy_forecast_summary(
                 style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
             if column == "Night" and row_is_selected:
                 style_parts.append("font-weight: 700;")
-            if column == "Cloud Avg":
-                style_parts.append(cloud_cover_cell_style(row.get(column)))
-            if column == "Low-Hi":
-                low_value = str(source_frame.at[row_idx, "temp_low_display"]).strip()
-                high_value = str(source_frame.at[row_idx, "temp_high_display"]).strip()
-                if low_value and high_value and low_value != "-" and high_value != "-":
-                    style_parts.append(_temperature_range_cell_style(low_value, high_value))
+            if column in {"Dark", "Clear", "Calm", "Crisp"}:
+                style_parts.append("text-align: center !important;")
+                style_parts.append("justify-content: center !important;")
+            if column == "Clear":
+                style_parts.append(clarity_percentage_cell_style(row.get(column)))
+            if column == "Avg. Temp":
+                style_parts.append(temperature_cell_style(row.get(column), temperature_unit=temperature_unit))
             styles.append(" ".join(part for part in style_parts if str(part).strip()))
         return styles
 
-    styled = apply_dataframe_styler_theme(display_frame.style.apply(_style_forecast_row, axis=1))
+    base_styler = display_frame.style.apply(_style_forecast_row, axis=1)
+    base_styler = base_styler.set_properties(
+        subset=["Clear", "Calm", "Crisp", "Dark"],
+        **{
+            "text-align": "center !important",
+            "justify-content": "center !important",
+        },
+    )
+    styled = apply_dataframe_styler_theme(base_styler)
 
     table_event = st.dataframe(
         styled,
@@ -4616,11 +5017,13 @@ def render_astronomy_forecast_summary(
         key="astronomy_forecast_table",
         column_config={
             "Night": st.column_config.TextColumn(width="small"),
-            "Astronomic Night": st.column_config.TextColumn(width="medium"),
-            "Cloud Avg": st.column_config.TextColumn(width="small"),
-            "Low-Hi": st.column_config.TextColumn(width="small"),
-            "Peak Gust": st.column_config.TextColumn(width="small"),
-            "Warnings": st.column_config.TextColumn(width="small"),
+            "Clear": st.column_config.TextColumn(width="small"),
+            "Calm": st.column_config.TextColumn(width="small"),
+            "Crisp": st.column_config.TextColumn(width="small"),
+            "Dark": st.column_config.TextColumn(width="small"),
+            "Sunset": st.column_config.TextColumn(width="small"),
+            "Sunrise": st.column_config.TextColumn(width="small"),
+            "Avg. Temp": st.column_config.TextColumn(width="small"),
         },
     )
 
@@ -8370,6 +8773,8 @@ def render_explorer_page(
                 selected_day_offset=weather_forecast_day_offset,
             )
             st.caption("Click any row to set the active weather night across the page.")
+            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
+            st.markdown(night_time_clarity_scale_legend_html(), unsafe_allow_html=True)
 
         with hourly_container:
             st.markdown(
@@ -8384,8 +8789,6 @@ def render_explorer_page(
                 tooltip_frame=weather_tooltip_display,
                 indicator_frame=weather_indicator_display,
             )
-            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
-            st.markdown(cloud_cover_color_legend_html(), unsafe_allow_html=True)
 
         with conditions_container:
             with st.container(border=True):
