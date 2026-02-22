@@ -3222,14 +3222,14 @@ def render_target_recommendations(
 
     if sort_controls_placeholder is not None:
         with sort_controls_placeholder.container():
-            sort_col, sort_order_col = st.columns([2, 1], gap="small")
-            sort_field = sort_col.selectbox(
+            sort_field_col, sort_direction_col, _sort_control_spacer_col = st.columns([2, 2, 1], gap="small")
+            sort_field = sort_field_col.selectbox(
                 "Sort results by",
                 options=sort_option_values,
                 key=sort_field_key,
                 format_func=lambda option_value: sort_option_labels.get(option_value, option_value),
             )
-            sort_direction = sort_order_col.segmented_control(
+            sort_direction = sort_direction_col.segmented_control(
                 "Order",
                 options=["Descending", "Ascending"],
                 key=sort_direction_key,
@@ -3767,8 +3767,17 @@ def render_target_recommendations(
         lambda value: f"{float(value):.1f} deg" if value is not None and not pd.isna(value) else "--"
     )
     page_frame["Direction"] = page_frame["peak_direction"].fillna("--").astype(str)
+    def _resolve_thumbnail_url(row: pd.Series) -> str | None:
+        for key in ("image_url", "hero_image_url"):
+            raw_value = str(row.get(key, "") or "").strip()
+            if raw_value.lower().startswith(("https://", "http://")):
+                return raw_value
+        return None
+
+    page_frame["thumbnail_url"] = page_frame.apply(_resolve_thumbnail_url, axis=1)
 
     display_columns = [
+        "thumbnail_url",
         "target_name",
         "visibility_duration",
         "object_type",
@@ -3780,6 +3789,7 @@ def render_target_recommendations(
     display_columns.extend(["Peak", "Altitude at Peak", "Direction"])
 
     rename_columns = {
+        "thumbnail_url": "Thumbnail",
         "target_name": "Target Name",
         "visibility_duration": "Duration of visibility",
         "object_type": "Object Type",
@@ -3790,7 +3800,12 @@ def render_target_recommendations(
     display_table = page_frame[display_columns].rename(columns=rename_columns)
 
     column_config: dict[str, Any] = {
-        "Target Name": st.column_config.TextColumn(width="large"),
+        "Thumbnail": (
+            st.column_config.ImageColumn(label="", width=100, pinned=True)
+            if hasattr(st.column_config, "ImageColumn")
+            else st.column_config.TextColumn(label="", width=100, pinned=True)
+        ),
+        "Target Name": st.column_config.TextColumn(width="large", pinned=True),
         "Duration of visibility": st.column_config.TextColumn(width="small"),
         "Object Type": st.column_config.TextColumn(width="small"),
         "Emissions": st.column_config.TextColumn(width="small"),
@@ -3802,10 +3817,33 @@ def render_target_recommendations(
     if "Framing" in display_table.columns:
         column_config["Framing"] = st.column_config.NumberColumn(width="small", format="%.0f%%")
 
+    recommendation_styler = display_table.style.set_properties(
+        subset=["Thumbnail"],
+        **{
+            "text-align": "left !important",
+            "justify-content": "flex-start !important",
+            "padding-left": "0px !important",
+        },
+    )
+
+    st.markdown(
+        """
+        <style>
+        [data-testid="stDataFrame"] [data-testid="stDataFrameGlideDataEditor"] [role="gridcell"]:nth-child(1) {
+            justify-content: flex-start !important;
+            text-align: left !important;
+            padding-left: 0 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     recommendation_event = st.dataframe(
-        apply_dataframe_styler_theme(display_table.style),
+        apply_dataframe_styler_theme(recommendation_styler),
         hide_index=True,
         use_container_width=True,
+        row_height=70,
         on_select="rerun",
         selection_mode="single-row",
         key=f"recommended_targets_table_{int(st.session_state.get(table_instance_key, 0))}",
