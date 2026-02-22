@@ -31,6 +31,13 @@ PREFS_BOOTSTRAP_MAX_RUNS = 6
 PREFS_BOOTSTRAP_RETRY_INTERVAL_MS = 250
 SETTINGS_EXPORT_FORMAT_VERSION = 3
 
+CLOUD_SYNC_PROVIDER_GOOGLE = "google"
+CLOUD_SYNC_PROVIDER_NONE = "none"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 def _default_obstructions() -> dict[str, float]:
     return {direction: 20.0 for direction in WIND16}
@@ -133,6 +140,13 @@ def default_preferences() -> dict[str, Any]:
         "location": copy.deepcopy(active_site["location"]),
         "temperature_unit": "auto",
         "ui_theme": UI_THEME_LIGHT,
+        "last_updated_utc": _utc_now_iso(),
+        "cloud_sync_provider": CLOUD_SYNC_PROVIDER_GOOGLE,
+        "cloud_sync_enabled": False,
+        "cloud_sync_initialized": False,
+        "cloud_sync_file_id": "",
+        "cloud_sync_last_ok_utc": "",
+        "cloud_sync_last_error": "",
     }
 
 
@@ -146,6 +160,19 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
 
         ui_theme = str(raw.get("ui_theme", UI_THEME_LIGHT)).strip().lower()
         prefs["ui_theme"] = ui_theme if ui_theme in UI_THEME_OPTIONS else UI_THEME_LIGHT
+
+        raw_last_updated_utc = str(raw.get("last_updated_utc", "")).strip()
+        prefs["last_updated_utc"] = raw_last_updated_utc
+
+        raw_cloud_provider = str(raw.get("cloud_sync_provider", CLOUD_SYNC_PROVIDER_GOOGLE)).strip().lower()
+        if raw_cloud_provider not in {CLOUD_SYNC_PROVIDER_GOOGLE, CLOUD_SYNC_PROVIDER_NONE}:
+            raw_cloud_provider = CLOUD_SYNC_PROVIDER_GOOGLE
+        prefs["cloud_sync_provider"] = raw_cloud_provider
+        prefs["cloud_sync_enabled"] = bool(raw.get("cloud_sync_enabled", False))
+        prefs["cloud_sync_initialized"] = bool(raw.get("cloud_sync_initialized", False))
+        prefs["cloud_sync_file_id"] = str(raw.get("cloud_sync_file_id", "")).strip()
+        prefs["cloud_sync_last_ok_utc"] = str(raw.get("cloud_sync_last_ok_utc", "")).strip()
+        prefs["cloud_sync_last_error"] = str(raw.get("cloud_sync_last_error", "")).strip()
 
         normalized_sites: dict[str, dict[str, Any]] = {}
         raw_sites = raw.get("sites", {})
@@ -267,6 +294,11 @@ def load_preferences() -> tuple[dict[str, Any], bool]:
 
 
 def save_preferences(prefs: dict[str, Any]) -> bool:
+    normalized_prefs = ensure_preferences_shape(prefs)
+    normalized_prefs["last_updated_utc"] = _utc_now_iso()
+    prefs.clear()
+    prefs.update(normalized_prefs)
+
     try:
         encoded = encode_preferences_for_storage(prefs)
     except Exception:
@@ -288,6 +320,7 @@ def save_preferences(prefs: dict[str, Any]) -> bool:
         local_saved = False
 
     if local_saved:
+        st.session_state["cloud_sync_pending"] = True
         st.session_state.pop("prefs_persistence_notice", None)
         return True
 
