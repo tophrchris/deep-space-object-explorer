@@ -4256,6 +4256,134 @@ def render_hourly_weather_matrix(
         if "Element" in aligned_indicators.columns:
             aligned_indicators["Element"] = ""
 
+    if st_mui_table is not None:
+        def _mui_cell_html(
+            text: str,
+            style_parts: list[str],
+            *,
+            title_text: str = "",
+            extra_html: str = "",
+            full_bleed: bool = False,
+        ) -> str:
+            safe_text = html.escape(text) if text else "&nbsp;"
+            content_html = safe_text
+            if extra_html:
+                spacer = "&nbsp;" if content_html != "&nbsp;" else ""
+                content_html = f"{content_html}{spacer}{extra_html}"
+
+            local_style_parts = [part for part in style_parts if str(part).strip()]
+            if full_bleed:
+                local_style_parts.extend(
+                    [
+                        "display:block;",
+                        "width:calc(100% + 16px);",
+                        "margin:-6px -8px;",
+                        "padding:6px 8px;",
+                        "box-sizing:border-box;",
+                    ]
+                )
+            style = " ".join(local_style_parts)
+            title_attr = f" title=\"{html.escape(title_text)}\"" if title_text else ""
+            return f"<div{title_attr} style='{style}'>{content_html}</div>"
+
+        mui_frame = frame.copy()
+        if "Element" in mui_frame.columns:
+            mui_frame = mui_frame.rename(columns={"Element": ""})
+        for row_idx, row in frame.iterrows():
+            element = str(row.get("Element", "")).strip()
+            element_key = element.lower()
+            for column in frame.columns:
+                raw_value = row.get(column)
+                cell_text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
+
+                if str(column) == "Element":
+                    mui_frame.at[row_idx, ""] = _mui_cell_html(
+                        cell_text,
+                        ["font-weight: 600;", "white-space: nowrap;", "text-align: left;"],
+                    )
+                    continue
+
+                style_parts = ["white-space: nowrap;", "text-align: center;"]
+                if element_key == "cloud cover":
+                    cloud_style = cloud_cover_cell_style(raw_value)
+                    if cloud_style:
+                        style_parts.append(cloud_style)
+                elif element_key == "temperature":
+                    temp_style = temperature_cell_style(raw_value, temperature_unit=temperature_unit)
+                    if temp_style:
+                        style_parts.append(temp_style)
+                elif element_key == "visibility":
+                    visibility_style = visibility_condition_cell_style(raw_value)
+                    if visibility_style:
+                        style_parts.append(visibility_style)
+
+                tooltip_text = ""
+                if aligned_tooltips is not None:
+                    tooltip_text = str(aligned_tooltips.at[row_idx, column]).strip()
+
+                indicator_html = ""
+                if aligned_indicators is not None and element_key == "cloud cover":
+                    indicator_html = str(aligned_indicators.at[row_idx, column]).strip()
+
+                full_bleed = element_key in {"cloud cover", "visibility"}
+                mui_frame.at[row_idx, column] = _mui_cell_html(
+                    cell_text,
+                    style_parts,
+                    title_text=tooltip_text,
+                    extra_html=indicator_html,
+                    full_bleed=full_bleed,
+                )
+
+        mui_custom_css = """
+.MuiTableCell-root {
+  padding: 6px 8px !important;
+  border-bottom: none !important;
+  border-top: none !important;
+  border-right: 1px solid rgba(148, 163, 184, 0.28) !important;
+}
+.MuiTableCell-root:last-child {
+  border-right: none !important;
+}
+.MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:not(:first-child),
+.MuiTableHead-root .MuiTableCell-root:not(:first-child) {
+  text-align: center !important;
+}
+.MuiTableHead-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 4 !important;
+  background: #f3f4f6 !important;
+}
+.MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 3 !important;
+  background: #ffffff !important;
+}
+.MuiTablePagination-root {
+  display: none !important;
+}
+"""
+        st_mui_table(
+            mui_frame,
+            enablePagination=True,
+            paginationSizes=[24],
+            customCss=mui_custom_css,
+            showHeaders=True,
+            key="hourly_weather_mui_table",
+            stickyHeader=False,
+            showIndex=False,
+            enable_sorting=False,
+            return_clicked_cell=False,
+            paperStyle={
+                "width": "100%",
+                "overflow": "visible",
+                "paddingBottom": "0px",
+                "border": "1px solid rgba(148, 163, 184, 0.35)",
+            },
+        )
+        return
+
     header_cells = "".join(
         f'<th style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
         f'background: #f3f4f6; color: #6b7280; text-align: left; white-space: nowrap;">'
@@ -4619,6 +4747,18 @@ def render_astronomy_forecast_summary(
 .MuiTableHead-root .MuiTableCell-root:nth-child(4),
 .MuiTableHead-root .MuiTableCell-root:nth-child(5) {
   text-align: center !important;
+}
+.MuiTableHead-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 4 !important;
+  background: #f3f4f6 !important;
+}
+.MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 3 !important;
+  background: #ffffff !important;
 }
 .MuiTablePagination-root {
   display: none !important;
