@@ -55,8 +55,10 @@ from app_theme import (
 )
 from condition_tips.ui import render_condition_tips_panel
 from dso_enricher.catalog_service import (
+    canonicalize_designation,
     get_object_by_id,
     load_catalog_from_cache,
+    normalize_text,
     search_catalog,
 )
 from google_drive_sync import (
@@ -1043,6 +1045,8 @@ PATH_HIGHLIGHT_WIDTH_MULTIPLIER = 5.0
 PATH_LINE_WIDTH_PRIMARY_DEFAULT = 3.0
 PATH_LINE_WIDTH_OVERLAY_DEFAULT = 2.2
 PATH_LINE_WIDTH_SELECTION_MULTIPLIER = 3.0
+EQ_MOUNT_WARNING_MAX_ALT_DEG = 30.0
+ALTAZ_MOUNT_WARNING_MIN_ALT_DEG = 80.0
 CARDINAL_DIRECTIONS = ("N", "E", "S", "W")
 OBSTRUCTION_INPUT_MODE_NESW = "N/E/S/W (4 sliders)"
 OBSTRUCTION_INPUT_MODE_WIND16 = "WIND16 (16 sliders)"
@@ -1100,6 +1104,20 @@ def target_line_color(primary_id: str) -> str:
     digest = hashlib.md5(cleaned.encode("utf-8")).digest()
     palette_index = int.from_bytes(digest[:4], byteorder="big", signed=False) % len(PATH_LINE_COLORS)
     return PATH_LINE_COLORS[palette_index]
+
+
+def mount_warning_zone_altitude_bounds(mount_choice: Any) -> tuple[float, float, str] | None:
+    normalized = str(mount_choice or "").strip().lower()
+    if normalized == "eq":
+        return (0.0, float(EQ_MOUNT_WARNING_MAX_ALT_DEG), "EQ warning zone (<30 deg)")
+    if normalized == "altaz":
+        return (float(ALTAZ_MOUNT_WARNING_MIN_ALT_DEG), 90.0, "Alt/Az warning zone (>80 deg)")
+    return None
+
+
+def mount_warning_zone_plot_style() -> tuple[str, str]:
+    # Light gray fill to indicate mount-specific caution zones without overpowering the target paths.
+    return ("rgba(148, 163, 184, 0.16)", "rgba(148, 163, 184, 0.45)")
 
 
 def eval_js_hidden(js_expression: str, *, key: str, want_output: bool = True) -> Any:
@@ -3371,6 +3389,118 @@ def render_target_recommendations(
             return 2
         return 1
 
+    def _build_keyword_priority_tokens(query_text: str) -> list[str]:
+        cleaned = str(query_text or "").strip()
+        if not cleaned:
+            return []
+        query_norm = normalize_text(cleaned)
+        canonical_norm = normalize_text(canonicalize_designation(cleaned))
+        tokens = {query_norm, canonical_norm}
+
+        # Keep keyword-priority matching aligned with search_catalog token variants.
+        if re.fullmatch(r"o[l1]{3}", query_norm):
+            tokens.add("oiii")
+        if re.fullmatch(r"n[l1]{2}", query_norm):
+            tokens.add("nii")
+        if re.fullmatch(r"s[l1]{2}", query_norm):
+            tokens.add("sii")
+        if query_norm == "o3":
+            tokens.add("oiii")
+        if query_norm == "n2":
+            tokens.add("nii")
+        if query_norm == "s2":
+            tokens.add("sii")
+
+        return [token for token in tokens if token]
+
+    def _build_keyword_exact_match_patterns(query_text: str) -> list[re.Pattern[str]]:
+        cleaned = str(query_text or "").strip()
+        if not cleaned:
+            return []
+
+        raw_terms = {cleaned}
+        canonical = str(canonicalize_designation(cleaned) or "").strip()
+        if canonical:
+            raw_terms.add(canonical)
+
+        patterns: list[re.Pattern[str]] = []
+        for term in raw_terms:
+            lowered = term.lower()
+            parts = [re.escape(part) for part in re.split(r"\s+", lowered) if part]
+            if not parts:
+                continue
+            term_pattern = r"\s+".join(parts)
+            patterns.append(re.compile(rf"(?<![a-z0-9]){term_pattern}(?![a-z0-9])"))
+        return patterns
+
+    def _keyword_match_priority_series(
+        frame: pd.DataFrame,
+        keyword_tokens: list[str],
+        exact_match_patterns: list[re.Pattern[str]],
+    ) -> pd.Series:
+        if frame.empty:
+            return pd.Series(index=frame.index, dtype=int)
+        if not keyword_tokens and not exact_match_patterns:
+            return pd.Series(np.zeros(len(frame), dtype=np.int8), index=frame.index, dtype=np.int8)
+
+        def _norm_text_series(column_name: str) -> pd.Series:
+            if column_name not in frame.columns:
+                return pd.Series([""] * len(frame), index=frame.index, dtype=object)
+            return frame[column_name].fillna("").astype(str).map(normalize_text)
+
+        def _raw_text_series(column_name: str) -> pd.Series:
+            if column_name not in frame.columns:
+                return pd.Series([""] * len(frame), index=frame.index, dtype=object)
+            return frame[column_name].fillna("").astype(str).str.lower()
+
+        primary_id_raw = _raw_text_series("primary_id")
+        common_name_raw = _raw_text_series("common_name")
+        aliases_raw = _raw_text_series("aliases")
+        description_raw = _raw_text_series("description")
+        primary_id_norm = (
+            frame["primary_id_norm"].fillna("").astype(str)
+            if "primary_id_norm" in frame.columns
+            else _norm_text_series("primary_id")
+        )
+        common_name_norm = _norm_text_series("common_name")
+        aliases_norm = (
+            frame["aliases_norm"].fillna("").astype(str)
+            if "aliases_norm" in frame.columns
+            else _norm_text_series("aliases")
+        )
+        description_norm = _norm_text_series("description")
+
+        primary_match = pd.Series(False, index=frame.index, dtype=bool)
+        common_match = pd.Series(False, index=frame.index, dtype=bool)
+        alias_match = pd.Series(False, index=frame.index, dtype=bool)
+        description_match = pd.Series(False, index=frame.index, dtype=bool)
+        for token in keyword_tokens:
+            primary_match = primary_match | primary_id_norm.str.contains(token, regex=False)
+            common_match = common_match | common_name_norm.str.contains(token, regex=False)
+            alias_match = alias_match | aliases_norm.str.contains(token, regex=False)
+            description_match = description_match | description_norm.str.contains(token, regex=False)
+
+        primary_exact = pd.Series(False, index=frame.index, dtype=bool)
+        common_exact = pd.Series(False, index=frame.index, dtype=bool)
+        alias_exact = pd.Series(False, index=frame.index, dtype=bool)
+        description_exact = pd.Series(False, index=frame.index, dtype=bool)
+        for pattern in exact_match_patterns:
+            primary_exact = primary_exact | primary_id_raw.str.contains(pattern, regex=True)
+            common_exact = common_exact | common_name_raw.str.contains(pattern, regex=True)
+            alias_exact = alias_exact | aliases_raw.str.contains(pattern, regex=True)
+            description_exact = description_exact | description_raw.str.contains(pattern, regex=True)
+
+        priorities = np.zeros(len(frame), dtype=np.int8)
+        priorities = np.where(description_match.to_numpy(dtype=bool), 1, priorities)
+        priorities = np.where(alias_match.to_numpy(dtype=bool), 2, priorities)
+        priorities = np.where(common_match.to_numpy(dtype=bool), 3, priorities)
+        priorities = np.where(primary_match.to_numpy(dtype=bool), 4, priorities)
+        priorities = np.where(description_exact.to_numpy(dtype=bool), 5, priorities)
+        priorities = np.where(alias_exact.to_numpy(dtype=bool), 6, priorities)
+        priorities = np.where(common_exact.to_numpy(dtype=bool), 7, priorities)
+        priorities = np.where(primary_exact.to_numpy(dtype=bool), 8, priorities)
+        return pd.Series(priorities, index=frame.index, dtype=np.int8)
+
     def _safe_positive_float(value: Any) -> float | None:
         try:
             numeric = float(value)
@@ -3524,9 +3654,9 @@ def render_target_recommendations(
     if min_size_value_key not in st.session_state:
         st.session_state[min_size_value_key] = 0
     if page_size_key not in st.session_state:
-        st.session_state[page_size_key] = 20
-    elif int(st.session_state.get(page_size_key, 20)) not in {10, 20, 100}:
-        st.session_state[page_size_key] = 20
+        st.session_state[page_size_key] = 100
+    elif int(st.session_state.get(page_size_key, 100)) not in {10, 100, 200}:
+        st.session_state[page_size_key] = 100
     if not isinstance(st.session_state.get(page_number_key), int):
         st.session_state[page_number_key] = 1
     if not isinstance(st.session_state.get(table_instance_key), int):
@@ -3766,15 +3896,21 @@ def render_target_recommendations(
             "sample_minutes": RECOMMENDATION_CACHE_SAMPLE_MINUTES,
             "result_limit_mode": "unlimited",
             "visibility_fallback_mode": "issue93_v1",
+            "recommended_ranking_mode": "keyword_field_priority_v3",
             "window_start": pd.Timestamp(window_start).isoformat(),
             "window_end": pd.Timestamp(window_end).isoformat(),
         },
         sort_keys=True,
     )
-    if str(st.session_state.get(signature_key, "")) != criteria_signature:
+    previous_criteria_signature = str(st.session_state.get(signature_key, ""))
+    if previous_criteria_signature != criteria_signature:
         st.session_state[signature_key] = criteria_signature
         st.session_state[page_number_key] = 1
         st.session_state[selection_token_key] = ""
+        if previous_criteria_signature:
+            st.session_state["selected_id"] = ""
+            st.session_state.pop(TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY, None)
+            st.session_state[table_instance_key] = int(st.session_state.get(table_instance_key, 0)) + 1
 
     query_cache_store = st.session_state.get(query_cache_key)
     if not isinstance(query_cache_store, dict):
@@ -3872,6 +4008,8 @@ def render_target_recommendations(
 
         working_catalog = recommendation_feature_catalog
         cleaned_keyword = str(keyword_query).strip()
+        keyword_priority_tokens = _build_keyword_priority_tokens(cleaned_keyword)
+        keyword_exact_match_patterns = _build_keyword_exact_match_patterns(cleaned_keyword)
         if cleaned_keyword:
             working_catalog = search_catalog(recommendation_feature_catalog, cleaned_keyword)
 
@@ -4097,6 +4235,11 @@ def render_target_recommendations(
                     else:
                         eligible_indices = np.where(eligible_mask)[0]
                         recommended = candidates.iloc[eligible_indices].copy()
+                        recommended["keyword_match_priority"] = _keyword_match_priority_series(
+                            recommended,
+                            keyword_priority_tokens,
+                            keyword_exact_match_patterns,
+                        )
                         recommended["visible_minutes"] = full_night_visible_minutes[eligible_indices]
                         recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
                         recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
@@ -4188,6 +4331,7 @@ def render_target_recommendations(
 
                             recommended = recommended.sort_values(
                                 by=[
+                                    "keyword_match_priority",
                                     "filter_match_tier",
                                     "visibility_bin_15",
                                     "peak_alt_band_10",
@@ -4196,7 +4340,7 @@ def render_target_recommendations(
                                     "peak_altitude",
                                     "primary_id",
                                 ],
-                                ascending=[False, False, False, False, False, False, True],
+                                ascending=[False, False, False, False, False, False, False, True],
                             ).reset_index(drop=True)
                             total_results_uncapped = int(len(recommended))
 
@@ -4239,9 +4383,9 @@ def render_target_recommendations(
             kind="mergesort",
         ).reset_index(drop=True)
 
-    page_size = int(st.session_state.get(page_size_key, 20))
-    if page_size not in {10, 20, 100}:
-        page_size = 20
+    page_size = int(st.session_state.get(page_size_key, 100))
+    if page_size not in {10, 100, 200}:
+        page_size = 100
         st.session_state[page_size_key] = page_size
     total_results = int(len(recommended))
     query_elapsed_seconds = max(0.0, perf_counter() - query_started_at)
@@ -4273,11 +4417,64 @@ def render_target_recommendations(
         lambda value: f"{float(value):.1f} deg" if value is not None and not pd.isna(value) else "--"
     )
     page_frame["Direction"] = page_frame["peak_direction"].fillna("--").astype(str)
+
+    def _thumbnail_numeric(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(parsed):
+            return None
+        return float(parsed)
+
+    def _thumbnail_cutout_fov_deg(row: pd.Series) -> tuple[float, float]:
+        major_arcmin = _thumbnail_numeric(row.get("ang_size_maj_arcmin"))
+        minor_arcmin = _thumbnail_numeric(row.get("ang_size_min_arcmin"))
+        span_deg_candidates = [
+            float(value) / 60.0
+            for value in (major_arcmin, minor_arcmin)
+            if value is not None and value > 0.0
+        ]
+        if span_deg_candidates:
+            estimated_span = max(span_deg_candidates) * 3.0
+            framed_span = float(max(0.5, min(8.0, estimated_span)))
+            return framed_span, framed_span
+        return 1.5, 1.5
+
     def _resolve_thumbnail_url(row: pd.Series) -> str | None:
         for key in ("image_url", "hero_image_url"):
             raw_value = str(row.get(key, "") or "").strip()
             if raw_value.lower().startswith(("https://", "http://")):
                 return raw_value
+
+        wikimedia_search_phrase = (
+            str(row.get("common_name") or "").strip()
+            or str(row.get("primary_id") or "").strip()
+        )
+        if wikimedia_search_phrase:
+            image_data = fetch_free_use_image(wikimedia_search_phrase)
+            wiki_image_url = str((image_data or {}).get("image_url", "") or "").strip()
+            if wiki_image_url.lower().startswith(("https://", "http://")):
+                return wiki_image_url
+
+        ra_deg = _thumbnail_numeric(row.get("ra_deg"))
+        dec_deg = _thumbnail_numeric(row.get("dec_deg"))
+        if ra_deg is None or dec_deg is None:
+            return None
+
+        fov_width_deg, fov_height_deg = _thumbnail_cutout_fov_deg(row)
+        for layer in ("unwise-neo4", "sfd", "sdss2"):
+            legacy_cutout = build_legacy_survey_cutout_urls(
+                ra_deg=ra_deg,
+                dec_deg=dec_deg,
+                fov_width_deg=fov_width_deg,
+                fov_height_deg=fov_height_deg,
+                layer=layer,
+                max_pixels=256,
+            )
+            legacy_image_url = str((legacy_cutout or {}).get("image_url", "") or "").strip()
+            if legacy_image_url.lower().startswith(("https://", "http://")):
+                return legacy_image_url
         return None
 
     page_frame["thumbnail_url"] = page_frame.apply(_resolve_thumbnail_url, axis=1)
@@ -4359,7 +4556,7 @@ def render_target_recommendations(
     per_page_col, page_col = st.columns([1, 1], gap="small")
     per_page_col.selectbox(
         "Results per page",
-        options=[10, 20, 100],
+        options=[10, 100, 200],
         key=page_size_key,
     )
     page_col.number_input(
@@ -6075,6 +6272,7 @@ def build_unobstructed_altitude_area_plot(
     temperature_by_hour: dict[str, float] | None = None,
     weather_by_hour: dict[str, dict[str, Any]] | None = None,
     temperature_unit: str = "f",
+    mount_choice: str = "none",
 ) -> go.Figure:
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
@@ -6105,6 +6303,33 @@ def build_unobstructed_altitude_area_plot(
         line={"width": 1, "color": theme_colors["obstruction_line"]},
         layer="below",
     )
+    mount_warning_zone = mount_warning_zone_altitude_bounds(mount_choice)
+    if mount_warning_zone is not None:
+        warning_y0, warning_y1, _warning_label = mount_warning_zone
+        warning_fill, warning_line = mount_warning_zone_plot_style()
+        fig.add_shape(
+            type="rect",
+            xref="paper",
+            yref="y",
+            x0=0.0,
+            x1=1.0,
+            y0=warning_y0,
+            y1=warning_y1,
+            fillcolor=warning_fill,
+            line={"width": 0},
+            layer="below",
+        )
+        fig.add_shape(
+            type="line",
+            xref="paper",
+            yref="y",
+            x0=0.0,
+            x1=1.0,
+            y0=warning_y1 if warning_y0 <= 0.0 else warning_y0,
+            y1=warning_y1 if warning_y0 <= 0.0 else warning_y0,
+            line={"width": 1, "color": warning_line, "dash": "dot"},
+            layer="below",
+        )
 
     non_selected_tracks = [target for target in target_tracks if not bool(target.get("is_selected", False))]
     selected_tracks = [target for target in target_tracks if bool(target.get("is_selected", False))]
@@ -6338,6 +6563,7 @@ def build_path_plot(
     selected_line_width: float,
     use_12_hour: bool,
     overlay_tracks: list[dict[str, Any]] | None = None,
+    mount_choice: str = "none",
 ) -> go.Figure:
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
@@ -6368,6 +6594,34 @@ def build_path_plot(
             hoverinfo="skip",
         )
     )
+    mount_warning_zone = mount_warning_zone_altitude_bounds(mount_choice)
+    if mount_warning_zone is not None:
+        warning_y0, warning_y1, warning_label = mount_warning_zone
+        warning_fill, warning_line = mount_warning_zone_plot_style()
+        fig.add_trace(
+            go.Scatter(
+                x=[0.0, 360.0, 360.0, 0.0, 0.0],
+                y=[warning_y0, warning_y0, warning_y1, warning_y1, warning_y0],
+                mode="lines",
+                showlegend=False,
+                line={"width": 0, "color": warning_line},
+                fill="toself",
+                fillcolor=warning_fill,
+                hoverinfo="skip",
+                name=warning_label,
+            )
+        )
+        threshold_alt = warning_y1 if warning_y0 <= 0.0 else warning_y0
+        fig.add_trace(
+            go.Scatter(
+                x=[0.0, 360.0],
+                y=[threshold_alt, threshold_alt],
+                mode="lines",
+                showlegend=False,
+                line={"width": 1, "color": warning_line, "dash": "dot"},
+                hoverinfo="skip",
+            )
+        )
 
     path_x, path_y, path_times = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
     selected_hover = build_path_hovertext(selected_label, selected_emissions, path_times, path_y)
@@ -6565,6 +6819,7 @@ def build_path_plot_radial(
     selected_line_width: float,
     use_12_hour: bool,
     overlay_tracks: list[dict[str, Any]] | None = None,
+    mount_choice: str = "none",
 ) -> go.Figure:
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
@@ -6614,6 +6869,40 @@ def build_path_plot_radial(
                 r=[0.0, 90.0],
                 mode="lines",
                 line={"color": theme_colors["cardinal_grid"], "width": 1, "dash": "dot"},
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+    mount_warning_zone = mount_warning_zone_altitude_bounds(mount_choice)
+    if mount_warning_zone is not None:
+        warning_alt_low, warning_alt_high, _warning_label = mount_warning_zone
+        warning_fill, warning_line = mount_warning_zone_plot_style()
+        warning_theta = [float(value) for value in range(0, 361, 5)]
+        if dome_view:
+            warning_boundary_r = [max(0.0, min(90.0, 90.0 - warning_alt_high)) for _ in warning_theta]
+            warning_baseline_r = [max(0.0, min(90.0, 90.0 - warning_alt_low)) for _ in warning_theta]
+        else:
+            warning_boundary_r = [max(0.0, min(90.0, warning_alt_low)) for _ in warning_theta]
+            warning_baseline_r = [max(0.0, min(90.0, warning_alt_high)) for _ in warning_theta]
+
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=warning_theta,
+                r=warning_boundary_r,
+                mode="lines",
+                line={"width": 1, "color": warning_line, "dash": "dot"},
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=warning_theta,
+                r=warning_baseline_r,
+                mode="lines",
+                line={"width": 0},
+                fill="tonext",
+                fillcolor=warning_fill,
                 showlegend=False,
                 hoverinfo="skip",
             )
@@ -8423,6 +8712,10 @@ def render_detail_panel(
         normalized_forecast_day_offset = 0
     if normalized_forecast_day_offset > (ASTRONOMY_FORECAST_NIGHTS - 1):
         normalized_forecast_day_offset = ASTRONOMY_FORECAST_NIGHTS - 1
+    plot_mount_choice = _normalize_mount_choice(
+        prefs.get("active_mount_choice", "altaz"),
+        default_choice="altaz",
+    )
 
     location = prefs["location"]
     location_lat = float(location["lat"])
@@ -8661,6 +8954,7 @@ def render_detail_panel(
                             ),
                             use_12_hour=use_12_hour,
                             overlay_tracks=overlay_tracks_for_path,
+                            mount_choice=plot_mount_choice,
                         )
                     else:
                         path_figure = build_path_plot(
@@ -8675,6 +8969,7 @@ def render_detail_panel(
                             ),
                             use_12_hour=use_12_hour,
                             overlay_tracks=overlay_tracks_for_path,
+                            mount_choice=plot_mount_choice,
                         )
 
                 path_col, area_col = st.columns([1, 1], gap="small")
@@ -8695,6 +8990,7 @@ def render_detail_panel(
                             temperature_by_hour=temperatures,
                             weather_by_hour=weather_by_hour,
                             temperature_unit=temperature_unit,
+                            mount_choice=plot_mount_choice,
                         ),
                         use_container_width=True,
                         key="preview_unobstructed_area_plot",
@@ -9042,6 +9338,14 @@ def render_detail_panel(
 
                 selected_object_type_group = normalize_object_type_group(selected.get("object_type_group"))
                 selected_object_type_value = clean_text(selected.get("object_type"))
+                aliases_value = clean_text(selected.get("aliases"))
+                combined_distance = "-"
+                if dist_value and dist_unit:
+                    combined_distance = f"{dist_value}/{dist_unit}"
+                elif dist_value:
+                    combined_distance = dist_value
+                elif dist_unit:
+                    combined_distance = dist_unit
                 property_items = [
                     {
                         "Property": "RA",
@@ -9054,8 +9358,8 @@ def render_detail_panel(
                         "ValueHtml": _format_coordinate_value_html(dec_sexagesimal, dec_decimal),
                     },
                     {"Property": "Constellation", "Value": clean_text(selected.get("constellation")) or "-"},
-                    {"Property": "Distance Value", "Value": dist_value or "-"},
-                    {"Property": "Distance Unit", "Value": dist_unit or "-"},
+                    {"Property": "Aliases", "Value": aliases_value or "-"},
+                    {"Property": "Distance", "Value": combined_distance},
                     {"Property": "Redshift", "Value": redshift or "-"},
                     {"Property": "Angular Size", "Value": ang_size_display or "-", "Tooltip": ang_size_tooltip},
                     {"Property": "Morphology", "Value": morphology or "-"},
@@ -9290,6 +9594,7 @@ def render_detail_panel(
                 selected_line_width=selected_line_width,
                 use_12_hour=use_12_hour,
                 overlay_tracks=preview_tracks,
+                mount_choice=plot_mount_choice,
             )
         else:
             path_figure = build_path_plot(
@@ -9302,6 +9607,7 @@ def render_detail_panel(
                 selected_line_width=selected_line_width,
                 use_12_hour=use_12_hour,
                 overlay_tracks=preview_tracks,
+                mount_choice=plot_mount_choice,
             )
 
         should_animate_weather_alerts = normalized_forecast_day_offset == 0
@@ -9370,6 +9676,7 @@ def render_detail_panel(
                     temperature_by_hour=temperatures,
                     weather_by_hour=weather_by_hour,
                     temperature_unit=temperature_unit,
+                    mount_choice=plot_mount_choice,
                 ),
                 use_container_width=True,
                 key="detail_unobstructed_area_plot",
