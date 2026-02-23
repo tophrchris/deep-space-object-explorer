@@ -934,8 +934,9 @@ WEATHER_FORECAST_DAY_OFFSET_STATE_KEY = "weather_forecast_day_offset"
 ASTRONOMY_FORECAST_NIGHTS = 5
 NIGHT_RATING_FACTOR_WEIGHTS: dict[str, float] = {
     "precipitation": 0.05,
+    "precip_probability": 0.10,
     "cloud_coverage": 0.45,
-    "visibility": 0.25,
+    "visibility": 0.15,
     "wind": 0.15,
     "dew_risk": 0.10,
 }
@@ -1347,6 +1348,20 @@ def compute_night_rating_details(
             return 0.15
         return 0.0
 
+    def _score_precip_probability(probability_pct: float) -> float:
+        prob = max(0.0, min(100.0, float(probability_pct)))
+        if prob <= 10.0:
+            return 1.0
+        if prob <= 20.0:
+            return 0.90
+        if prob <= 40.0:
+            return 0.70
+        if prob <= 60.0:
+            return 0.45
+        if prob <= 80.0:
+            return 0.20
+        return 0.05
+
     def _score_cloud_cover(cloud_cover_pct: float) -> float:
         if cloud_cover_pct <= 5.0:
             return 1.0
@@ -1405,6 +1420,7 @@ def compute_night_rating_details(
         return 0.20
 
     precip_scores: list[float] = []
+    precip_probability_scores: list[float] = []
     cloud_scores: list[float] = []
     visibility_scores: list[float] = []
     wind_scores: list[float] = []
@@ -1419,6 +1435,10 @@ def compute_night_rating_details(
         precip_accum_mm = max(0.0, rain_mm + showers_mm + (snowfall_cm * 10.0))
         precip_accum_mm_values.append(precip_accum_mm)
         precip_scores.append(_score_precip_accum_mm(precip_accum_mm))
+
+        precip_probability_pct = _finite(row.get("precipitation_probability"))
+        if precip_probability_pct is not None:
+            precip_probability_scores.append(_score_precip_probability(precip_probability_pct))
 
         cloud_cover = _finite(row.get("cloud_cover"))
         if cloud_cover is not None:
@@ -1450,6 +1470,7 @@ def compute_night_rating_details(
 
     factor_scores: dict[str, float | None] = {
         "precipitation": _average(precip_scores),
+        "precip_probability": _average(precip_probability_scores),
         "cloud_coverage": _average(cloud_scores),
         "visibility": _average(visibility_scores),
         "wind": _average(wind_scores),
@@ -1468,7 +1489,7 @@ def compute_night_rating_details(
         return None
 
     normalized_score = weighted_total / available_weight
-    raw_rating = int(np.clip(np.ceil(normalized_score * 5.0), 1, 5))
+    raw_rating = int(np.clip(round(normalized_score * 5.0), 1, 5))
     rating = raw_rating
     rating_caps: list[dict[str, Any]] = []
 
@@ -1525,6 +1546,7 @@ def compute_night_rating_details(
     factor_rows: list[dict[str, Any]] = []
     factor_definitions = (
         ("precipitation", "Precip accumulation risk", precip_scores),
+        ("precip_probability", "Precip probability risk", precip_probability_scores),
         ("cloud_coverage", "Cloud cover quality", cloud_scores),
         ("visibility", "Visibility quality", visibility_scores),
         ("wind", "Wind stability", wind_scores),
