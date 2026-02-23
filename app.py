@@ -393,7 +393,7 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
             return
         prefs["cloud_sync_last_error"] = error_message
         st.session_state["prefs"] = prefs
-        save_preferences(prefs)
+        save_preferences(prefs, mark_cloud_pending=False, touch_last_updated_utc=False)
         st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
 
     is_logged_in = _is_user_logged_in()
@@ -443,7 +443,7 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
             prefs_changed = True
         if prefs_changed:
             st.session_state["prefs"] = prefs
-            save_preferences(prefs)
+            save_preferences(prefs, mark_cloud_pending=False, touch_last_updated_utc=False)
 
     if not bool(prefs.get("cloud_sync_enabled", False)):
         st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
@@ -508,7 +508,11 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
                     restored_prefs["cloud_sync_last_ok_utc"] = _utc_now_iso()
                     restored_prefs["cloud_sync_last_error"] = ""
                     st.session_state["prefs"] = restored_prefs
-                    save_preferences(restored_prefs)
+                    save_preferences(
+                        restored_prefs,
+                        mark_cloud_pending=False,
+                        touch_last_updated_utc=False,
+                    )
                     st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
                     restored_session_keys = apply_session_snapshot(remote_payload.get("session_state", {}))
                     st.session_state[GOOGLE_DRIVE_SYNC_LAST_APPLIED_TOKEN_STATE_KEY] = (
@@ -571,7 +575,7 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
             prefs["cloud_sync_file_id"] = remote_file_id
             prefs["cloud_sync_last_error"] = ""
             st.session_state["prefs"] = prefs
-            save_preferences(prefs)
+            save_preferences(prefs, mark_cloud_pending=False, touch_last_updated_utc=False)
             st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = should_push_after_bootstrap
 
         if (
@@ -619,7 +623,7 @@ def maybe_sync_prefs_with_google_drive(prefs: dict[str, Any]) -> None:
         prefs["cloud_sync_last_ok_utc"] = _utc_now_iso()
         prefs["cloud_sync_last_error"] = ""
         st.session_state["prefs"] = prefs
-        save_preferences(prefs)
+        save_preferences(prefs, mark_cloud_pending=False, touch_last_updated_utc=False)
         st.session_state[GOOGLE_DRIVE_SYNC_PENDING_STATE_KEY] = False
         st.session_state[GOOGLE_DRIVE_SYNC_MANUAL_ACTION_STATE_KEY] = ""
         st.session_state[GOOGLE_DRIVE_SYNC_LAST_COMPARE_SUMMARY_STATE_KEY] = (
