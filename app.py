@@ -902,7 +902,7 @@ def load_site_date_weather_mask_bundle(
     }
 WEATHER_MATRIX_ROWS: list[tuple[str, str]] = [
     ("temperature_2m", "Temperature"),
-    ("dewpoint_spread", "Dewpoint Spread"),
+    ("dewpoint_spread", "Humidity"),
     ("cloud_cover", "Cloud Cover"),
     ("visibility", "Visibility"),
     ("wind_gusts_10m", "Wind Gusts"),
@@ -1375,13 +1375,14 @@ def compute_night_rating_details(
         return 0.30
 
     def _score_dew_spread_c(spread_c: float) -> float:
-        if spread_c >= 5.0:
+        spread_f = float(spread_c) * 9.0 / 5.0
+        if spread_f >= 5.0:
             return 1.0
-        if spread_c >= 3.0:
+        if spread_f >= 3.0:
             return 0.80
-        if spread_c >= 2.0:
+        if spread_f >= 2.0:
             return 0.60
-        if spread_c >= 1.0:
+        if spread_f >= 1.0:
             return 0.40
         return 0.20
 
@@ -4537,6 +4538,33 @@ def night_time_clarity_scale_legend_html() -> str:
     )
 
 
+def dew_risk_scale_legend_html() -> str:
+    swatches: list[str] = []
+    spread_values = list(range(6, -1, -1))
+    for idx, spread_value in enumerate(spread_values):
+        color = _interpolate_color_stops(
+            float(spread_value),
+            [
+                (0.0, "#FDBA74"),  # dew-prone (orange)
+                (6.0, "#FFFFFF"),  # dry (white)
+            ],
+        )
+        margin_right = "0.12rem" if idx < (len(spread_values) - 1) else "0"
+        swatches.append(
+            "<span style='display:inline-block; width:0.58rem; height:0.58rem; border-radius:2px; "
+            f"margin-right:{margin_right}; border:1px solid rgba(17,24,39,0.28); background:{color};'></span>"
+        )
+
+    return (
+        "<div style='font-size:0.88rem; color:#6b7280; margin:0.02rem 0 0.12rem;'>"
+        "💧 dew risk scale: "
+        "<span style='margin-right:0.2rem;'>Dry</span>"
+        f"{''.join(swatches)}"
+        "<span style='margin-left:0.12rem;'>Dew</span>"
+        "</div>"
+    )
+
+
 def cloud_cover_cell_style(raw_value: Any) -> str:
     if raw_value is None or pd.isna(raw_value):
         return ""
@@ -4603,6 +4631,38 @@ def visibility_condition_cell_style(raw_value: Any) -> str:
     background_color = visibility_color_by_condition.get(condition)
     if not background_color:
         return ""
+
+    text_color = _ideal_text_color_for_hex(background_color)
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def dewpoint_spread_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    text = str(raw_value).strip()
+    if not text or text == "-":
+        return ""
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if match is None:
+        return ""
+
+    try:
+        spread_value = float(match.group(0))
+    except ValueError:
+        return ""
+
+    if spread_value > 6.0:
+        return ""
+    clamped_spread = max(0.0, spread_value)
+    background_color = _interpolate_color_stops(
+        clamped_spread,
+        [
+            (0.0, "#FDBA74"),  # light orange at 0°
+            (6.0, "#FFFFFF"),  # fade to white by 6°
+        ],
+    )
 
     text_color = _ideal_text_color_for_hex(background_color)
     return f"background-color: {background_color}; color: {text_color};"
@@ -4874,11 +4934,8 @@ def build_hourly_weather_matrix(
         if metric_key == "dewpoint_spread":
             matrix_rows[metric_label] = [
                 format_weather_matrix_value(
-                    metric_key,
-                    _dewpoint_spread_celsius(
-                        by_hour[timestamp].get("temperature_2m"),
-                        by_hour[timestamp].get("dew_point_2m"),
-                    ),
+                    "relative_humidity_2m",
+                    by_hour[timestamp].get("relative_humidity_2m"),
                     temperature_unit=temperature_unit,
                 )
                 for timestamp in ordered_times
@@ -4902,9 +4959,24 @@ def build_hourly_weather_matrix(
         if metric_key == "dewpoint_spread":
             tooltip_rows[metric_label] = [
                 (
-                    f"RH: {float(by_hour[timestamp].get('relative_humidity_2m')):.0f}%"
-                    if by_hour[timestamp].get("relative_humidity_2m") is not None
-                    and not pd.isna(by_hour[timestamp].get("relative_humidity_2m"))
+                    (
+                        "Dewpoint spread: "
+                        + format_weather_matrix_value(
+                            "dewpoint_spread",
+                            _dewpoint_spread_celsius(
+                                by_hour[timestamp].get("temperature_2m"),
+                                by_hour[timestamp].get("dew_point_2m"),
+                            ),
+                            temperature_unit=temperature_unit,
+                        )
+                    )
+                    if (
+                        _dewpoint_spread_celsius(
+                            by_hour[timestamp].get("temperature_2m"),
+                            by_hour[timestamp].get("dew_point_2m"),
+                        )
+                        is not None
+                    )
                     else ""
                 )
                 for timestamp in ordered_times
@@ -4998,6 +5070,9 @@ def render_hourly_weather_matrix(
             for column in frame.columns:
                 raw_value = row.get(column)
                 cell_text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
+                tooltip_text = ""
+                if aligned_tooltips is not None:
+                    tooltip_text = str(aligned_tooltips.at[row_idx, column]).strip()
 
                 if str(column) == "Element":
                     mui_frame.at[row_idx, ""] = _mui_cell_html(
@@ -5015,20 +5090,20 @@ def render_hourly_weather_matrix(
                     temp_style = temperature_cell_style(raw_value, temperature_unit=temperature_unit)
                     if temp_style:
                         style_parts.append(temp_style)
+                elif element_key == "humidity":
+                    dew_style = dewpoint_spread_cell_style(tooltip_text)
+                    if dew_style:
+                        style_parts.append(dew_style)
                 elif element_key == "visibility":
                     visibility_style = visibility_condition_cell_style(raw_value)
                     if visibility_style:
                         style_parts.append(visibility_style)
 
-                tooltip_text = ""
-                if aligned_tooltips is not None:
-                    tooltip_text = str(aligned_tooltips.at[row_idx, column]).strip()
-
                 indicator_html = ""
                 if aligned_indicators is not None and element_key == "cloud cover":
                     indicator_html = str(aligned_indicators.at[row_idx, column]).strip()
 
-                full_bleed = element_key in {"cloud cover", "visibility"}
+                full_bleed = element_key in {"cloud cover", "humidity", "visibility"}
                 mui_frame.at[row_idx, column] = _mui_cell_html(
                     cell_text,
                     style_parts,
@@ -5113,6 +5188,9 @@ def render_hourly_weather_matrix(
             raw_value = row.get(column)
             text_value = str(raw_value).strip()
             display_value = html.escape(text_value) if text_value else "&nbsp;"
+            tooltip = ""
+            if aligned_tooltips is not None:
+                tooltip = str(aligned_tooltips.at[row_idx, column]).strip()
 
             cell_style = (
                 "padding: 6px 8px; border-bottom: 1px solid #d1d5db; "
@@ -5122,12 +5200,10 @@ def render_hourly_weather_matrix(
                 cell_style += cloud_cover_cell_style(raw_value)
             elif element_key == "temperature":
                 cell_style += temperature_cell_style(raw_value, temperature_unit=temperature_unit)
+            elif element_key == "humidity":
+                cell_style += dewpoint_spread_cell_style(tooltip)
             elif element_key == "visibility":
                 cell_style += visibility_condition_cell_style(raw_value)
-
-            tooltip = ""
-            if aligned_tooltips is not None:
-                tooltip = str(aligned_tooltips.at[row_idx, column]).strip()
             title_attr = f' title="{html.escape(tooltip)}"' if tooltip else ""
 
             indicator_html = ""
@@ -8964,6 +9040,8 @@ def render_detail_panel(
                         f'<span style="font-size:0.82em; color:var(--dso-muted-text-color);">({secondary_html})</span>'
                     )
 
+                selected_object_type_group = normalize_object_type_group(selected.get("object_type_group"))
+                selected_object_type_value = clean_text(selected.get("object_type"))
                 property_items = [
                     {
                         "Property": "RA",
@@ -8983,6 +9061,11 @@ def render_detail_panel(
                     {"Property": "Morphology", "Value": morphology or "-"},
                     {"Property": "Emissions Details", "Value": emission_details_display or "-"},
                 ]
+                if selected_object_type_group == "other" and selected_object_type_value:
+                    property_items.insert(
+                        3,
+                        {"Property": "Object Type", "Value": selected_object_type_value},
+                    )
                 property_rows = pd.DataFrame(
                     [
                         row
@@ -9641,6 +9724,7 @@ def render_explorer_page(
             st.caption("Click any row to set the active weather night across the page.")
             st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
             st.markdown(night_time_clarity_scale_legend_html(), unsafe_allow_html=True)
+            st.markdown(dew_risk_scale_legend_html(), unsafe_allow_html=True)
 
         with hourly_container:
             st.markdown(
