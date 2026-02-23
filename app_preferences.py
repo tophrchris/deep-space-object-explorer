@@ -293,9 +293,15 @@ def load_preferences() -> tuple[dict[str, Any], bool]:
     return default_preferences(), retry_needed
 
 
-def save_preferences(prefs: dict[str, Any]) -> bool:
+def save_preferences(
+    prefs: dict[str, Any],
+    *,
+    mark_cloud_pending: bool = True,
+    touch_last_updated_utc: bool = True,
+) -> bool:
     normalized_prefs = ensure_preferences_shape(prefs)
-    normalized_prefs["last_updated_utc"] = _utc_now_iso()
+    if touch_last_updated_utc:
+        normalized_prefs["last_updated_utc"] = _utc_now_iso()
     prefs.clear()
     prefs.update(normalized_prefs)
 
@@ -320,7 +326,8 @@ def save_preferences(prefs: dict[str, Any]) -> bool:
         local_saved = False
 
     if local_saved:
-        st.session_state["cloud_sync_pending"] = True
+        if mark_cloud_pending:
+            st.session_state["cloud_sync_pending"] = True
         st.session_state.pop("prefs_persistence_notice", None)
         return True
 
