@@ -7288,6 +7288,65 @@ def fetch_free_use_image(search_phrase: str) -> dict[str, str] | None:
         return None
 
 
+def build_legacy_survey_cutout_urls(
+    *,
+    ra_deg: float,
+    dec_deg: float,
+    fov_width_deg: float,
+    fov_height_deg: float,
+    layer: str = "dr8",
+    max_pixels: int = 512,
+) -> dict[str, Any] | None:
+    try:
+        ra = float(ra_deg)
+        dec = float(dec_deg)
+        fov_width = float(fov_width_deg)
+        fov_height = float(fov_height_deg)
+    except (TypeError, ValueError):
+        return None
+
+    if not (np.isfinite(ra) and np.isfinite(dec) and np.isfinite(fov_width) and np.isfinite(fov_height)):
+        return None
+    if fov_width <= 0.0 or fov_height <= 0.0:
+        return None
+
+    pixel_limit = int(max(64, min(int(max_pixels), 3000)))
+    aspect_ratio = fov_width / fov_height if fov_height > 0.0 else 1.0
+    if not np.isfinite(aspect_ratio) or aspect_ratio <= 0.0:
+        aspect_ratio = 1.0
+
+    if aspect_ratio >= 1.0:
+        width_px = pixel_limit
+        height_px = max(64, min(pixel_limit, int(round(pixel_limit / aspect_ratio))))
+    else:
+        height_px = pixel_limit
+        width_px = max(64, min(pixel_limit, int(round(pixel_limit * aspect_ratio))))
+
+    pixscale_arcsec = max(
+        (fov_width * 3600.0) / float(width_px),
+        (fov_height * 3600.0) / float(height_px),
+    )
+    if not np.isfinite(pixscale_arcsec) or pixscale_arcsec <= 0.0:
+        return None
+
+    base_cutout_url = "https://www.legacysurvey.org/viewer/jpeg-cutout"
+    base_viewer_url = "https://www.legacysurvey.org/viewer"
+    cutout_url = (
+        f"{base_cutout_url}?ra={ra:.6f}&dec={dec:.6f}&layer={layer}"
+        f"&width={width_px}&height={height_px}&pixscale={pixscale_arcsec:.6f}"
+    )
+    viewer_url = f"{base_viewer_url}?ra={ra:.6f}&dec={dec:.6f}&layer={layer}"
+    return {
+        "image_url": cutout_url,
+        "viewer_url": viewer_url,
+        "width_px": width_px,
+        "height_px": height_px,
+        "pixscale_arcsec": pixscale_arcsec,
+        "fov_width_deg": fov_width,
+        "fov_height_deg": fov_height,
+    }
+
+
 def sanitize_saved_lists(catalog: pd.DataFrame, prefs: dict[str, Any]) -> None:
     available_ids = set(catalog["primary_id"].tolist())
     current = ensure_preferences_shape(prefs)
@@ -8258,6 +8317,24 @@ def render_detail_panel(
             return None
         return numeric
 
+    def positive_numeric(value: Any) -> float | None:
+        numeric = parse_numeric(value)
+        if numeric is None or numeric <= 0.0:
+            return None
+        return float(numeric)
+
+    def resolve_active_telescope_for_framing() -> dict[str, Any] | None:
+        equipment_context = build_owned_equipment_context(prefs)
+        telescope_lookup = equipment_context.get("telescope_lookup", {})
+        if not isinstance(telescope_lookup, dict):
+            return None
+        owned_telescope_ids = list(equipment_context.get("owned_telescope_ids", []))
+        active_telescope_id = str(prefs.get("active_telescope_id", "")).strip()
+        if active_telescope_id not in owned_telescope_ids and owned_telescope_ids:
+            active_telescope_id = str(owned_telescope_ids[0]).strip()
+        active_telescope = telescope_lookup.get(active_telescope_id) if active_telescope_id else None
+        return active_telescope if isinstance(active_telescope, dict) else None
+
     try:
         normalized_forecast_day_offset = int(weather_forecast_day_offset)
     except (TypeError, ValueError):
@@ -8557,20 +8634,106 @@ def render_detail_panel(
         title = f"{target_id} - {selected['common_name']}"
 
     catalog_image_url = clean_text(selected.get("image_url"))
-    image_source_url = clean_text(selected.get("image_attribution_url"))
-    image_license = clean_text(selected.get("license_label"))
-    info_url = clean_text(selected.get("info_url")) or image_source_url
-    if not image_source_url:
-        image_source_url = info_url
+    catalog_image_source_url = clean_text(selected.get("image_attribution_url"))
+    catalog_image_license = clean_text(selected.get("license_label"))
+    info_url = clean_text(selected.get("info_url")) or catalog_image_source_url
+    if not catalog_image_source_url:
+        catalog_image_source_url = info_url
 
-    image_url = catalog_image_url
-    if not image_url:
-        search_phrase = selected.get("common_name") or selected.get("primary_id")
-        image_data = fetch_free_use_image(str(search_phrase))
+    image_candidates: list[dict[str, str]] = []
+    seen_image_urls: set[str] = set()
+
+    def append_image_candidate(
+        *,
+        label: str,
+        image_url: Any,
+        source_url: Any = "",
+        license_label: Any = "",
+    ) -> None:
+        candidate_url = clean_text(image_url)
+        if not candidate_url or candidate_url in seen_image_urls:
+            return
+        seen_image_urls.add(candidate_url)
+        image_candidates.append(
+            {
+                "label": clean_text(label) or "Image",
+                "image_url": candidate_url,
+                "source_url": clean_text(source_url),
+                "license_label": clean_text(license_label),
+            }
+        )
+
+    append_image_candidate(
+        label="Catalog image",
+        image_url=catalog_image_url,
+        source_url=catalog_image_source_url,
+        license_label=catalog_image_license,
+    )
+
+    ra_deg_for_cutout = parse_numeric(selected.get("ra_deg"))
+    dec_deg_for_cutout = parse_numeric(selected.get("dec_deg"))
+    telescope_for_framing = resolve_active_telescope_for_framing()
+    telescope_fov_maj_deg = positive_numeric(telescope_for_framing.get("fov_maj_deg")) if telescope_for_framing else None
+    telescope_fov_min_deg = positive_numeric(telescope_for_framing.get("fov_min_deg")) if telescope_for_framing else None
+
+    ang_size_maj_arcmin_for_cutout = positive_numeric(selected.get("ang_size_maj_arcmin"))
+    ang_size_min_arcmin_for_cutout = positive_numeric(selected.get("ang_size_min_arcmin"))
+
+    legacy_cutout_credit = ""
+    if telescope_fov_maj_deg is not None and telescope_fov_min_deg is not None:
+        cutout_fov_width_deg = telescope_fov_maj_deg
+        cutout_fov_height_deg = telescope_fov_min_deg
+        legacy_cutout_credit = "Legacy Survey DR8 sky cutout (framed to active telescope FOV)"
+    else:
+        object_span_deg_candidates = [
+            value / 60.0
+            for value in (ang_size_maj_arcmin_for_cutout, ang_size_min_arcmin_for_cutout)
+            if value is not None and value > 0.0
+        ]
+        if object_span_deg_candidates:
+            estimated_span_deg = max(object_span_deg_candidates) * 3.0
+            cutout_fov_width_deg = float(max(0.5, min(8.0, estimated_span_deg)))
+            cutout_fov_height_deg = cutout_fov_width_deg
+        else:
+            cutout_fov_width_deg = 1.5
+            cutout_fov_height_deg = 1.5
+        legacy_cutout_credit = "Legacy Survey DR8 sky cutout (auto-framed from target coordinates)"
+
+    wikimedia_search_phrase = clean_text(selected.get("common_name")) or target_id
+    if wikimedia_search_phrase:
+        image_data = fetch_free_use_image(wikimedia_search_phrase)
         if image_data and image_data.get("image_url"):
-            image_url = clean_text(image_data.get("image_url"))
-            image_source_url = clean_text(image_data.get("source_url")) or image_source_url
-            image_license = clean_text(image_data.get("license_label")) or image_license
+            append_image_candidate(
+                label="Wikimedia Commons",
+                image_url=image_data.get("image_url"),
+                source_url=image_data.get("source_url"),
+                license_label=image_data.get("license_label"),
+            )
+
+    if ra_deg_for_cutout is not None and dec_deg_for_cutout is not None:
+        legacy_cutout_layers = [
+            ("sdss2", "SDSS2", "Legacy Survey SDSS2"),
+            ("unwise-neo4", "unwise-neo4", "Legacy Survey unWISE neo4"),
+            ("halpha", "Halpha", "Legacy Survey Halpha"),
+            ("sfd", "SFD", "Legacy Survey SFD"),
+        ]
+        for legacy_layer_id, legacy_layer_display, legacy_layer_label in legacy_cutout_layers:
+            legacy_cutout = build_legacy_survey_cutout_urls(
+                ra_deg=ra_deg_for_cutout,
+                dec_deg=dec_deg_for_cutout,
+                fov_width_deg=cutout_fov_width_deg,
+                fov_height_deg=cutout_fov_height_deg,
+                layer=legacy_layer_id,
+                max_pixels=512,
+            )
+            if legacy_cutout is None:
+                continue
+            append_image_candidate(
+                label=legacy_layer_label,
+                image_url=legacy_cutout.get("image_url"),
+                source_url=legacy_cutout.get("viewer_url"),
+                license_label=f"{legacy_cutout_credit} | Layer: {legacy_layer_display}",
+            )
 
     dist_value = format_numeric(selected.get("dist_value"))
     dist_unit = clean_text(selected.get("dist_unit"))
@@ -8681,8 +8844,51 @@ def render_detail_panel(
                 forecast_container = detail_cols[3]
 
             with image_container:
-                if image_url:
-                    image_url_html = html.escape(image_url, quote=True)
+                carousel_index_key = "detail_image_carousel_index"
+                carousel_target_key = "detail_image_carousel_target_id"
+                if str(st.session_state.get(carousel_target_key, "")).strip() != target_id:
+                    st.session_state[carousel_target_key] = target_id
+                    st.session_state[carousel_index_key] = 0
+
+                active_image: dict[str, str] | None = None
+                if image_candidates:
+                    image_count = len(image_candidates)
+                    try:
+                        current_image_index = int(st.session_state.get(carousel_index_key, 0))
+                    except (TypeError, ValueError):
+                        current_image_index = 0
+                    if current_image_index < 0 or current_image_index >= image_count:
+                        current_image_index = 0
+                        st.session_state[carousel_index_key] = 0
+
+                    if image_count > 1:
+                        prev_col, status_col, next_col = st.columns([1, 2, 1], gap="small")
+                        prev_clicked = prev_col.button(
+                            "Prev",
+                            key="detail_image_carousel_prev",
+                            use_container_width=True,
+                        )
+                        next_clicked = next_col.button(
+                            "Next",
+                            key="detail_image_carousel_next",
+                            use_container_width=True,
+                        )
+                        if prev_clicked and not next_clicked:
+                            current_image_index = (current_image_index - 1) % image_count
+                            st.session_state[carousel_index_key] = current_image_index
+                        elif next_clicked and not prev_clicked:
+                            current_image_index = (current_image_index + 1) % image_count
+                            st.session_state[carousel_index_key] = current_image_index
+                        status_col.caption(
+                            f"Image {current_image_index + 1}/{image_count}: "
+                            f"{image_candidates[current_image_index].get('label', 'Image')}"
+                        )
+                    else:
+                        st.caption(f"Image 1/1: {image_candidates[0].get('label', 'Image')}")
+
+                    active_image = image_candidates[current_image_index]
+                    active_image_url = clean_text(active_image.get("image_url"))
+                    image_url_html = html.escape(active_image_url, quote=True)
                     image_tag = (
                         '<div style="width:200px; height:200px; max-width:100%; display:flex; align-items:center; justify-content:center;">'
                         f'<img src="{image_url_html}" '
@@ -8692,12 +8898,14 @@ def render_detail_panel(
                     st.markdown(image_tag, unsafe_allow_html=True)
                 else:
                     st.info("No image URL available for this target.")
-                if image_source_url:
-                    st.caption(f"Image source: [Open link]({image_source_url})")
+                active_image_source_url = clean_text(active_image.get("source_url")) if active_image else ""
+                active_image_license = clean_text(active_image.get("license_label")) if active_image else ""
+                if active_image_source_url:
+                    st.caption(f"Image source: [Open link]({active_image_source_url})")
                 if info_url:
                     st.caption(f"Background: [Open object page]({info_url})")
-                if image_license:
-                    st.caption(f"License/Credit: {image_license}")
+                if active_image_license:
+                    st.caption(f"License/Credit: {active_image_license}")
 
             with description_container:
                 st.markdown("**Description**")
