@@ -3719,6 +3719,8 @@ def render_target_recommendations(
     telescope_fov_maj: float | None = None
     telescope_fov_min: float | None = None
     telescope_fov_area: float | None = None
+    recommendation_min_framing_pct = 1.0
+    recommendation_max_framing_pct = 500.0
 
     with criteria_col_3:
         if isinstance(active_telescope, dict):
@@ -3889,6 +3891,8 @@ def render_target_recommendations(
             "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
             "min_size_enabled": bool(use_minimum_size),
             "min_size_pct": minimum_size_pct if minimum_size_pct is not None else "",
+            "telescope_fov_filter_min_pct": recommendation_min_framing_pct,
+            "telescope_fov_filter_max_pct": recommendation_max_framing_pct,
             "catalog_mtime_ns": int(catalog_fingerprint[0]),
             "catalog_size_bytes": int(catalog_fingerprint[1]),
             "obstructions": {direction: float(obstructions.get(direction, 20.0)) for direction in WIND16},
@@ -4300,6 +4304,18 @@ def render_target_recommendations(
                             target_area_deg2 = target_maj_deg * target_min_deg
                             framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
                             recommended["framing_percent"] = framing_percent
+
+                            # Keep telescope-aware recommendations within a practical framing range.
+                            recommended = recommended[
+                                recommended["framing_percent"].apply(
+                                    lambda value: (
+                                        value is not None
+                                        and not pd.isna(value)
+                                        and np.isfinite(float(value))
+                                        and float(recommendation_min_framing_pct) <= float(value) <= float(recommendation_max_framing_pct)
+                                    )
+                                )
+                            ]
 
                             if minimum_size_pct is not None:
                                 recommended = recommended[
@@ -9339,13 +9355,36 @@ def render_detail_panel(
                 selected_object_type_group = normalize_object_type_group(selected.get("object_type_group"))
                 selected_object_type_value = clean_text(selected.get("object_type"))
                 aliases_value = clean_text(selected.get("aliases"))
+                frame_occupancy_value = "-"
+                if telescope_fov_maj_deg is not None and telescope_fov_min_deg is not None:
+                    frame_area_deg2 = float(telescope_fov_maj_deg * telescope_fov_min_deg)
+                    object_maj_deg = (
+                        float(ang_size_maj_arcmin_value) / 60.0
+                        if ang_size_maj_arcmin_value is not None and float(ang_size_maj_arcmin_value) > 0.0
+                        else None
+                    )
+                    object_min_deg = (
+                        float(ang_size_min_arcmin_value) / 60.0
+                        if ang_size_min_arcmin_value is not None and float(ang_size_min_arcmin_value) > 0.0
+                        else None
+                    )
+                    if object_maj_deg is None and object_min_deg is not None:
+                        object_maj_deg = object_min_deg
+                    if object_min_deg is None and object_maj_deg is not None:
+                        object_min_deg = object_maj_deg
+                    if (
+                        frame_area_deg2 > 0.0
+                        and object_maj_deg is not None
+                        and object_min_deg is not None
+                        and object_maj_deg > 0.0
+                        and object_min_deg > 0.0
+                    ):
+                        object_area_deg2 = float(object_maj_deg * object_min_deg)
+                        occupancy_pct = (object_area_deg2 / frame_area_deg2) * 100.0
+                        frame_occupancy_value = f"{occupancy_pct:.0f}% (Approx.)"
                 combined_distance = "-"
                 if dist_value and dist_unit:
                     combined_distance = f"{dist_value}/{dist_unit}"
-                elif dist_value:
-                    combined_distance = dist_value
-                elif dist_unit:
-                    combined_distance = dist_unit
                 property_items = [
                     {
                         "Property": "RA",
@@ -9359,6 +9398,7 @@ def render_detail_panel(
                     },
                     {"Property": "Constellation", "Value": clean_text(selected.get("constellation")) or "-"},
                     {"Property": "Aliases", "Value": aliases_value or "-"},
+                    {"Property": "Size in Frame", "Value": frame_occupancy_value},
                     {"Property": "Distance", "Value": combined_distance},
                     {"Property": "Redshift", "Value": redshift or "-"},
                     {"Property": "Angular Size", "Value": ang_size_display or "-", "Tooltip": ang_size_tooltip},
