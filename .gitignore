@@ -18,14 +18,6 @@ venv/
 # Local persisted prototype state
 .state/preferences.json
 
-# Local data cache artifacts
-data/dso_catalog_cache_messier_sharpless.csv
-data/dso_catalog_cache_ngc_ic.csv
-data/dso_catalog_cache_ngc_ic_filtered.csv
-data/wikipedia_api_cache.json
-data/wikipedia_catalog_enrichment.json
-data/wikipedia_catalog_enrichment.json.bak2.json
-
 # OS/editor
 .DS_Store
 .vscode/

@@ -54,7 +54,7 @@ from app_theme import (
     resolve_plot_theme_colors,
 )
 from condition_tips.ui import render_condition_tips_panel
-from dso_enricher.catalog_service import (
+from catalog_runtime.catalog_service import (
     canonicalize_designation,
     get_object_by_id,
     load_catalog_from_cache,

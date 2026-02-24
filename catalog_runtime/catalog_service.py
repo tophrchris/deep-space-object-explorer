@@ -8,13 +8,25 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from dso_enricher.catalog_ingestion import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, load_unified_catalog
+REQUIRED_COLUMNS = [
+    "primary_id",
+    "catalog",
+    "common_name",
+    "object_type",
+    "ra_deg",
+    "dec_deg",
+]
 
-CATALOG_MODE_LEGACY = "legacy"
-CATALOG_MODE_CURATED_PARQUET = "curated_parquet"
+OPTIONAL_COLUMNS = [
+    "constellation",
+    "aliases",
+    "object_type_group",
+    "image_url",
+    "image_attribution_url",
+    "license_label",
+]
 
 SEARCH_INDEX_COLUMNS = ["primary_id_norm", "aliases_norm", "search_blob_norm"]
-_VALID_CATALOG_MODES = {CATALOG_MODE_LEGACY, CATALOG_MODE_CURATED_PARQUET}
 
 
 def normalize_text(value: str | None) -> str:
@@ -138,96 +150,6 @@ def load_catalog_from_cache(*, cache_path: Path) -> tuple[pd.DataFrame, dict[str
         "filters": list_catalog_filters(indexed),
     }
     return indexed, metadata
-
-
-def load_catalog_data(
-    *,
-    seed_path: Path,
-    cache_path: Path,
-    metadata_path: Path,
-    enriched_path: Path | None = None,
-    force_refresh: bool = False,
-    mode: str = CATALOG_MODE_LEGACY,
-    curated_path: Path | None = None,
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    requested_mode = str(mode).strip().lower()
-    notes: list[str] = []
-
-    if requested_mode not in _VALID_CATALOG_MODES:
-        notes.append(f"Unknown catalog mode '{requested_mode}', falling back to '{CATALOG_MODE_LEGACY}'.")
-        requested_mode = CATALOG_MODE_LEGACY
-
-    if requested_mode == CATALOG_MODE_CURATED_PARQUET:
-        curated_catalog_path = curated_path or cache_path
-        try:
-            curated_frame = pd.read_parquet(curated_catalog_path)
-            indexed_curated = _build_search_index(curated_frame)
-            validation = validate_catalog(indexed_curated)
-            if validation["missing_required_columns"]:
-                missing = ", ".join(validation["missing_required_columns"])
-                raise ValueError(f"missing required columns: {missing}")
-            if validation["duplicate_primary_id_count"] > 0:
-                raise ValueError(f"duplicate primary_id rows: {validation['duplicate_primary_id_count']}")
-            if validation["blank_primary_id_count"] > 0:
-                raise ValueError(f"blank primary_id rows: {validation['blank_primary_id_count']}")
-            if validation["row_count"] <= 0:
-                raise ValueError("catalog has zero rows")
-
-            catalog_counts = (
-                indexed_curated["catalog"].value_counts().to_dict()
-                if "catalog" in indexed_curated.columns
-                else {}
-            )
-            metadata = {
-                "load_mode": CATALOG_MODE_CURATED_PARQUET,
-                "source": str(curated_catalog_path),
-                "cache": str(curated_catalog_path),
-                "row_count": int(len(indexed_curated)),
-                "catalog_counts": catalog_counts,
-                "validation": validation,
-                "feature_mode_requested": mode,
-                "feature_mode_active": CATALOG_MODE_CURATED_PARQUET,
-                "filters": list_catalog_filters(indexed_curated),
-            }
-            return indexed_curated, metadata
-        except Exception as error:
-            notes.append(
-                "Curated catalog mode fallback to legacy: "
-                f"{error.__class__.__name__}: {str(error).strip() or 'unknown error'}"
-            )
-
-    frame, metadata = load_unified_catalog(
-        seed_path=seed_path,
-        cache_path=cache_path,
-        metadata_path=metadata_path,
-        enriched_path=enriched_path,
-        force_refresh=force_refresh,
-    )
-    indexed = _build_search_index(frame)
-    validation = validate_catalog(indexed)
-
-    meta = dict(metadata or {})
-    existing_notes = meta.get("notes", [])
-    merged_notes: list[str] = []
-    if isinstance(existing_notes, list):
-        merged_notes.extend(str(note) for note in existing_notes if str(note).strip())
-    elif isinstance(existing_notes, str) and existing_notes.strip():
-        merged_notes.append(existing_notes.strip())
-    merged_notes.extend(notes)
-    if merged_notes:
-        meta["notes"] = merged_notes
-
-    if "row_count" not in meta:
-        meta["row_count"] = int(len(indexed))
-    if "catalog_counts" not in meta and "catalog" in indexed.columns:
-        meta["catalog_counts"] = indexed["catalog"].value_counts().to_dict()
-
-    meta["validation"] = validation
-    meta["feature_mode_requested"] = mode
-    meta["feature_mode_active"] = CATALOG_MODE_LEGACY
-    meta["filters"] = list_catalog_filters(indexed)
-
-    return indexed, meta
 
 
 def validate_catalog(catalog: pd.DataFrame) -> dict[str, Any]:

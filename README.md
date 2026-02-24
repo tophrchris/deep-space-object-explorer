@@ -12,7 +12,7 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 - Generic Lists page (including `Auto (Recent)` + editable custom lists) with browser-local persistence
 - Equipment page (store/display selections) driven by runtime JSON at `data/equipment/equipment_catalog.json`
 - Settings export/import via JSON for backup or migration to another machine
-- Catalog ingestion module with normalized schema + disk cache + metadata
+- Runtime catalog loading from shipped `data/dso_catalog_cache.parquet`
 - Target detail panel with:
   - Object metadata
   - Current Alt/Az + 16-wind direction
@@ -24,20 +24,12 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 ## Project structure
 
 - `app.py`: Streamlit app entry point
-- `dso_enricher/catalog_ingestion.py`: catalog ingest + normalization + cache metadata
+- `catalog_runtime/catalog_service.py`: runtime catalog load/search helpers
 - `lists/`: list management/search/ui modules
-- `data/dso_catalog_seed.csv`: seed normalized catalog for v0 prototype
+- `data/dso_catalog_cache.parquet`: shipped runtime catalog cache
 - `data/equipment/equipment_catalog.json`: runtime-editable equipment catalog definitions
-- `specs/`: technical specs for catalog cache and Wikipedia enrichment scripts
 - `docs/`: project notes, backlog, and product planning docs
-- `docs/catalog_issue_backlog.md`: draft catalog issues to open later on GitHub
 - `TODO.md`: prioritized build backlog
-
-## Specifications
-
-- [`specs/DSO_CATALOG_CACHE_SPEC.md`](specs/DSO_CATALOG_CACHE_SPEC.md): canonical schema and constraints for `dso_catalog_cache.parquet`
-- [`specs/WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md`](specs/WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md): producer spec for `scripts/build_wikipedia_catalog_enrichment.py`
-- [`specs/APPLY_WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md`](specs/APPLY_WIKIPEDIA_CATALOG_ENRICHMENT_SPEC.md): merge/apply spec for `scripts/apply_wikipedia_catalog_enrichment.py`
 
 ## Local setup
 
@@ -58,18 +50,6 @@ pip install -r requirements.txt
 
 ```bash
 streamlit run app.py
-```
-
-4. Rebuild catalog cache from seed data (optional):
-
-```bash
-python scripts/ingest_catalog.py
-```
-
-5. Clean local generated artifacts (optional):
-
-```bash
-./scripts/clean_local_artifacts.sh
 ```
 
 ## Deploy to Streamlit Community Cloud
@@ -116,8 +96,6 @@ client_kwargs = { scope = "openid profile email https://www.googleapis.com/auth/
 
 - Layout refactor and interaction flow cleanup (`#27`)
 - Location UX/robustness improvements (`#28`, `#17`, `#2`)
-- Additional catalog quality and enrichment follow-ups
-- Catalog issue drafts to file as GitHub issues: [`docs/catalog_issue_backlog.md`](docs/catalog_issue_backlog.md)
 - Next-pass UI/UX polish after core behavior stabilizes
 - main planning workflow ideas:
   - start with "Tonight at a glance"
@@ -139,7 +117,5 @@ client_kwargs = { scope = "openid profile email https://www.googleapis.com/auth/
 - seestarS 30 has 4.3x2.4
 ## Notes
 
-- Catalog ingest loads full OpenNGC data and augments it with SIMBAD (`NAME` objects are retained, with unmatched rows kept as `SIMBAD` catalog entries).
-- If live ingest fails, the app falls back to the local seed dataset.
-- Catalog cache is reused by default and refreshed only on demand (sidebar `Refresh catalog cache` or `python scripts/ingest_catalog.py`).
+- The app expects a shipped catalog parquet at `data/dso_catalog_cache.parquet`.
 - Weather and image lookups fail gracefully without breaking plots.
