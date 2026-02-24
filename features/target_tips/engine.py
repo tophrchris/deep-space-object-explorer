@@ -8,7 +8,7 @@ from typing import Any, Callable, TypedDict
 import numpy as np
 import pandas as pd
 
-from weather_service import (
+from runtime.weather_service import (
     format_precipitation,
     format_snowfall,
     format_temperature,

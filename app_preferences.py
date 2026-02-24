@@ -17,7 +17,7 @@ from app_constants import (
     UI_THEME_OPTIONS,
     WIND16,
 )
-from lists.list_subsystem import (
+from features.lists.list_subsystem import (
     AUTO_RECENT_LIST_ID,
     default_list_meta,
     default_list_order,

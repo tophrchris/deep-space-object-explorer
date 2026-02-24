@@ -23,9 +23,19 @@ A responsive Streamlit prototype for exploring deep sky objects across Messier, 
 
 ## Project structure
 
-- `app.py`: Streamlit app entry point
+- `app.py`: thin Streamlit entry point (delegates to `ui/streamlit_app.py`)
+- `ui/streamlit_app.py`: current Streamlit UI composition and page/render logic (monolith being refactored)
+- `ui/streamlit_modal_compat.py`: local fallback modal compatibility shim
 - `catalog_runtime/catalog_service.py`: runtime catalog load/search helpers
-- `lists/`: list management/search/ui modules
+- `features/lists/`: list management/search/ui feature modules
+- `features/equipment/`: equipment catalog parsing + Equipment page UI
+- `features/explorer/`: Explorer page/detail/recommendations/plots/summary modules (using transitional bridges during split)
+- `features/sites/`: Observation Sites page UI (feature page extraction)
+- `features/settings/`: Settings page UI (feature page extraction)
+- `features/condition_tips/`: condition tip feature logic + UI
+- `features/target_tips/`: target tip feature logic + UI
+- `runtime/weather_service.py`: forecast fetch/format runtime service
+- `runtime/google_drive_sync.py`: Google Drive settings sync runtime service
 - `data/dso_catalog_cache.parquet`: shipped runtime catalog cache
 - `data/equipment/equipment_catalog.json`: runtime-editable equipment catalog definitions
 - `docs/`: project notes, backlog, and product planning docs
