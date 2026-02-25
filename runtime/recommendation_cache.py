@@ -50,6 +50,10 @@ def _load_catalog_recommendation_features_cached(
         ),
         axis=1,
     )
+    if "magnitude" in features.columns:
+        features["magnitude_numeric"] = pd.to_numeric(features["magnitude"], errors="coerce")
+    else:
+        features["magnitude_numeric"] = np.nan
     features["target_name"] = np.where(
         features["common_name"] != "",
         features["primary_id"] + " - " + features["common_name"],
@@ -201,4 +205,3 @@ def load_site_date_altaz_bundle(
         pd.Timestamp(window_end).isoformat(),
         int(sample_minutes),
     )
-

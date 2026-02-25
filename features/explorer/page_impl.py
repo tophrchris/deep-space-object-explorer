@@ -121,10 +121,11 @@ def _render_explorer_page_impl(
             hourly_container = st.container()
             conditions_container = st.container()
         else:
-            top_cols = st.columns([3, 4, 3], gap="medium")
-            five_day_container = top_cols[0]
-            hourly_container = top_cols[1]
-            conditions_container = top_cols[2]
+            left_col, right_col = st.columns([3, 7], gap="medium")
+            five_day_container = left_col
+            with right_col:
+                hourly_container = st.container()
+                conditions_container = st.container()
 
         with five_day_container:
             st.markdown("5-night astronomy forecast.")
@@ -145,15 +146,50 @@ def _render_explorer_page_impl(
             weather_display = weather_matrix.reset_index().rename(columns={"index": "Element"})
             weather_tooltip_display = weather_tooltips.reset_index().rename(columns={"index": "Element"})
             weather_indicator_display = weather_indicators.reset_index().rename(columns={"index": "Element"})
-            render_hourly_weather_matrix(
+            st.caption("Click an hour column header to search Recommended Targets for that hour.")
+
+            hourly_header_to_hour_key: dict[str, str] = {}
+            for hourly_row in hourly_weather_rows:
+                time_iso = str(hourly_row.get("time_iso", "")).strip()
+                if not time_iso:
+                    continue
+                try:
+                    timestamp = pd.Timestamp(time_iso)
+                except Exception:
+                    continue
+                header_label = format_hour_label(timestamp, use_12_hour=use_12_hour)
+                header_hour_key = normalize_hour_key(timestamp)
+                if header_label and header_hour_key and header_label not in hourly_header_to_hour_key:
+                    hourly_header_to_hour_key[header_label] = header_hour_key
+
+            clicked_hour_column_label = render_hourly_weather_matrix(
                 weather_display,
                 temperature_unit=temperature_unit,
                 tooltip_frame=weather_tooltip_display,
                 indicator_frame=weather_indicator_display,
             )
+            clicked_hour_key = (
+                hourly_header_to_hour_key.get(str(clicked_hour_column_label).strip(), "")
+                if clicked_hour_column_label is not None
+                else ""
+            )
+            if clicked_hour_key:
+                click_token = f"{weather_forecast_day_offset}:{clicked_hour_key}"
+                if str(st.session_state.get("hourly_weather_selected_hour_click_token", "")).strip() != click_token:
+                    st.session_state["hourly_weather_selected_hour_click_token"] = click_token
+                    st.session_state["recommended_targets_pending_hour_key"] = clicked_hour_key
 
         with conditions_container:
             with st.container(border=True):
+                selected_sunset = str((selected_summary_row or {}).get("Sunset", "")).strip()
+                selected_sunrise = str((selected_summary_row or {}).get("Sunrise", "")).strip()
+                prepended_muted_condition_lines: list[str] = []
+                if selected_sunset or selected_sunrise:
+                    sunset_text = selected_sunset or "--"
+                    sunrise_text = selected_sunrise or "--"
+                    prepended_muted_condition_lines.append(
+                        f"Sunset/Sunrise (local): {sunset_text} / {sunrise_text}"
+                    )
                 render_condition_tips_panel(
                     title=condition_tips_title,
                     title_tooltip=condition_tips_tooltip,
@@ -163,19 +199,17 @@ def _render_explorer_page_impl(
                     summary_row=selected_summary_row,
                     temperature_unit=temperature_unit,
                     use_12_hour=use_12_hour,
+                    prepended_muted_lines=prepended_muted_condition_lines,
                 )
 
     selected_row = resolve_selected_row(catalog)
-    active_preview_list_ids = get_list_ids(prefs, get_active_preview_list_id(prefs))
-    if selected_row is not None or bool(active_preview_list_ids):
-        render_detail_panel(
-            selected=selected_row,
-            catalog=catalog,
-            prefs=prefs,
-            temperature_unit=temperature_unit,
-            use_12_hour=use_12_hour,
-            detail_stack_vertical=detail_stack_vertical,
-            weather_forecast_day_offset=weather_forecast_day_offset,
-        )
+    render_detail_panel(
+        selected=selected_row,
+        catalog=catalog,
+        prefs=prefs,
+        temperature_unit=temperature_unit,
+        use_12_hour=use_12_hour,
+        detail_stack_vertical=detail_stack_vertical,
+        weather_forecast_day_offset=weather_forecast_day_offset,
+    )
     st.markdown(refresh_status_html, unsafe_allow_html=True)
-

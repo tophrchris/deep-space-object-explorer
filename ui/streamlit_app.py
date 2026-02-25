@@ -1454,7 +1454,7 @@ def format_apparent_size_display(major_arcmin: Any, minor_arcmin: Any) -> str:
         return numeric
 
     def _fmt(value: float) -> str:
-        return f"{value:.6g}"
+        return f"{value:.2f}".rstrip("0").rstrip(".")
 
     major_value = _coerce(major_arcmin)
     minor_value = _coerce(minor_arcmin)

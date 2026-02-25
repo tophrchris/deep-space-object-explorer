@@ -53,6 +53,7 @@ def render_condition_tips_panel(
     summary_row: dict[str, Any] | None,
     temperature_unit: str,
     use_12_hour: bool,
+    prepended_muted_lines: list[str] | None = None,
 ) -> None:
     rendered_title = html.escape(str(title or "").strip() or "Conditions")
     tooltip_text = str(title_tooltip or "").strip()
@@ -82,6 +83,9 @@ def render_condition_tips_panel(
         return
 
     opportunity_lines, warning_lines, bullet_lines, muted_lines = split_condition_tip_lines(tips)
+    if prepended_muted_lines:
+        prefixed_muted_lines = [str(line).strip() for line in prepended_muted_lines if str(line).strip()]
+        muted_lines = [*prefixed_muted_lines, *muted_lines]
     for opportunity_line in opportunity_lines:
         st.markdown(
             (

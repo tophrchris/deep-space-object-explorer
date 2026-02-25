@@ -167,6 +167,34 @@ def render_target_recommendations(
             return None
         return float(numeric)
 
+    def _safe_finite_float(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric):
+            return None
+        return float(numeric)
+
+    def _format_threshold_text(value: float) -> str:
+        return f"{float(value):.1f}".rstrip("0").rstrip(".")
+
+    def _recommended_min_brightness_magnitude(telescope: dict[str, Any] | None) -> float:
+        if not isinstance(telescope, dict):
+            return 10.5
+        fov_maj = _safe_positive_float(telescope.get("fov_maj_deg"))
+        fov_min = _safe_positive_float(telescope.get("fov_min_deg"))
+        if fov_maj is None or fov_min is None:
+            return 10.5
+        fov_area = float(fov_maj * fov_min)
+        if fov_area <= 1.0:
+            return 12.5
+        if fov_area <= 2.5:
+            return 11.5
+        if fov_area <= 5.0:
+            return 10.5
+        return 9.5
+
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
@@ -261,6 +289,10 @@ def render_target_recommendations(
     include_mount_key = "recommended_targets_include_mount_adaptation"
     min_size_enabled_key = "recommended_targets_min_size_enabled"
     min_size_value_key = "recommended_targets_min_size_pct"
+    min_brightness_enabled_key = "recommended_targets_min_brightness_enabled"
+    min_brightness_value_key = "recommended_targets_min_brightness_value"
+    min_brightness_default_telescope_key = "recommended_targets_min_brightness_default_telescope_id"
+    min_brightness_last_recommended_key = "recommended_targets_min_brightness_last_recommended"
     page_size_key = "recommended_targets_page_size"
     page_number_key = "recommended_targets_page_number"
     sort_field_key = "recommended_targets_sort_field"
@@ -270,6 +302,7 @@ def render_target_recommendations(
     selection_token_key = "recommended_targets_selection_token"
     query_cache_key = "recommended_targets_query_cache"
     table_instance_key = "recommended_targets_table_instance"
+    pending_hour_key_state_key = "recommended_targets_pending_hour_key"
 
     if visible_hour_key not in st.session_state:
         st.session_state[visible_hour_key] = [best_visible_hour_option] if best_visible_hour_option else []
@@ -310,6 +343,10 @@ def render_target_recommendations(
         st.session_state[min_size_enabled_key] = False
     if min_size_value_key not in st.session_state:
         st.session_state[min_size_value_key] = 0
+    if min_brightness_enabled_key not in st.session_state:
+        st.session_state[min_brightness_enabled_key] = False
+    if not isinstance(st.session_state.get(min_brightness_value_key), str):
+        st.session_state[min_brightness_value_key] = ""
     if page_size_key not in st.session_state:
         st.session_state[page_size_key] = 100
     elif int(st.session_state.get(page_size_key, 100)) not in {10, 100, 200}:
@@ -320,6 +357,47 @@ def render_target_recommendations(
         st.session_state[table_instance_key] = 0
     if str(st.session_state.get(sort_direction_key, "Descending")).strip() not in {"Descending", "Ascending"}:
         st.session_state[sort_direction_key] = "Descending"
+
+    pending_hour_key = str(st.session_state.pop(pending_hour_key_state_key, "")).strip()
+    if pending_hour_key:
+        matching_hour_options = [
+            hour_option
+            for hour_option, hour_key in hour_option_to_key.items()
+            if str(hour_key or "").strip() == pending_hour_key
+        ]
+        if matching_hour_options:
+            st.session_state[visible_hour_key] = [matching_hour_options[0]]
+            st.session_state[page_number_key] = 1
+            st.session_state[selection_token_key] = ""
+            st.session_state["selected_id"] = ""
+            st.session_state.pop(TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY, None)
+            st.session_state[table_instance_key] = int(st.session_state.get(table_instance_key, 0)) + 1
+
+    active_telescope_default_marker = (
+        str((active_telescope or {}).get("id", "")).strip()
+        if isinstance(active_telescope, dict)
+        else "__none__"
+    )
+    recommended_min_brightness_default = _recommended_min_brightness_magnitude(
+        active_telescope if isinstance(active_telescope, dict) else None
+    )
+    recommended_min_brightness_text = _format_threshold_text(recommended_min_brightness_default)
+    previous_default_telescope_marker = str(
+        st.session_state.get(min_brightness_default_telescope_key, "")
+    ).strip()
+    previous_recommended_text = str(
+        st.session_state.get(min_brightness_last_recommended_key, "")
+    ).strip()
+    current_min_brightness_text = str(st.session_state.get(min_brightness_value_key, "")).strip()
+    if not current_min_brightness_text:
+        st.session_state[min_brightness_value_key] = recommended_min_brightness_text
+    elif (
+        previous_default_telescope_marker != active_telescope_default_marker
+        and current_min_brightness_text == previous_recommended_text
+    ):
+        st.session_state[min_brightness_value_key] = recommended_min_brightness_text
+    st.session_state[min_brightness_default_telescope_key] = active_telescope_default_marker
+    st.session_state[min_brightness_last_recommended_key] = recommended_min_brightness_text
 
     criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 3, 3], gap="small")
     search_notes_placeholder: Any | None = None
@@ -373,6 +451,8 @@ def render_target_recommendations(
     include_mount_adaptation = False
     use_minimum_size = False
     minimum_size_pct: float | None = None
+    use_minimum_brightness = False
+    minimum_brightness_mag: float | None = None
     telescope_fov_maj: float | None = None
     telescope_fov_min: float | None = None
     telescope_fov_area: float | None = None
@@ -454,6 +534,31 @@ def render_target_recommendations(
         else:
             st.caption("Minimum Size filter requires a selected telescope with FOV dimensions.")
 
+        use_minimum_brightness = st.checkbox(
+            "Enable Minimum Brightness",
+            key=min_brightness_enabled_key,
+            help=(
+                "Uses catalog magnitude (lower number = brighter). "
+                "Targets with unknown magnitude are excluded when enabled."
+            ),
+        )
+        min_brightness_value_text = st.text_input(
+            "Minimum Brightness",
+            key=min_brightness_value_key,
+            disabled=(not use_minimum_brightness),
+            help=f"Recommended for the active telescope: magnitude ≤ {recommended_min_brightness_text}",
+        )
+        st.caption(
+            f"Recommended default for current telescope: magnitude ≤ {recommended_min_brightness_text} "
+            "(lower magnitude = brighter)."
+        )
+        if use_minimum_brightness:
+            parsed_min_brightness = _safe_finite_float(min_brightness_value_text)
+            if parsed_min_brightness is None:
+                st.warning("Enter a valid magnitude value for Minimum Brightness (for example: 10.5).")
+            else:
+                minimum_brightness_mag = float(parsed_min_brightness)
+
     mount_mode = active_mount_choice if include_mount_adaptation else "none"
     selected_filter_item = active_filter if (include_filter_criteria and isinstance(active_filter, dict)) else None
     selected_filter_bands = _parse_emission_band_set(selected_filter_item.get("emission_bands", [])) if selected_filter_item else set()
@@ -466,6 +571,15 @@ def render_target_recommendations(
                 st.caption(f"Camera filter applied: {filter_name} (hard-filter: any emission-band overlap required).")
             elif include_filter_criteria and active_filter_id == "__none__":
                 st.caption("Filter criteria enabled, but Camera Filter is set to None.")
+            if use_minimum_brightness and minimum_brightness_mag is not None:
+                st.caption(
+                    "Minimum Brightness applied: "
+                    f"catalog magnitude <= {minimum_brightness_mag:.1f} "
+                    "(targets with unknown magnitude are excluded)."
+                )
+
+    has_selected_hour_window = bool(selected_visible_hours)
+    altitude_sort_label = "Max Alt in Window" if has_selected_hour_window else "Altitude at Peak"
 
     sort_options: list[tuple[str, str]] = [
         ("ranking", "Recommended"),
@@ -475,7 +589,7 @@ def render_target_recommendations(
         ("emissions", "Emissions"),
         ("apparent_size_sort_arcmin", "Apparent size"),
         ("peak_time_local", "Peak"),
-        ("peak_altitude", "Altitude at Peak"),
+        ("peak_altitude", altitude_sort_label),
         ("peak_direction", "Direction"),
     ]
     if selected_telescope is not None:
@@ -548,6 +662,8 @@ def render_target_recommendations(
             "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
             "min_size_enabled": bool(use_minimum_size),
             "min_size_pct": minimum_size_pct if minimum_size_pct is not None else "",
+            "min_brightness_enabled": bool(use_minimum_brightness),
+            "min_brightness_mag": minimum_brightness_mag if minimum_brightness_mag is not None else "",
             "telescope_fov_filter_min_pct": recommendation_min_framing_pct,
             "telescope_fov_filter_max_pct": recommendation_max_framing_pct,
             "catalog_mtime_ns": int(catalog_fingerprint[0]),
@@ -596,6 +712,7 @@ def render_target_recommendations(
         }
         if selected_telescope is not None:
             required_cached_columns.add("framing_percent")
+            required_cached_columns.add("framing_constraint_status")
         if sort_field != "ranking":
             required_cached_columns.add(str(sort_field))
         if cached_status == "ok" and (
@@ -610,6 +727,8 @@ def render_target_recommendations(
     recommended = pd.DataFrame()
     total_results_uncapped = 0
     empty_query_message: str | None = None
+    size_framing_fallback_active = False
+    size_framing_fallback_message: str | None = None
 
     if isinstance(query_cache_payload, dict):
         trace_cache_event(f"Session recommendation query cache hit ({criteria_signature[:12]}...)")
@@ -621,6 +740,9 @@ def render_target_recommendations(
             if isinstance(cached_recommended, pd.DataFrame):
                 recommended = cached_recommended.copy()
             total_results_uncapped = int(query_cache_payload.get("total_results_uncapped", len(recommended)))
+            size_framing_fallback_active = bool(query_cache_payload.get("size_framing_fallback_active", False))
+            fallback_message_raw = str(query_cache_payload.get("size_framing_fallback_message", "")).strip()
+            size_framing_fallback_message = fallback_message_raw or None
         update_query_progress(100, "Searching recommendations: ready (session cache).")
         clear_query_progress()
     else:
@@ -694,8 +816,29 @@ def render_target_recommendations(
                 working_catalog["object_type_group_norm"].isin(effective_group_set)
             ]
 
+        if minimum_brightness_mag is not None:
+            if "magnitude_numeric" not in working_catalog.columns:
+                working_catalog = working_catalog.copy()
+                if "magnitude" in working_catalog.columns:
+                    working_catalog["magnitude_numeric"] = pd.to_numeric(working_catalog["magnitude"], errors="coerce")
+                else:
+                    working_catalog["magnitude_numeric"] = np.nan
+            working_catalog = working_catalog[
+                working_catalog["magnitude_numeric"].apply(
+                    lambda value: (
+                        value is not None
+                        and not pd.isna(value)
+                        and np.isfinite(float(value))
+                        and float(value) <= float(minimum_brightness_mag)
+                    )
+                )
+            ]
+
         if working_catalog.empty:
-            empty_query_message = "No targets match the current criteria."
+            if minimum_brightness_mag is not None:
+                empty_query_message = "No targets match the current Minimum Brightness threshold."
+            else:
+                empty_query_message = "No targets match the current criteria."
         else:
             update_query_progress(28, "Searching recommendations: preparing coordinate candidates...")
             primary_id_to_col_raw = altaz_bundle.get("primary_id_to_col", {})
@@ -794,6 +937,7 @@ def render_target_recommendations(
                     peak_altitude_all = np.asarray(altaz_bundle.get("peak_altitude", np.empty((0,))), dtype=float)
                     peak_time_local_all = np.asarray(altaz_bundle.get("peak_time_local_iso", ()), dtype=object)
                     peak_direction_all = np.asarray(altaz_bundle.get("peak_direction", ()), dtype=object)
+                    sample_times_local = np.asarray(altaz_bundle.get("sample_times_local_iso", ()), dtype=object)
                     max_col_index = int(candidate_col_indices.max()) if candidate_col_indices.size else -1
                     if (
                         peak_altitude_all.ndim == 1
@@ -807,7 +951,6 @@ def render_target_recommendations(
                     else:
                         peak_idx_by_target = np.argmax(altitude_matrix, axis=0)
                         peak_altitude = altitude_matrix[peak_idx_by_target, np.arange(len(candidate_col_indices))]
-                        sample_times_local = np.asarray(altaz_bundle.get("sample_times_local_iso", ()), dtype=object)
                         peak_time_local = np.array(
                             [sample_times_local[int(index)] for index in peak_idx_by_target],
                             dtype=object,
@@ -819,6 +962,38 @@ def render_target_recommendations(
                             ],
                             dtype=object,
                         )
+
+                    display_peak_altitude = np.asarray(peak_altitude, dtype=float)
+                    display_peak_time_local = np.asarray(peak_time_local, dtype=object)
+                    display_peak_direction = np.asarray(peak_direction, dtype=object)
+                    if selected_visible_hour_keys and bool(np.any(selected_hours_mask)):
+                        selected_time_indices = np.where(selected_hours_mask)[0].astype(int)
+                        if selected_time_indices.size > 0:
+                            window_altitude_matrix = altitude_matrix[selected_time_indices, :]
+                            window_wind_index_matrix = wind_index_matrix[selected_time_indices, :]
+                            if (
+                                window_altitude_matrix.ndim == 2
+                                and window_altitude_matrix.shape[0] > 0
+                                and window_altitude_matrix.shape[1] == len(candidate_col_indices)
+                            ):
+                                window_peak_idx = np.argmax(window_altitude_matrix, axis=0)
+                                display_peak_altitude = window_altitude_matrix[
+                                    window_peak_idx,
+                                    np.arange(len(candidate_col_indices)),
+                                ]
+                                if sample_times_local.size > int(selected_time_indices.max()):
+                                    window_sample_times_local = sample_times_local[selected_time_indices]
+                                    display_peak_time_local = np.array(
+                                        [window_sample_times_local[int(index)] for index in window_peak_idx],
+                                        dtype=object,
+                                    )
+                                display_peak_direction = np.array(
+                                    [
+                                        WIND16[int(window_wind_index_matrix[int(index), target_idx])]
+                                        for target_idx, index in enumerate(window_peak_idx)
+                                    ],
+                                    dtype=object,
+                                )
 
                     emission_token_values = candidates.get("emission_band_tokens")
                     if emission_token_values is None:
@@ -905,9 +1080,9 @@ def render_target_recommendations(
                         recommended["selected_visible_minutes"] = selected_visible_minutes[eligible_indices]
                         recommended["filter_match_tier"] = filter_match_tier[eligible_indices]
                         recommended["visibility_reason"] = visibility_reason[eligible_indices]
-                        recommended["peak_altitude"] = np.round(peak_altitude[eligible_indices], 1)
-                        recommended["peak_time_local"] = peak_time_local[eligible_indices]
-                        recommended["peak_direction"] = peak_direction[eligible_indices]
+                        recommended["peak_altitude"] = np.round(display_peak_altitude[eligible_indices], 1)
+                        recommended["peak_time_local"] = display_peak_time_local[eligible_indices]
+                        recommended["peak_direction"] = display_peak_direction[eligible_indices]
                         recommended["object_type"] = recommended["object_type"].fillna("").astype(str).str.strip()
                         recommended["object_type_group"] = recommended["object_type_group"].map(normalize_object_type_group)
                         recommended["emissions"] = recommended["emission_lines"].apply(format_emissions_display)
@@ -951,6 +1126,7 @@ def render_target_recommendations(
                         ).astype(int)
 
                         recommended["framing_percent"] = np.nan
+                        recommended["framing_constraint_status"] = ""
                         if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
                             target_maj_deg = pd.to_numeric(recommended["ang_size_maj_arcmin"], errors="coerce") / 60.0
                             target_min_deg = pd.to_numeric(recommended["ang_size_min_arcmin"], errors="coerce") / 60.0
@@ -961,26 +1137,62 @@ def render_target_recommendations(
                             target_area_deg2 = target_maj_deg * target_min_deg
                             framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
                             recommended["framing_percent"] = framing_percent
+                            effective_min_framing_pct = max(
+                                float(recommendation_min_framing_pct),
+                                float(minimum_size_pct) if minimum_size_pct is not None else float(recommendation_min_framing_pct),
+                            )
 
-                            # Keep telescope-aware recommendations within a practical framing range.
-                            recommended = recommended[
-                                recommended["framing_percent"].apply(
-                                    lambda value: (
-                                        value is not None
-                                        and not pd.isna(value)
-                                        and np.isfinite(float(value))
-                                        and float(recommendation_min_framing_pct) <= float(value) <= float(recommendation_max_framing_pct)
-                                    )
+                            def _framing_constraint_status(value: Any) -> str:
+                                if value is None or pd.isna(value):
+                                    return "Unknown"
+                                try:
+                                    numeric = float(value)
+                                except (TypeError, ValueError):
+                                    return "Unknown"
+                                if not np.isfinite(numeric):
+                                    return "Unknown"
+                                if numeric < effective_min_framing_pct:
+                                    return "Too small"
+                                if numeric > float(recommendation_max_framing_pct):
+                                    return "Too large"
+                                return "OK"
+
+                            recommended["framing_constraint_status"] = recommended["framing_percent"].apply(
+                                _framing_constraint_status
+                            )
+                            recommended_before_size_filters = recommended.copy()
+
+                            practical_framing_mask = recommended["framing_percent"].apply(
+                                lambda value: (
+                                    value is not None
+                                    and not pd.isna(value)
+                                    and np.isfinite(float(value))
+                                    and float(recommendation_min_framing_pct) <= float(value) <= float(recommendation_max_framing_pct)
                                 )
-                            ]
+                            )
+                            size_filtered_recommended = recommended[practical_framing_mask].copy()
 
                             if minimum_size_pct is not None:
-                                recommended = recommended[
-                                    recommended["framing_percent"].apply(
-                                        lambda value: value is not None and not pd.isna(value) and np.isfinite(float(value))
-                                        and float(value) >= float(minimum_size_pct)
+                                size_filtered_recommended = size_filtered_recommended[
+                                    size_filtered_recommended["framing_percent"].apply(
+                                        lambda value: (
+                                            value is not None
+                                            and not pd.isna(value)
+                                            and np.isfinite(float(value))
+                                            and float(value) >= float(minimum_size_pct)
+                                        )
                                     )
-                                ]
+                                ].copy()
+
+                            if size_filtered_recommended.empty and not recommended_before_size_filters.empty:
+                                recommended = recommended_before_size_filters
+                                size_framing_fallback_active = True
+                                size_framing_fallback_message = (
+                                    "No targets met the current telescope size/framing constraints. "
+                                    "Showing matches anyway and highlighting Framing values that fall outside the limits."
+                                )
+                            else:
+                                recommended = size_filtered_recommended
 
                         if recommended.empty:
                             empty_query_message = "No targets remain after applying size/framing criteria."
@@ -1031,6 +1243,8 @@ def render_target_recommendations(
                 "status": "ok",
                 "recommended": recommended.copy(),
                 "total_results_uncapped": int(total_results_uncapped),
+                "size_framing_fallback_active": bool(size_framing_fallback_active),
+                "size_framing_fallback_message": size_framing_fallback_message or "",
             }
         while len(query_cache_store) > RECOMMENDATION_QUERY_SESSION_CACHE_LIMIT:
             oldest_signature = next(iter(query_cache_store))
@@ -1076,6 +1290,15 @@ def render_target_recommendations(
     results_meta_col, query_meta_col = st.columns([4, 2], gap="small")
     results_meta_col.caption(f"{total_results} targets | page {page_number}/{total_pages}")
     query_meta_col.caption(f"Query time: {query_elapsed_label}")
+    if size_framing_fallback_active:
+        st.info(
+            size_framing_fallback_message
+            or (
+                "No targets met the current telescope size/framing constraints. "
+                "Showing matches anyway and highlighting out-of-range Framing values."
+            )
+        )
+        st.caption("Framing highlight legend: red = too small, amber = too large, gray = unknown size.")
 
     start_index = (page_number - 1) * int(page_size)
     end_index = min(total_results, start_index + int(page_size))
@@ -1086,10 +1309,26 @@ def render_target_recommendations(
         if value is not None and not pd.isna(value)
         else "--"
     )
-    page_frame["Altitude at Peak"] = page_frame["peak_altitude"].apply(
+    altitude_display_column_label = "Max Alt in Window" if has_selected_hour_window else "Altitude at Peak"
+    page_frame[altitude_display_column_label] = page_frame["peak_altitude"].apply(
         lambda value: f"{float(value):.1f} deg" if value is not None and not pd.isna(value) else "--"
     )
     page_frame["Direction"] = page_frame["peak_direction"].fillna("--").astype(str)
+    magnitude_source_column = (
+        "magnitude_numeric"
+        if "magnitude_numeric" in page_frame.columns
+        else ("magnitude" if "magnitude" in page_frame.columns else "")
+    )
+    if magnitude_source_column:
+        page_frame["magnitude_display"] = page_frame[magnitude_source_column].apply(
+            lambda value: (
+                f"{float(value):.1f}"
+                if value is not None and not pd.isna(value) and np.isfinite(float(value))
+                else "--"
+            )
+        )
+    else:
+        page_frame["magnitude_display"] = "--"
 
     def _thumbnail_numeric(value: Any) -> float | None:
         try:
@@ -1157,18 +1396,20 @@ def render_target_recommendations(
         "target_name",
         "visibility_duration",
         "object_type",
+        "magnitude_display",
         "emissions",
         "apparent_size",
     ]
     if selected_telescope is not None:
         display_columns.append("framing_percent")
-    display_columns.extend(["Peak", "Altitude at Peak", "Direction"])
+    display_columns.extend(["Peak", altitude_display_column_label, "Direction"])
 
     rename_columns = {
         "thumbnail_url": "Thumbnail",
         "target_name": "Target Name",
         "visibility_duration": "Duration of visibility",
         "object_type": "Object Type",
+        "magnitude_display": "Magnitude",
         "emissions": "Emissions",
         "apparent_size": "Apparent size",
         "framing_percent": "Framing",
@@ -1184,10 +1425,11 @@ def render_target_recommendations(
         "Target Name": st.column_config.TextColumn(width="large", pinned=True),
         "Duration of visibility": st.column_config.TextColumn(width="small"),
         "Object Type": st.column_config.TextColumn(width="small"),
+        "Magnitude": st.column_config.TextColumn(width="small"),
         "Emissions": st.column_config.TextColumn(width="small"),
         "Apparent size": st.column_config.TextColumn(width="small"),
         "Peak": st.column_config.TextColumn(width="small"),
-        "Altitude at Peak": st.column_config.TextColumn(width="small"),
+        altitude_display_column_label: st.column_config.TextColumn(width="small"),
         "Direction": st.column_config.TextColumn(width="small"),
     }
     if "Framing" in display_table.columns:
@@ -1201,6 +1443,31 @@ def render_target_recommendations(
             "padding-left": "0px !important",
         },
     )
+    if "Framing" in display_table.columns and "framing_constraint_status" in page_frame.columns:
+        def _style_framing_cells(series: pd.Series) -> list[str]:
+            styles: list[str] = []
+            for row_idx in series.index:
+                status = str(page_frame.at[int(row_idx), "framing_constraint_status"]).strip().lower()
+                if not size_framing_fallback_active:
+                    styles.append("")
+                    continue
+                if status == "too small":
+                    styles.append(
+                        "background-color: rgba(220, 38, 38, 0.16); color: #991b1b; font-weight: 700;"
+                    )
+                elif status == "too large":
+                    styles.append(
+                        "background-color: rgba(245, 158, 11, 0.18); color: #92400e; font-weight: 700;"
+                    )
+                elif status == "unknown":
+                    styles.append(
+                        "background-color: rgba(100, 116, 139, 0.14); color: #475569;"
+                    )
+                else:
+                    styles.append("")
+            return styles
+
+        recommendation_styler = recommendation_styler.apply(_style_framing_cells, subset=["Framing"])
 
     st.markdown(
         """
@@ -1280,4 +1547,3 @@ def render_target_recommendations(
         st.session_state["selected_id"] = selected_primary_id
         st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
         st.rerun()
-
