@@ -1314,6 +1314,21 @@ def render_target_recommendations(
         lambda value: f"{float(value):.1f} deg" if value is not None and not pd.isna(value) else "--"
     )
     page_frame["Direction"] = page_frame["peak_direction"].fillna("--").astype(str)
+    magnitude_source_column = (
+        "magnitude_numeric"
+        if "magnitude_numeric" in page_frame.columns
+        else ("magnitude" if "magnitude" in page_frame.columns else "")
+    )
+    if magnitude_source_column:
+        page_frame["magnitude_display"] = page_frame[magnitude_source_column].apply(
+            lambda value: (
+                f"{float(value):.1f}"
+                if value is not None and not pd.isna(value) and np.isfinite(float(value))
+                else "--"
+            )
+        )
+    else:
+        page_frame["magnitude_display"] = "--"
 
     def _thumbnail_numeric(value: Any) -> float | None:
         try:
@@ -1381,6 +1396,7 @@ def render_target_recommendations(
         "target_name",
         "visibility_duration",
         "object_type",
+        "magnitude_display",
         "emissions",
         "apparent_size",
     ]
@@ -1393,6 +1409,7 @@ def render_target_recommendations(
         "target_name": "Target Name",
         "visibility_duration": "Duration of visibility",
         "object_type": "Object Type",
+        "magnitude_display": "Magnitude",
         "emissions": "Emissions",
         "apparent_size": "Apparent size",
         "framing_percent": "Framing",
@@ -1408,6 +1425,7 @@ def render_target_recommendations(
         "Target Name": st.column_config.TextColumn(width="large", pinned=True),
         "Duration of visibility": st.column_config.TextColumn(width="small"),
         "Object Type": st.column_config.TextColumn(width="small"),
+        "Magnitude": st.column_config.TextColumn(width="small"),
         "Emissions": st.column_config.TextColumn(width="small"),
         "Apparent size": st.column_config.TextColumn(width="small"),
         "Peak": st.column_config.TextColumn(width="small"),
