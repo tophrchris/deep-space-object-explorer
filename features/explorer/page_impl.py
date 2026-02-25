@@ -183,10 +183,11 @@ def _render_explorer_page_impl(
             with st.container(border=True):
                 selected_sunset = str((selected_summary_row or {}).get("Sunset", "")).strip()
                 selected_sunrise = str((selected_summary_row or {}).get("Sunrise", "")).strip()
+                prepended_muted_condition_lines: list[str] = []
                 if selected_sunset or selected_sunrise:
                     sunset_text = selected_sunset or "--"
                     sunrise_text = selected_sunrise or "--"
-                    st.caption(
+                    prepended_muted_condition_lines.append(
                         f"Sunset/Sunrise (local): {sunset_text} / {sunrise_text}"
                     )
                 render_condition_tips_panel(
@@ -198,6 +199,7 @@ def _render_explorer_page_impl(
                     summary_row=selected_summary_row,
                     temperature_unit=temperature_unit,
                     use_12_hour=use_12_hour,
+                    prepended_muted_lines=prepended_muted_condition_lines,
                 )
 
     selected_row = resolve_selected_row(catalog)
