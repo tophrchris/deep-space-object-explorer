@@ -1,17 +1,106 @@
 from __future__ import annotations
 
-# Transitional bridge during Explorer split: this module still relies on shared
-# helpers/constants from `ui.streamlit_app` until they are extracted.
-from ui import streamlit_app as _legacy_ui
+import html
+import re
+from datetime import datetime
+from functools import lru_cache
+from typing import Any
 
-def _refresh_legacy_globals() -> None:
-    for _name, _value in vars(_legacy_ui).items():
-        if _name == "__builtins__":
-            continue
-        globals().setdefault(_name, _value)
+import astropy.units as u
+import numpy as np
+import pandas as pd
+import streamlit as st
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+from astropy.time import Time
+
+from app_constants import WIND16
+from app_theme import apply_dataframe_styler_theme
+from features.explorer.night_rating import compute_night_rating_details
+from runtime.weather_service import (
+    EXTENDED_FORECAST_HOURLY_FIELDS,
+    fetch_hourly_weather,
+    format_precipitation,
+    format_snowfall,
+    format_temperature,
+    format_wind_speed,
+)
 
 
-_refresh_legacy_globals()
+@lru_cache(maxsize=None)
+def _ui_name(name: str) -> Any:
+    # Lazily resolve remaining UI-owned helpers/constants to avoid circular import
+    # failures while the Streamlit monolith is still being decomposed.
+    from ui import streamlit_app as ui_app
+
+    return getattr(ui_app, name)
+
+
+def _ideal_text_color_for_hex(*args: Any, **kwargs: Any):
+    return _ui_name("_ideal_text_color_for_hex")(*args, **kwargs)
+
+
+def _interpolate_cloud_cover_color(*args: Any, **kwargs: Any):
+    return _ui_name("_interpolate_cloud_cover_color")(*args, **kwargs)
+
+
+def _interpolate_color_stops(*args: Any, **kwargs: Any):
+    return _ui_name("_interpolate_color_stops")(*args, **kwargs)
+
+
+def _interpolate_temperature_color_f(*args: Any, **kwargs: Any):
+    return _ui_name("_interpolate_temperature_color_f")(*args, **kwargs)
+
+
+def apparent_size_sort_key_arcmin(*args: Any, **kwargs: Any):
+    return _ui_name("apparent_size_sort_key_arcmin")(*args, **kwargs)
+
+
+def astronomical_night_window(*args: Any, **kwargs: Any):
+    return _ui_name("astronomical_night_window")(*args, **kwargs)
+
+
+def format_apparent_size_display(*args: Any, **kwargs: Any):
+    return _ui_name("format_apparent_size_display")(*args, **kwargs)
+
+
+def format_description_preview(*args: Any, **kwargs: Any):
+    return _ui_name("format_description_preview")(*args, **kwargs)
+
+
+def format_display_time(*args: Any, **kwargs: Any):
+    return _ui_name("format_display_time")(*args, **kwargs)
+
+
+def format_emissions_display(*args: Any, **kwargs: Any):
+    return _ui_name("format_emissions_display")(*args, **kwargs)
+
+
+def format_hour_label(*args: Any, **kwargs: Any):
+    return _ui_name("format_hour_label")(*args, **kwargs)
+
+
+def format_weather_forecast_date(*args: Any, **kwargs: Any):
+    return _ui_name("format_weather_forecast_date")(*args, **kwargs)
+
+
+def normalize_object_type_group(*args: Any, **kwargs: Any):
+    return _ui_name("normalize_object_type_group")(*args, **kwargs)
+
+
+def normalize_weather_forecast_day_offset(*args: Any, **kwargs: Any):
+    return _ui_name("normalize_weather_forecast_day_offset")(*args, **kwargs)
+
+
+def object_type_group_color(*args: Any, **kwargs: Any):
+    return _ui_name("object_type_group_color")(*args, **kwargs)
+
+
+def weather_forecast_window(*args: Any, **kwargs: Any):
+    return _ui_name("weather_forecast_window")(*args, **kwargs)
+
+
+def _get_st_mui_table():
+    return _ui_name("st_mui_table")
 
 def cloud_cover_cell_style(raw_value: Any) -> str:
     if raw_value is None or pd.isna(raw_value):
@@ -291,6 +380,7 @@ def build_weather_alert_indicator_html(hour_row: dict[str, Any], temperature_uni
 
 
 def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_unit: str) -> list[str]:
+    weather_alert_rain_priority = tuple(_ui_name("WEATHER_ALERT_RAIN_PRIORITY"))
     seen: set[str] = set()
     for row in rows:
         emoji, _ = resolve_weather_alert_indicator(row, temperature_unit)
@@ -303,7 +393,7 @@ def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_u
     if seen == {"⚠️"}:
         return []
 
-    for candidate in WEATHER_ALERT_RAIN_PRIORITY:
+    for candidate in weather_alert_rain_priority:
         if candidate in seen:
             return [candidate]
     return []
@@ -376,7 +466,6 @@ def compute_hourly_target_recommendations(
     exclude_ids: set[str] | None = None,
     max_results: int = 5,
 ) -> pd.DataFrame:
-    _refresh_legacy_globals()
     if catalog.empty:
         return pd.DataFrame()
 
@@ -553,7 +642,7 @@ def build_hourly_weather_matrix(
     use_12_hour: bool,
     temperature_unit: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    _refresh_legacy_globals()
+    weather_matrix_rows = _ui_name("WEATHER_MATRIX_ROWS")
     if not rows:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -577,7 +666,7 @@ def build_hourly_weather_matrix(
     matrix_rows: dict[str, list[str]] = {}
     tooltip_rows: dict[str, list[str]] = {}
     indicator_rows: dict[str, list[str]] = {}
-    for metric_key, metric_label in WEATHER_MATRIX_ROWS:
+    for metric_key, metric_label in weather_matrix_rows:
         if metric_key == "dewpoint_spread":
             matrix_rows[metric_label] = [
                 format_weather_matrix_value(
@@ -665,7 +754,7 @@ def render_hourly_weather_matrix(
     tooltip_frame: pd.DataFrame | None = None,
     indicator_frame: pd.DataFrame | None = None,
 ) -> None:
-    _refresh_legacy_globals()
+    mui_table = _get_st_mui_table()
     if frame.empty:
         st.info("No hourly weather data available.")
         return
@@ -681,7 +770,7 @@ def render_hourly_weather_matrix(
         if "Element" in aligned_indicators.columns:
             aligned_indicators["Element"] = ""
 
-    if st_mui_table is not None:
+    if mui_table is not None:
         def _mui_cell_html(
             text: str,
             style_parts: list[str],
@@ -792,7 +881,7 @@ def render_hourly_weather_matrix(
   display: none !important;
 }
 """
-        st_mui_table(
+        mui_table(
             mui_frame,
             enablePagination=True,
             paginationSizes=[24],
@@ -887,10 +976,10 @@ def build_astronomy_forecast_summary(
     temperature_unit: str,
     browser_locale: str | None = None,
     browser_month_day_pattern: str | None = None,
-    nights: int = ASTRONOMY_FORECAST_NIGHTS,
+    nights: int | None = None,
 ) -> pd.DataFrame:
-    _refresh_legacy_globals()
-    night_count = max(1, int(nights))
+    astronomy_forecast_nights = int(_ui_name("ASTRONOMY_FORECAST_NIGHTS"))
+    night_count = max(1, int(astronomy_forecast_nights if nights is None else nights))
     windows: list[tuple[datetime, datetime]] = []
     for day_offset in range(night_count):
         window_start, window_end, _ = astronomical_night_window(lat, lon, day_offset=day_offset)
@@ -1077,7 +1166,12 @@ def render_astronomy_forecast_summary(
     temperature_unit: str,
     selected_day_offset: int,
 ) -> None:
-    _refresh_legacy_globals()
+    astronomy_forecast_nights = int(_ui_name("ASTRONOMY_FORECAST_NIGHTS"))
+    weather_forecast_day_offset_state_key = str(_ui_name("WEATHER_FORECAST_DAY_OFFSET_STATE_KEY"))
+    weather_forecast_period_state_key = str(_ui_name("WEATHER_FORECAST_PERIOD_STATE_KEY"))
+    weather_forecast_period_tonight = _ui_name("WEATHER_FORECAST_PERIOD_TONIGHT")
+    weather_forecast_period_tomorrow = _ui_name("WEATHER_FORECAST_PERIOD_TOMORROW")
+    mui_table = _get_st_mui_table()
     if frame.empty:
         st.info("No 5-night forecast data available.")
         return
@@ -1098,7 +1192,7 @@ def render_astronomy_forecast_summary(
     display_frame = source_frame.reindex(columns=ordered_columns, fill_value="").reset_index(drop=True)
     source_frame = source_frame.reset_index(drop=True)
 
-    if st_mui_table is not None:
+    if mui_table is not None:
         center_columns = {"Clear", "Calm", "Crisp", "Dark"}
 
         def _mui_cell_html(text: str, style_parts: list[str], *, full_bleed: bool = False) -> str:
@@ -1121,7 +1215,7 @@ def render_astronomy_forecast_summary(
         for row_idx, row in display_frame.iterrows():
             row_day_offset = normalize_weather_forecast_day_offset(
                 source_frame.at[int(row_idx), "day_offset"],
-                max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+                max_offset=astronomy_forecast_nights - 1,
             )
             row_is_selected = row_day_offset == selected_day_offset
             for column_name in ordered_columns:
@@ -1180,7 +1274,7 @@ def render_astronomy_forecast_summary(
   display: none !important;
 }
 """
-        clicked_cell = st_mui_table(
+        clicked_cell = mui_table(
             mui_frame,
             enablePagination=True,
             customCss=mui_custom_css,
@@ -1213,7 +1307,7 @@ def render_astronomy_forecast_summary(
 
         selected_offset = normalize_weather_forecast_day_offset(
             source_frame.at[selected_index, "day_offset"],
-            max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+            max_offset=astronomy_forecast_nights - 1,
         )
         selection_token = f"{selected_index}:{selected_offset}"
         last_selection_token = str(st.session_state.get("astronomy_forecast_last_selection_token", ""))
@@ -1222,9 +1316,9 @@ def render_astronomy_forecast_summary(
 
         st.session_state["astronomy_forecast_last_selection_token"] = selection_token
         if selected_offset != selected_day_offset:
-            st.session_state[WEATHER_FORECAST_DAY_OFFSET_STATE_KEY] = selected_offset
-            st.session_state[WEATHER_FORECAST_PERIOD_STATE_KEY] = (
-                WEATHER_FORECAST_PERIOD_TONIGHT if selected_offset <= 0 else WEATHER_FORECAST_PERIOD_TOMORROW
+            st.session_state[weather_forecast_day_offset_state_key] = selected_offset
+            st.session_state[weather_forecast_period_state_key] = (
+                weather_forecast_period_tonight if selected_offset <= 0 else weather_forecast_period_tomorrow
             )
             st.rerun()
         return
@@ -1233,7 +1327,7 @@ def render_astronomy_forecast_summary(
         row_idx = int(row.name)
         row_day_offset = normalize_weather_forecast_day_offset(
             source_frame.at[row_idx, "day_offset"],
-            max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+            max_offset=astronomy_forecast_nights - 1,
         )
         row_is_selected = row_day_offset == selected_day_offset
 
@@ -1328,7 +1422,7 @@ def render_astronomy_forecast_summary(
 
     selected_offset = normalize_weather_forecast_day_offset(
         source_frame.at[selected_index, "day_offset"],
-        max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+        max_offset=astronomy_forecast_nights - 1,
     )
     selection_token = f"{selected_index}:{selected_offset}"
     last_selection_token = str(st.session_state.get("astronomy_forecast_last_selection_token", ""))
@@ -1337,8 +1431,8 @@ def render_astronomy_forecast_summary(
 
     st.session_state["astronomy_forecast_last_selection_token"] = selection_token
     if selected_offset != selected_day_offset:
-        st.session_state[WEATHER_FORECAST_DAY_OFFSET_STATE_KEY] = selected_offset
-        st.session_state[WEATHER_FORECAST_PERIOD_STATE_KEY] = (
-            WEATHER_FORECAST_PERIOD_TONIGHT if selected_offset <= 0 else WEATHER_FORECAST_PERIOD_TOMORROW
+        st.session_state[weather_forecast_day_offset_state_key] = selected_offset
+        st.session_state[weather_forecast_period_state_key] = (
+            weather_forecast_period_tonight if selected_offset <= 0 else weather_forecast_period_tomorrow
         )
         st.rerun()

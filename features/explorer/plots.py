@@ -1,17 +1,64 @@
 from __future__ import annotations
 
-# Transitional bridge during Explorer split: this module still relies on shared
-# helpers/constants from `ui.streamlit_app` until they are extracted.
-from ui import streamlit_app as _legacy_ui
+from functools import lru_cache
+from typing import Any
 
-def _refresh_legacy_globals() -> None:
-    for _name, _value in vars(_legacy_ui).items():
-        if _name == "__builtins__":
-            continue
-        globals().setdefault(_name, _value)
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+from app_constants import WIND16
+from app_theme import resolve_plot_theme_colors
+from runtime.weather_service import format_temperature
 
 
-_refresh_legacy_globals()
+@lru_cache(maxsize=None)
+def _ui_name(name: str) -> Any:
+    # Lazily resolve remaining UI-owned helpers/constants to avoid circular import
+    # failures while the Streamlit monolith is still being decomposed.
+    from ui import streamlit_app as ui_app
+
+    return getattr(ui_app, name)
+
+
+def _interpolate_cloud_cover_color(*args: Any, **kwargs: Any):
+    return _ui_name("_interpolate_cloud_cover_color")(*args, **kwargs)
+
+
+def _interpolate_temperature_color_f(*args: Any, **kwargs: Any):
+    return _ui_name("_interpolate_temperature_color_f")(*args, **kwargs)
+
+
+def _muted_rgba_from_hex(*args: Any, **kwargs: Any):
+    return _ui_name("_muted_rgba_from_hex")(*args, **kwargs)
+
+
+def format_display_time(*args: Any, **kwargs: Any):
+    return _ui_name("format_display_time")(*args, **kwargs)
+
+
+def format_hour_label(*args: Any, **kwargs: Any):
+    return _ui_name("format_hour_label")(*args, **kwargs)
+
+
+def mount_warning_zone_altitude_bounds(*args: Any, **kwargs: Any):
+    return _ui_name("mount_warning_zone_altitude_bounds")(*args, **kwargs)
+
+
+def mount_warning_zone_plot_style(*args: Any, **kwargs: Any):
+    return _ui_name("mount_warning_zone_plot_style")(*args, **kwargs)
+
+
+def normalize_12_hour_label(*args: Any, **kwargs: Any):
+    return _ui_name("normalize_12_hour_label")(*args, **kwargs)
+
+
+def normalize_hour_key(*args: Any, **kwargs: Any):
+    return _ui_name("normalize_hour_key")(*args, **kwargs)
+
+
+def resolve_weather_alert_indicator(*args: Any, **kwargs: Any):
+    return _ui_name("resolve_weather_alert_indicator")(*args, **kwargs)
 
 def build_path_hovertext(
     target_label: str,
@@ -49,7 +96,6 @@ def build_path_hovertext(
 
 
 def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    _refresh_legacy_globals()
     if track.empty:
         return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=object)
 
@@ -81,7 +127,7 @@ def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.nd
 
 
 def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, pd.Series]]:
-    _refresh_legacy_globals()
+    event_labels = _ui_name("EVENT_LABELS")
     suppress_culmination = False
     first_visible = events.get("first_visible")
     culmination = events.get("culmination")
@@ -94,7 +140,7 @@ def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, 
             suppress_culmination = False
 
     labeled: list[tuple[str, pd.Series]] = []
-    for event_key, event_label in EVENT_LABELS:
+    for event_key, event_label in event_labels:
         event = events.get(event_key)
         if event is None:
             continue
@@ -287,7 +333,6 @@ def terminal_segment_from_path_arrays(
 
 
 def obstruction_step_profile(obstructions: dict[str, float]) -> tuple[np.ndarray, np.ndarray]:
-    _refresh_legacy_globals()
     # Hard-floor profile aligned to 16-wind bin boundaries.
     boundaries = [0.0] + [11.25 + (22.5 * idx) for idx in range(16)] + [360.0]
     segment_dirs = ["N"] + WIND16[1:] + ["N"]
@@ -388,12 +433,17 @@ def build_unobstructed_altitude_area_plot(
     temperature_unit: str = "f",
     mount_choice: str = "none",
 ) -> go.Figure:
-    _refresh_legacy_globals()
+    unobstructed_area_constant_obstruction_alt_deg = float(
+        _ui_name("UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG")
+    )
+    object_type_group_color_default = str(_ui_name("OBJECT_TYPE_GROUP_COLOR_DEFAULT"))
+    path_line_width_overlay_default = float(_ui_name("PATH_LINE_WIDTH_OVERLAY_DEFAULT"))
+    path_line_width_primary_default = float(_ui_name("PATH_LINE_WIDTH_PRIMARY_DEFAULT"))
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
     plotted_any = False
     plotted_times: list[pd.Timestamp] = []
-    obstruction_ceiling = max(0.0, min(90.0, float(UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG)))
+    obstruction_ceiling = max(0.0, min(90.0, unobstructed_area_constant_obstruction_alt_deg))
 
     fig.add_shape(
         type="rect",
@@ -457,12 +507,14 @@ def build_unobstructed_altitude_area_plot(
 
         is_selected = bool(target_track.get("is_selected", False))
         target_label = str(target_track.get("label", "List target")).strip() or "List target"
-        target_color = str(target_track.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)).strip() or OBJECT_TYPE_GROUP_COLOR_DEFAULT
-        base_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
+        target_color = (
+            str(target_track.get("color", object_type_group_color_default)).strip() or object_type_group_color_default
+        )
+        base_line_width = float(target_track.get("line_width", path_line_width_overlay_default))
         target_line_width = (
-            max(base_line_width, PATH_LINE_WIDTH_PRIMARY_DEFAULT + 1.2)
+            max(base_line_width, path_line_width_primary_default + 1.2)
             if is_selected
-            else max(1.6, min(base_line_width, PATH_LINE_WIDTH_OVERLAY_DEFAULT))
+            else max(1.6, min(base_line_width, path_line_width_overlay_default))
         )
         target_line_color = target_color if is_selected else _muted_rgba_from_hex(target_color, alpha=0.68)
         target_emissions = str(target_track.get("emission_lines_display") or "").strip()
@@ -680,7 +732,9 @@ def build_path_plot(
     overlay_tracks: list[dict[str, Any]] | None = None,
     mount_choice: str = "none",
 ) -> go.Figure:
-    _refresh_legacy_globals()
+    path_endpoint_marker_size_primary = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_PRIMARY"))
+    path_endpoint_marker_size_overlay = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_OVERLAY"))
+    path_line_width_overlay_default = float(_ui_name("PATH_LINE_WIDTH_OVERLAY_DEFAULT"))
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
 
@@ -763,7 +817,7 @@ def build_path_plot(
                 mode="markers",
                 showlegend=False,
                 marker={
-                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
+                    "size": [0, path_endpoint_marker_size_primary],
                     "symbol": "line-ew",
                     "angleref": "previous",
                     "color": selected_color,
@@ -780,7 +834,7 @@ def build_path_plot(
                 mode="markers",
                 showlegend=False,
                 marker={
-                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY + 1],
+                    "size": [0, path_endpoint_marker_size_primary + 1],
                     "symbol": "triangle-up",
                     "angleref": "previous",
                     "color": selected_color,
@@ -824,7 +878,7 @@ def build_path_plot(
 
             target_label = str(target_track.get("label", "List target"))
             target_color = str(target_track.get("color", "#22c55e"))
-            target_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
+            target_line_width = float(target_track.get("line_width", path_line_width_overlay_default))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
             overlay_hover = build_path_hovertext(target_label, target_emissions, path_times, path_y)
             fig.add_trace(
@@ -852,7 +906,7 @@ def build_path_plot(
                         mode="markers",
                         showlegend=False,
                         marker={
-                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
+                            "size": [0, path_endpoint_marker_size_overlay],
                             "symbol": "line-ew",
                             "angleref": "previous",
                             "color": target_color,
@@ -869,7 +923,7 @@ def build_path_plot(
                         mode="markers",
                         showlegend=False,
                         marker={
-                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY + 1],
+                            "size": [0, path_endpoint_marker_size_overlay + 1],
                             "symbol": "triangle-up",
                             "angleref": "previous",
                             "color": target_color,
@@ -937,7 +991,9 @@ def build_path_plot_radial(
     overlay_tracks: list[dict[str, Any]] | None = None,
     mount_choice: str = "none",
 ) -> go.Figure:
-    _refresh_legacy_globals()
+    path_endpoint_marker_size_primary = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_PRIMARY"))
+    path_endpoint_marker_size_overlay = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_OVERLAY"))
+    path_line_width_overlay_default = float(_ui_name("PATH_LINE_WIDTH_OVERLAY_DEFAULT"))
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
 
@@ -1058,7 +1114,7 @@ def build_path_plot_radial(
                 mode="markers",
                 showlegend=False,
                 marker={
-                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY],
+                    "size": [0, path_endpoint_marker_size_primary],
                     "symbol": "line-ew",
                     "angleref": "previous",
                     "color": selected_color,
@@ -1075,7 +1131,7 @@ def build_path_plot_radial(
                 mode="markers",
                 showlegend=False,
                 marker={
-                    "size": [0, PATH_ENDPOINT_MARKER_SIZE_PRIMARY + 1],
+                    "size": [0, path_endpoint_marker_size_primary + 1],
                     "symbol": "triangle-up",
                     "angleref": "previous",
                     "color": selected_color,
@@ -1119,7 +1175,7 @@ def build_path_plot_radial(
 
             target_label = str(target_track.get("label", "List target"))
             target_color = str(target_track.get("color", "#22c55e"))
-            target_line_width = float(target_track.get("line_width", PATH_LINE_WIDTH_OVERLAY_DEFAULT))
+            target_line_width = float(target_track.get("line_width", path_line_width_overlay_default))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
             overlay_alt = overlay_track["alt"].clip(lower=0.0, upper=90.0)
             overlay_r = (90.0 - overlay_alt) if dome_view else overlay_alt
@@ -1162,7 +1218,7 @@ def build_path_plot_radial(
                         mode="markers",
                         showlegend=False,
                         marker={
-                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY],
+                            "size": [0, path_endpoint_marker_size_overlay],
                             "symbol": "line-ew",
                             "angleref": "previous",
                             "color": target_color,
@@ -1179,7 +1235,7 @@ def build_path_plot_radial(
                         mode="markers",
                         showlegend=False,
                         marker={
-                            "size": [0, PATH_ENDPOINT_MARKER_SIZE_OVERLAY + 1],
+                            "size": [0, path_endpoint_marker_size_overlay + 1],
                             "symbol": "triangle-up",
                             "angleref": "previous",
                             "color": target_color,
@@ -1261,7 +1317,6 @@ def build_night_plot(
     period_label: str | None = None,
     use_12_hour: bool = False,
 ) -> go.Figure:
-    _refresh_legacy_globals()
     theme_colors = resolve_plot_theme_colors()
     if track.empty:
         return go.Figure()

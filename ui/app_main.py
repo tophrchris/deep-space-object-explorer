@@ -37,9 +37,8 @@ def main() -> None:
                 limit=1,
                 key=f"prefs_bootstrap_wait_{runs}",
             )
-            st.stop()
-
-        st.session_state["prefs_bootstrapped"] = True
+        else:
+            st.session_state["prefs_bootstrapped"] = True
 
     prefs = ensure_preferences_shape(st.session_state["prefs"])
     sync_active_site_to_legacy_fields(prefs)
@@ -106,60 +105,66 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    browser_language_raw = eval_js_hidden("window.navigator.language", key="browser_language_pref")
-    if isinstance(browser_language_raw, str) and browser_language_raw.strip():
-        st.session_state["browser_language"] = browser_language_raw.strip()
+    if "browser_language" not in st.session_state:
+        browser_language_raw = eval_js_hidden("window.navigator.language", key="browser_language_pref")
+        if isinstance(browser_language_raw, str) and browser_language_raw.strip():
+            st.session_state["browser_language"] = browser_language_raw.strip()
     browser_language = st.session_state.get("browser_language")
-    browser_hour_cycle_raw = eval_js_hidden(
-        (
-            "new Intl.DateTimeFormat(window.navigator.language, "
-            "{hour: 'numeric', minute: '2-digit'}).resolvedOptions().hourCycle"
-        ),
-        key="browser_hour_cycle_pref",
-    )
-    if isinstance(browser_hour_cycle_raw, str) and browser_hour_cycle_raw.strip():
-        st.session_state["browser_hour_cycle"] = browser_hour_cycle_raw.strip()
+
+    if "browser_hour_cycle" not in st.session_state:
+        browser_hour_cycle_raw = eval_js_hidden(
+            (
+                "new Intl.DateTimeFormat(window.navigator.language, "
+                "{hour: 'numeric', minute: '2-digit'}).resolvedOptions().hourCycle"
+            ),
+            key="browser_hour_cycle_pref",
+        )
+        if isinstance(browser_hour_cycle_raw, str) and browser_hour_cycle_raw.strip():
+            st.session_state["browser_hour_cycle"] = browser_hour_cycle_raw.strip()
     browser_hour_cycle = st.session_state.get("browser_hour_cycle")
-    browser_month_day_pattern_raw = eval_js_hidden(
-        (
-            "new Intl.DateTimeFormat(window.navigator.language, {month: 'numeric', day: 'numeric'})"
-            ".formatToParts(new Date(2024, 1, 15))"
-            ".map((part) => `${part.type}:${part.value}`)"
-            ".join('|')"
-        ),
-        key="browser_month_day_pattern_pref",
-    )
-    if isinstance(browser_month_day_pattern_raw, str) and browser_month_day_pattern_raw.strip():
-        st.session_state["browser_month_day_pattern"] = browser_month_day_pattern_raw.strip()
+
+    if "browser_month_day_pattern" not in st.session_state:
+        browser_month_day_pattern_raw = eval_js_hidden(
+            (
+                "new Intl.DateTimeFormat(window.navigator.language, {month: 'numeric', day: 'numeric'})"
+                ".formatToParts(new Date(2024, 1, 15))"
+                ".map((part) => `${part.type}:${part.value}`)"
+                ".join('|')"
+            ),
+            key="browser_month_day_pattern_pref",
+        )
+        if isinstance(browser_month_day_pattern_raw, str) and browser_month_day_pattern_raw.strip():
+            st.session_state["browser_month_day_pattern"] = browser_month_day_pattern_raw.strip()
     browser_month_day_pattern = st.session_state.get("browser_month_day_pattern")
     use_12_hour = resolve_12_hour_clock(browser_language, browser_hour_cycle)
-    viewport_width_raw = eval_js_hidden(
-        (
-            "(() => {"
-            "  try {"
-            "    const values = ["
-            "      Number(window.innerWidth || 0),"
-            "      Number(document?.documentElement?.clientWidth || 0),"
-            "      Number(window.parent?.innerWidth || 0),"
-            "      Number(window.top?.innerWidth || 0)"
-            "    ].filter((v) => Number.isFinite(v) && v > 0);"
-            "    return values.length ? Math.max(...values) : 0;"
-            "  } catch (e) {"
-            "    return Number(window.innerWidth || 0);"
-            "  }"
-            "})()"
-        ),
-        key="browser_viewport_width_probe",
-    )
-    if isinstance(viewport_width_raw, (int, float)) and float(viewport_width_raw) > 0:
-        st.session_state["browser_viewport_width"] = int(float(viewport_width_raw))
-    elif isinstance(viewport_width_raw, str):
-        try:
-            parsed_width = float(viewport_width_raw.strip())
-            if parsed_width > 0:
-                st.session_state["browser_viewport_width"] = int(parsed_width)
-        except (TypeError, ValueError):
-            pass
+    if "browser_viewport_width" not in st.session_state:
+        viewport_width_raw = eval_js_hidden(
+            (
+                "(() => {"
+                "  try {"
+                "    const values = ["
+                "      Number(window.innerWidth || 0),"
+                "      Number(document?.documentElement?.clientWidth || 0),"
+                "      Number(window.parent?.innerWidth || 0),"
+                "      Number(window.top?.innerWidth || 0)"
+                "    ].filter((v) => Number.isFinite(v) && v > 0);"
+                "    return values.length ? Math.max(...values) : 0;"
+                "  } catch (e) {"
+                "    return Number(window.innerWidth || 0);"
+                "  }"
+                "})()"
+            ),
+            key="browser_viewport_width_probe",
+        )
+        if isinstance(viewport_width_raw, (int, float)) and float(viewport_width_raw) > 0:
+            st.session_state["browser_viewport_width"] = int(float(viewport_width_raw))
+        elif isinstance(viewport_width_raw, str):
+            try:
+                parsed_width = float(viewport_width_raw.strip())
+                if parsed_width > 0:
+                    st.session_state["browser_viewport_width"] = int(parsed_width)
+            except (TypeError, ValueError):
+                pass
     browser_viewport_width = int(st.session_state.get("browser_viewport_width", 1920))
     detail_stack_vertical = browser_viewport_width < DETAIL_PANE_STACK_BREAKPOINT_PX
 
@@ -238,4 +243,3 @@ def main() -> None:
         settings_page()
         return
     explorer_page()
-
