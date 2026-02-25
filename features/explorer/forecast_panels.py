@@ -753,11 +753,11 @@ def render_hourly_weather_matrix(
     temperature_unit: str,
     tooltip_frame: pd.DataFrame | None = None,
     indicator_frame: pd.DataFrame | None = None,
-) -> None:
+) -> str | None:
     mui_table = _get_st_mui_table()
     if frame.empty:
         st.info("No hourly weather data available.")
-        return
+        return None
 
     aligned_tooltips: pd.DataFrame | None = None
     if tooltip_frame is not None and not tooltip_frame.empty:
@@ -881,7 +881,7 @@ def render_hourly_weather_matrix(
   display: none !important;
 }
 """
-        mui_table(
+        clicked_cell = mui_table(
             mui_frame,
             enablePagination=True,
             paginationSizes=[24],
@@ -891,7 +891,7 @@ def render_hourly_weather_matrix(
             stickyHeader=False,
             showIndex=False,
             enable_sorting=False,
-            return_clicked_cell=False,
+            return_clicked_cell=True,
             paperStyle={
                 "width": "100%",
                 "overflow": "visible",
@@ -899,7 +899,27 @@ def render_hourly_weather_matrix(
                 "border": "1px solid rgba(148, 163, 184, 0.35)",
             },
         )
-        return
+        if isinstance(clicked_cell, dict):
+            raw_column = (
+                clicked_cell.get("column")
+                if "column" in clicked_cell
+                else clicked_cell.get("col", clicked_cell.get("field"))
+            )
+            clicked_column_name = ""
+            if isinstance(raw_column, str):
+                clicked_column_name = raw_column
+            else:
+                try:
+                    parsed_column_index = int(raw_column)
+                except (TypeError, ValueError):
+                    parsed_column_index = -1
+                if 0 <= parsed_column_index < len(mui_frame.columns):
+                    clicked_column_name = str(mui_frame.columns[parsed_column_index])
+
+            clicked_column_name = "Element" if clicked_column_name == "" else clicked_column_name
+            if clicked_column_name and clicked_column_name != "Element" and clicked_column_name in frame.columns:
+                return clicked_column_name
+        return None
 
     header_cells = "".join(
         f'<th style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
@@ -966,6 +986,7 @@ def render_hourly_weather_matrix(
         "</div>"
     )
     st.markdown(table_html, unsafe_allow_html=True)
+    return None
 
 
 def build_astronomy_forecast_summary(
@@ -1182,8 +1203,6 @@ def render_astronomy_forecast_summary(
         "Calm",
         "Crisp",
         "Dark",
-        "Sunset",
-        "Sunrise",
         "Avg. Temp",
     ]
     source_frame = frame.copy()
@@ -1371,8 +1390,6 @@ def render_astronomy_forecast_summary(
             "Calm": st.column_config.TextColumn(width="small"),
             "Crisp": st.column_config.TextColumn(width="small"),
             "Dark": st.column_config.TextColumn(width="small"),
-            "Sunset": st.column_config.TextColumn(width="small"),
-            "Sunrise": st.column_config.TextColumn(width="small"),
             "Avg. Temp": st.column_config.TextColumn(width="small"),
         },
     )

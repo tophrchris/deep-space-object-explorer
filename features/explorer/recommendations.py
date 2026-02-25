@@ -302,6 +302,7 @@ def render_target_recommendations(
     selection_token_key = "recommended_targets_selection_token"
     query_cache_key = "recommended_targets_query_cache"
     table_instance_key = "recommended_targets_table_instance"
+    pending_hour_key_state_key = "recommended_targets_pending_hour_key"
 
     if visible_hour_key not in st.session_state:
         st.session_state[visible_hour_key] = [best_visible_hour_option] if best_visible_hour_option else []
@@ -356,6 +357,21 @@ def render_target_recommendations(
         st.session_state[table_instance_key] = 0
     if str(st.session_state.get(sort_direction_key, "Descending")).strip() not in {"Descending", "Ascending"}:
         st.session_state[sort_direction_key] = "Descending"
+
+    pending_hour_key = str(st.session_state.pop(pending_hour_key_state_key, "")).strip()
+    if pending_hour_key:
+        matching_hour_options = [
+            hour_option
+            for hour_option, hour_key in hour_option_to_key.items()
+            if str(hour_key or "").strip() == pending_hour_key
+        ]
+        if matching_hour_options:
+            st.session_state[visible_hour_key] = [matching_hour_options[0]]
+            st.session_state[page_number_key] = 1
+            st.session_state[selection_token_key] = ""
+            st.session_state["selected_id"] = ""
+            st.session_state.pop(TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY, None)
+            st.session_state[table_instance_key] = int(st.session_state.get(table_instance_key, 0)) + 1
 
     active_telescope_default_marker = (
         str((active_telescope or {}).get("id", "")).strip()
