@@ -1044,81 +1044,43 @@ def resolve_location_source_badge(source: Any) -> tuple[str, str] | None:
 
 
 def default_site_definition(name: str = DEFAULT_SITE_NAME) -> dict[str, Any]:
-    site_name = str(name or "").strip() or DEFAULT_SITE_NAME
-    location = copy.deepcopy(DEFAULT_LOCATION)
-    location["label"] = site_name
-    return {
-        "name": site_name,
-        "location": location,
-        "obstructions": {direction: 20.0 for direction in WIND16},
-    }
+    from features.sites.site_state import (
+        default_site_definition as default_site_definition_feature,
+    )
+
+    return default_site_definition_feature(name)
 
 
 def site_ids_in_order(prefs: dict[str, Any]) -> list[str]:
-    sites = prefs.get("sites", {})
-    if not isinstance(sites, dict):
-        return []
+    from features.sites.site_state import (
+        site_ids_in_order as site_ids_in_order_feature,
+    )
 
-    ordered: list[str] = []
-    raw_order = prefs.get("site_order", [])
-    if isinstance(raw_order, (list, tuple)):
-        for raw_site_id in raw_order:
-            site_id = str(raw_site_id).strip()
-            if site_id and site_id in sites and site_id not in ordered:
-                ordered.append(site_id)
-
-    for raw_site_id in sites.keys():
-        site_id = str(raw_site_id).strip()
-        if site_id and site_id not in ordered:
-            ordered.append(site_id)
-    return ordered
+    return site_ids_in_order_feature(prefs)
 
 
 def get_active_site_id(prefs: dict[str, Any]) -> str:
-    ordered = site_ids_in_order(prefs)
-    if not ordered:
-        return DEFAULT_SITE_ID
-    candidate = str(prefs.get("active_site_id", "")).strip()
-    return candidate if candidate in ordered else ordered[0]
+    from features.sites.site_state import (
+        get_active_site_id as get_active_site_id_feature,
+    )
+
+    return get_active_site_id_feature(prefs)
 
 
 def get_site_definition(prefs: dict[str, Any], site_id: str) -> dict[str, Any]:
-    sites = prefs.get("sites", {})
-    if not isinstance(sites, dict):
-        return default_site_definition()
-    site = sites.get(site_id)
-    if isinstance(site, dict):
-        return site
-    return default_site_definition()
+    from features.sites.site_state import (
+        get_site_definition as get_site_definition_feature,
+    )
+
+    return get_site_definition_feature(prefs, site_id)
 
 
 def sync_active_site_to_legacy_fields(prefs: dict[str, Any]) -> None:
-    ordered = site_ids_in_order(prefs)
-    if not ordered:
-        default_site = default_site_definition()
-        prefs["sites"] = {DEFAULT_SITE_ID: default_site}
-        prefs["site_order"] = [DEFAULT_SITE_ID]
-        prefs["active_site_id"] = DEFAULT_SITE_ID
-        ordered = [DEFAULT_SITE_ID]
+    from features.sites.site_state import (
+        sync_active_site_to_legacy_fields as sync_active_site_to_legacy_fields_feature,
+    )
 
-    active_site_id = get_active_site_id(prefs)
-    active_site = get_site_definition(prefs, active_site_id)
-    site_name = str(active_site.get("name") or "").strip() or DEFAULT_SITE_NAME
-    location = copy.deepcopy(active_site.get("location", DEFAULT_LOCATION))
-    if not str(location.get("label") or "").strip():
-        location["label"] = site_name
-    obstructions_raw = active_site.get("obstructions", {})
-    obstructions = {
-        direction: clamp_obstruction_altitude(
-            obstructions_raw.get(direction, 20.0) if isinstance(obstructions_raw, dict) else 20.0,
-            default=20.0,
-        )
-        for direction in WIND16
-    }
-
-    prefs["active_site_id"] = active_site_id
-    prefs["location"] = location
-    prefs["obstructions"] = obstructions
+    return sync_active_site_to_legacy_fields_feature(prefs)
 
 
 def persist_legacy_fields_to_active_site(prefs: dict[str, Any]) -> None:
@@ -1130,99 +1092,35 @@ def persist_legacy_fields_to_active_site(prefs: dict[str, Any]) -> None:
 
 
 def set_active_site(prefs: dict[str, Any], site_id: str) -> bool:
-    ordered = site_ids_in_order(prefs)
-    if site_id not in ordered:
-        return False
-    changed = str(prefs.get("active_site_id", "")).strip() != site_id
-    prefs["active_site_id"] = site_id
-    sync_active_site_to_legacy_fields(prefs)
-    return changed
+    from features.sites.site_state import (
+        set_active_site as set_active_site_feature,
+    )
+
+    return set_active_site_feature(prefs, site_id)
 
 
 def duplicate_site(prefs: dict[str, Any], site_id: str) -> str | None:
-    source_site = get_site_definition(prefs, site_id)
-    source_name = str(source_site.get("name") or "").strip() or DEFAULT_SITE_NAME
-    sites = prefs.get("sites", {})
-    if not isinstance(sites, dict):
-        sites = {}
+    from features.sites.site_state import (
+        duplicate_site as duplicate_site_feature,
+    )
 
-    existing_names = {
-        str(site.get("name") or "").strip()
-        for site in sites.values()
-        if isinstance(site, dict) and str(site.get("name") or "").strip()
-    }
-    copy_index = 1
-    candidate_name = f"{source_name} - copy {copy_index}"
-    while candidate_name in existing_names:
-        copy_index += 1
-        candidate_name = f"{source_name} - copy {copy_index}"
-
-    duplicated = copy.deepcopy(source_site)
-    duplicated["name"] = candidate_name
-    duplicated_location = duplicated.get("location", {})
-    if isinstance(duplicated_location, dict):
-        duplicated_location["label"] = candidate_name
-        duplicated["location"] = duplicated_location
-
-    new_site_id = f"site_{uuid.uuid4().hex[:8]}"
-    sites[new_site_id] = duplicated
-    prefs["sites"] = sites
-
-    ordered = site_ids_in_order(prefs)
-    if site_id in ordered:
-        insert_idx = ordered.index(site_id) + 1
-        ordered.insert(insert_idx, new_site_id)
-    else:
-        ordered.append(new_site_id)
-    prefs["site_order"] = ordered
-    return new_site_id
+    return duplicate_site_feature(prefs, site_id)
 
 
 def create_site(prefs: dict[str, Any], name: str | None = None) -> str | None:
-    sites = prefs.get("sites", {})
-    if not isinstance(sites, dict):
-        sites = {}
+    from features.sites.site_state import (
+        create_site as create_site_feature,
+    )
 
-    base_name = str(name or "").strip() or DEFAULT_SITE_NAME
-    existing_names = {
-        str(site.get("name") or "").strip().lower()
-        for site in sites.values()
-        if isinstance(site, dict) and str(site.get("name") or "").strip()
-    }
-    candidate_name = base_name
-    suffix = 2
-    while candidate_name.strip().lower() in existing_names:
-        candidate_name = f"{base_name} {suffix}"
-        suffix += 1
-
-    new_site_id = f"site_{uuid.uuid4().hex[:8]}"
-    sites[new_site_id] = default_site_definition(candidate_name)
-    prefs["sites"] = sites
-
-    ordered = site_ids_in_order(prefs)
-    if new_site_id not in ordered:
-        ordered.append(new_site_id)
-    prefs["site_order"] = ordered
-    return new_site_id
+    return create_site_feature(prefs, name=name)
 
 
 def delete_site(prefs: dict[str, Any], site_id: str) -> bool:
-    ordered = site_ids_in_order(prefs)
-    if site_id not in ordered or len(ordered) <= 1:
-        return False
+    from features.sites.site_state import (
+        delete_site as delete_site_feature,
+    )
 
-    sites = prefs.get("sites", {})
-    if not isinstance(sites, dict):
-        return False
-    sites.pop(site_id, None)
-    prefs["sites"] = sites
-
-    ordered = [item for item in ordered if item != site_id]
-    prefs["site_order"] = ordered
-    if str(prefs.get("active_site_id", "")).strip() == site_id:
-        prefs["active_site_id"] = ordered[0]
-    sync_active_site_to_legacy_fields(prefs)
-    return True
+    return delete_site_feature(prefs, site_id)
 
 
 def get_site_name(prefs: dict[str, Any], site_id: str) -> str:
@@ -1838,377 +1736,164 @@ def dew_risk_scale_legend_html() -> str:
     )
 
 
-def cloud_cover_cell_style(raw_value: Any) -> str:
-    if raw_value is None or pd.isna(raw_value):
-        return ""
-
-    text = str(raw_value).strip()
-    if not text or text == "-":
-        return ""
-
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if match is None:
-        return ""
-
-    try:
-        cloud_cover_percent = float(match.group(0))
-    except ValueError:
-        return ""
-
-    background_color = _interpolate_cloud_cover_color(cloud_cover_percent)
-    text_color = "#111827" if cloud_cover_percent >= 65.0 else "#FFFFFF"
-    return f"background-color: {background_color}; color: {text_color};"
-
-
-def clarity_percentage_cell_style(raw_value: Any) -> str:
-    if raw_value is None or pd.isna(raw_value):
-        return ""
-
-    text = str(raw_value).strip()
-    if not text or text == "-":
-        return ""
-
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if match is None:
-        return ""
-
-    try:
-        clarity_percent = float(match.group(0))
-    except ValueError:
-        return ""
-
-    clamped_clear = max(0.0, min(100.0, clarity_percent))
-    cloud_equivalent = 100.0 - clamped_clear
-    background_color = _interpolate_cloud_cover_color(cloud_equivalent)
-    text_color = "#111827" if cloud_equivalent >= 65.0 else "#FFFFFF"
-    return f"background-color: {background_color}; color: {text_color};"
-
-
-def visibility_condition_cell_style(raw_value: Any) -> str:
-    if raw_value is None or pd.isna(raw_value):
-        return ""
-
-    condition = str(raw_value).strip().lower()
-    if not condition or condition == "-":
-        return ""
-
-    clear_color = "#FFFFFF"
-    fog_color = _interpolate_cloud_cover_color(100.0)
-    gradient_stops = [(0.0, clear_color), (100.0, fog_color)]
-    visibility_color_by_condition = {
-        "clear": clear_color,
-        "misty": _interpolate_color_stops(33.0, gradient_stops),
-        "high haze": _interpolate_color_stops(66.0, gradient_stops),
-        "fog": fog_color,
-    }
-    background_color = visibility_color_by_condition.get(condition)
-    if not background_color:
-        return ""
-
-    text_color = _ideal_text_color_for_hex(background_color)
-    return f"background-color: {background_color}; color: {text_color};"
-
-
-def dewpoint_spread_cell_style(raw_value: Any) -> str:
-    if raw_value is None or pd.isna(raw_value):
-        return ""
-
-    text = str(raw_value).strip()
-    if not text or text == "-":
-        return ""
-
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if match is None:
-        return ""
-
-    try:
-        spread_value = float(match.group(0))
-    except ValueError:
-        return ""
-
-    if spread_value > 6.0:
-        return ""
-    clamped_spread = max(0.0, spread_value)
-    background_color = _interpolate_color_stops(
-        clamped_spread,
-        [
-            (0.0, "#FDBA74"),  # light orange at 0°
-            (6.0, "#FFFFFF"),  # fade to white by 6°
-        ],
+def cloud_cover_cell_style(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        cloud_cover_cell_style as cloud_cover_cell_style_feature,
     )
 
-    text_color = _ideal_text_color_for_hex(background_color)
-    return f"background-color: {background_color}; color: {text_color};"
+    return cloud_cover_cell_style_feature(*args, **kwargs)
 
 
-def _temperature_f_from_display_value(raw_value: Any, temperature_unit: str) -> float | None:
-    if raw_value is None or pd.isna(raw_value):
-        return None
-
-    text = str(raw_value).strip()
-    if not text or text == "-":
-        return None
-
-    match = re.search(r"(-?\d+(?:\.\d+)?)\s*([FC])", text, flags=re.IGNORECASE)
-    if match is not None:
-        numeric = float(match.group(1))
-        unit = str(match.group(2)).upper()
-        return numeric if unit == "F" else ((numeric * 9.0 / 5.0) + 32.0)
-
-    number_match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if number_match is None:
-        return None
-
-    numeric = float(number_match.group(0))
-    return numeric if str(temperature_unit).strip().lower() == "f" else ((numeric * 9.0 / 5.0) + 32.0)
-
-
-def temperature_cell_style(raw_value: Any, temperature_unit: str) -> str:
-    temp_f = _temperature_f_from_display_value(raw_value, temperature_unit)
-    if temp_f is None:
-        return ""
-    text_color = _interpolate_temperature_color_f(temp_f)
-    return f"color: {text_color}; font-weight: 700;"
-
-
-def format_visibility_value(distance_meters: float | None, temperature_unit: str) -> str:
-    if distance_meters is None or pd.isna(distance_meters):
-        return "-"
-    numeric = max(0.0, float(distance_meters))
-    if str(temperature_unit).strip().lower() == "f":
-        return f"{(numeric * 0.000621371):.1f} mi"
-    return f"{(numeric * 0.001):.1f} km"
-
-
-def format_visibility_condition(distance_meters: float | None) -> str:
-    if distance_meters is None or pd.isna(distance_meters):
-        return "-"
-    miles = max(0.0, float(distance_meters)) * 0.000621371
-    if miles > 6.0:
-        return "Clear"
-    if miles >= 4.0:
-        return "misty"
-    if miles >= 2.0:
-        return "high haze"
-    return "fog"
-
-
-def _dewpoint_spread_celsius(temperature_celsius: Any, dewpoint_celsius: Any) -> float | None:
-    if temperature_celsius is None or dewpoint_celsius is None:
-        return None
-    try:
-        temperature_value = float(temperature_celsius)
-        dewpoint_value = float(dewpoint_celsius)
-    except (TypeError, ValueError):
-        return None
-    if not np.isfinite(temperature_value) or not np.isfinite(dewpoint_value):
-        return None
-    return max(0.0, temperature_value - dewpoint_value)
-
-
-def format_weather_matrix_value(metric_key: str, raw_value: Any, temperature_unit: str) -> str:
-    if raw_value is None or pd.isna(raw_value):
-        return "-"
-
-    try:
-        numeric = float(raw_value)
-    except (TypeError, ValueError):
-        return "-"
-
-    if metric_key in {"temperature_2m", "dew_point_2m"}:
-        return format_temperature(numeric, temperature_unit)
-    if metric_key == "dewpoint_spread":
-        if str(temperature_unit).strip().lower() == "f":
-            return f"{(numeric * 9.0 / 5.0):.0f} F"
-        return f"{numeric:.0f} C"
-    if metric_key == "precipitation_probability":
-        probability = max(0.0, float(numeric))
-        if probability > 20.0:
-            return "🚨"
-        if probability >= 1.0:
-            return "⚠️"
-        return ""
-    if metric_key in {"rain", "showers"}:
-        return format_precipitation(numeric, temperature_unit)
-    if metric_key == "snowfall":
-        return format_snowfall(numeric, temperature_unit)
-    if metric_key in {"relative_humidity_2m", "cloud_cover"}:
-        return f"{numeric:.0f}%"
-    if metric_key == "visibility":
-        return format_visibility_condition(numeric)
-    if metric_key == "wind_gusts_10m":
-        return format_wind_speed(numeric, temperature_unit)
-    return f"{numeric:.2f}"
-
-
-def _positive_float(value: Any) -> float | None:
-    if value is None or pd.isna(value):
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not np.isfinite(numeric) or numeric <= 0.0:
-        return None
-    return numeric
-
-
-def _nonnegative_float(value: Any) -> float | None:
-    if value is None or pd.isna(value):
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not np.isfinite(numeric):
-        return None
-    return max(0.0, numeric)
-
-
-def resolve_weather_alert_indicator(hour_row: dict[str, Any], temperature_unit: str) -> tuple[str, str]:
-    rain = _positive_float(hour_row.get("rain"))
-    showers = _positive_float(hour_row.get("showers"))
-    snowfall = _positive_float(hour_row.get("snowfall"))
-    precip_probability = _nonnegative_float(hour_row.get("precipitation_probability"))
-
-    tooltip_parts: list[str] = []
-    if precip_probability is not None:
-        tooltip_parts.append(f"Precip probability: {precip_probability:.0f}%")
-    else:
-        tooltip_parts.append("Precip probability: -")
-
-    if rain is not None:
-        tooltip_parts.append(f"Rain: {format_precipitation(rain, temperature_unit)}")
-    if showers is not None:
-        tooltip_parts.append(f"Showers: {format_precipitation(showers, temperature_unit)}")
-    if snowfall is not None:
-        tooltip_parts.append(f"Snowfall: {format_snowfall(snowfall, temperature_unit)}")
-
-    # One icon per hour with explicit precedence:
-    # 1) actual precip (snow > rain > showers), otherwise
-    # 2) precip-probability warning icon.
-    if snowfall is not None:
-        emoji = "❄️"
-    elif rain is not None:
-        emoji = "⛈️"
-    elif showers is not None:
-        emoji = "☔"
-    elif precip_probability is not None and precip_probability > 20.0:
-        emoji = "🚨"
-    elif precip_probability is not None and precip_probability >= 1.0:
-        emoji = "⚠️"
-    else:
-        return "", ""
-
-    tooltip_text = " | ".join(tooltip_parts)
-    return emoji, tooltip_text
-
-
-def build_weather_alert_indicator_html(hour_row: dict[str, Any], temperature_unit: str) -> str:
-    emoji, tooltip_text = resolve_weather_alert_indicator(hour_row, temperature_unit)
-    if not emoji:
-        return ""
-    return (
-        f'<span title="{html.escape(tooltip_text)}" '
-        'style="display:inline-block; margin-left:4px;">'
-        f"{emoji}</span>"
+def clarity_percentage_cell_style(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        clarity_percentage_cell_style as clarity_percentage_cell_style_feature,
     )
 
-
-def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_unit: str) -> list[str]:
-    seen: set[str] = set()
-    for row in rows:
-        emoji, _ = resolve_weather_alert_indicator(row, temperature_unit)
-        if emoji:
-            seen.add(emoji)
-
-    # Render one rain emoji per night using explicit priority:
-    # snow > rain > showers > alarm > caution.
-    # A caution-only night is intentionally excluded from animation.
-    if seen == {"⚠️"}:
-        return []
-
-    for candidate in WEATHER_ALERT_RAIN_PRIORITY:
-        if candidate in seen:
-            return [candidate]
-    return []
+    return clarity_percentage_cell_style_feature(*args, **kwargs)
 
 
-def normalize_hour_key(value: Any) -> str | None:
-    try:
-        timestamp = pd.Timestamp(value).floor("h")
-    except Exception:
-        return None
+def visibility_condition_cell_style(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        visibility_condition_cell_style as visibility_condition_cell_style_feature,
+    )
 
-    if timestamp.tzinfo is not None:
-        try:
-            timestamp = timestamp.tz_convert("UTC")
-        except Exception:
-            pass
-    return timestamp.isoformat()
+    return visibility_condition_cell_style_feature(*args, **kwargs)
 
 
-def build_hourly_weather_maps(
-    rows: list[dict[str, Any]],
-) -> tuple[dict[str, float], dict[str, float], dict[str, dict[str, Any]]]:
-    temperatures: dict[str, float] = {}
-    cloud_cover_by_hour: dict[str, float] = {}
-    weather_by_hour: dict[str, dict[str, Any]] = {}
-    for weather_row in rows:
-        time_iso = str(weather_row.get("time_iso", "")).strip()
-        if not time_iso:
-            continue
-        hour_key = normalize_hour_key(time_iso)
-        if not hour_key:
-            continue
+def dewpoint_spread_cell_style(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        dewpoint_spread_cell_style as dewpoint_spread_cell_style_feature,
+    )
 
-        temperature_value = weather_row.get("temperature_2m")
-        if temperature_value is not None and not pd.isna(temperature_value):
-            temperatures[hour_key] = float(temperature_value)
-
-        cloud_cover_value = weather_row.get("cloud_cover")
-        if cloud_cover_value is not None and not pd.isna(cloud_cover_value):
-            cloud_cover_by_hour[hour_key] = float(cloud_cover_value)
-
-        weather_by_hour[hour_key] = weather_row
-    return temperatures, cloud_cover_by_hour, weather_by_hour
+    return dewpoint_spread_cell_style_feature(*args, **kwargs)
 
 
-def build_hourly_weather_matrix(
-    rows: list[dict[str, Any]],
-    *,
-    use_12_hour: bool,
-    temperature_unit: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _temperature_f_from_display_value(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        _temperature_f_from_display_value as _temperature_f_from_display_value_feature,
+    )
+
+    return _temperature_f_from_display_value_feature(*args, **kwargs)
+
+
+def temperature_cell_style(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        temperature_cell_style as temperature_cell_style_feature,
+    )
+
+    return temperature_cell_style_feature(*args, **kwargs)
+
+
+def format_visibility_value(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        format_visibility_value as format_visibility_value_feature,
+    )
+
+    return format_visibility_value_feature(*args, **kwargs)
+
+
+def format_visibility_condition(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        format_visibility_condition as format_visibility_condition_feature,
+    )
+
+    return format_visibility_condition_feature(*args, **kwargs)
+
+
+def _dewpoint_spread_celsius(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        _dewpoint_spread_celsius as _dewpoint_spread_celsius_feature,
+    )
+
+    return _dewpoint_spread_celsius_feature(*args, **kwargs)
+
+
+def format_weather_matrix_value(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        format_weather_matrix_value as format_weather_matrix_value_feature,
+    )
+
+    return format_weather_matrix_value_feature(*args, **kwargs)
+
+
+def _positive_float(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        _positive_float as _positive_float_feature,
+    )
+
+    return _positive_float_feature(*args, **kwargs)
+
+
+def _nonnegative_float(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        _nonnegative_float as _nonnegative_float_feature,
+    )
+
+    return _nonnegative_float_feature(*args, **kwargs)
+
+
+def resolve_weather_alert_indicator(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        resolve_weather_alert_indicator as resolve_weather_alert_indicator_feature,
+    )
+
+    return resolve_weather_alert_indicator_feature(*args, **kwargs)
+
+
+def build_weather_alert_indicator_html(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        build_weather_alert_indicator_html as build_weather_alert_indicator_html_feature,
+    )
+
+    return build_weather_alert_indicator_html_feature(*args, **kwargs)
+
+
+def collect_night_weather_alert_emojis(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        collect_night_weather_alert_emojis as collect_night_weather_alert_emojis_feature,
+    )
+
+    return collect_night_weather_alert_emojis_feature(*args, **kwargs)
+
+
+def normalize_hour_key(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        normalize_hour_key as normalize_hour_key_feature,
+    )
+
+    return normalize_hour_key_feature(*args, **kwargs)
+
+
+def build_hourly_weather_maps(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        build_hourly_weather_maps as build_hourly_weather_maps_feature,
+    )
+
+    return build_hourly_weather_maps_feature(*args, **kwargs)
+
+
+def build_hourly_weather_matrix(*args: Any, **kwargs: Any):
     from features.explorer.forecast_panels import (
         build_hourly_weather_matrix as build_hourly_weather_matrix_feature,
     )
 
-    return build_hourly_weather_matrix_feature(
-        rows,
-        use_12_hour=use_12_hour,
-        temperature_unit=temperature_unit,
-    )
+    return build_hourly_weather_matrix_feature(*args, **kwargs)
 
 
 def render_hourly_weather_matrix(*args: Any, **kwargs: Any):
-    from features.explorer.forecast_panels import render_hourly_weather_matrix as render_hourly_weather_matrix_feature
+    from features.explorer.forecast_panels import (
+        render_hourly_weather_matrix as render_hourly_weather_matrix_feature,
+    )
 
     return render_hourly_weather_matrix_feature(*args, **kwargs)
 
-def _extract_finite_weather_values(rows: list[dict[str, Any]], field: str) -> list[float]:
-    values: list[float] = []
-    for row in rows:
-        raw_value = row.get(field)
-        if raw_value is None or pd.isna(raw_value):
-            continue
-        try:
-            numeric = float(raw_value)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(numeric):
-            values.append(numeric)
-    return values
+
+def _extract_finite_weather_values(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        _extract_finite_weather_values as _extract_finite_weather_values_feature,
+    )
+
+    return _extract_finite_weather_values_feature(*args, **kwargs)
 
 
 def build_astronomy_forecast_summary(*args: Any, **kwargs: Any):
@@ -2221,365 +1906,92 @@ def render_astronomy_forecast_summary(*args: Any, **kwargs: Any):
 
     return render_astronomy_forecast_summary_feature(*args, **kwargs)
 
-def build_path_hovertext(
-    target_label: str,
-    emission_details: str,
-    time_values: np.ndarray,
-    altitude_values: np.ndarray | None = None,
-) -> np.ndarray:
-    emissions = str(emission_details or "").strip()
-    emissions_line = f"<br>Emissions: {emissions}" if emissions else ""
-    total = int(len(time_values))
+def build_path_hovertext(*args: Any, **kwargs: Any):
+    from features.explorer.plots import build_path_hovertext as build_path_hovertext_feature
 
-    if altitude_values is None:
-        altitude = np.full(total, np.nan, dtype=float)
-    else:
-        altitude = np.asarray(altitude_values, dtype=float)
-        if altitude.shape[0] != total:
-            aligned = np.full(total, np.nan, dtype=float)
-            copy_count = min(total, int(altitude.shape[0]))
-            if copy_count > 0:
-                aligned[:copy_count] = altitude[:copy_count]
-            altitude = aligned
-
-    hover_values: list[str] = []
-    for idx, value in enumerate(time_values):
-        time_text = str(value).strip()
-        if time_text:
-            altitude_line = ""
-            altitude_value = float(altitude[idx])
-            if np.isfinite(altitude_value):
-                altitude_line = f"<br>Altitude: {altitude_value:.1f} deg"
-            hover_values.append(f"{target_label}{emissions_line}<br>Time: {time_text}{altitude_line}")
-        else:
-            hover_values.append("")
-    return np.asarray(hover_values, dtype=object)
+    return build_path_hovertext_feature(*args, **kwargs)
 
 
-def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if track.empty:
-        return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=object)
+def split_path_on_az_wrap(*args: Any, **kwargs: Any):
+    from features.explorer.plots import split_path_on_az_wrap as split_path_on_az_wrap_feature
 
-    az_values = track["az"].to_numpy(dtype=float)
-    alt_values = track["alt"].to_numpy(dtype=float)
-    time_values = [
-        format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in track["time_local"].tolist()
-    ]
+    return split_path_on_az_wrap_feature(*args, **kwargs)
 
-    x_values: list[float] = []
-    y_values: list[float] = []
-    hover_times: list[str] = []
 
-    for idx, azimuth in enumerate(az_values):
-        if idx > 0 and abs(float(azimuth) - float(az_values[idx - 1])) > 180.0:
-            x_values.append(np.nan)
-            y_values.append(np.nan)
-            hover_times.append("")
+def iter_labeled_events(*args: Any, **kwargs: Any):
+    from features.explorer.plots import iter_labeled_events as iter_labeled_events_feature
 
-        x_values.append(float(azimuth))
-        y_values.append(float(alt_values[idx]))
-        hover_times.append(time_values[idx])
+    return iter_labeled_events_feature(*args, **kwargs)
 
-    return (
-        np.asarray(x_values, dtype=float),
-        np.asarray(y_values, dtype=float),
-        np.asarray(hover_times, dtype=object),
+
+def sample_direction_indices(*args: Any, **kwargs: Any):
+    from features.explorer.plots import sample_direction_indices as sample_direction_indices_feature
+
+    return sample_direction_indices_feature(*args, **kwargs)
+
+
+def direction_marker_segments_cartesian(*args: Any, **kwargs: Any):
+    from features.explorer.plots import (
+        direction_marker_segments_cartesian as direction_marker_segments_cartesian_feature,
     )
 
-
-def iter_labeled_events(events: dict[str, pd.Series | None]) -> list[tuple[str, pd.Series]]:
-    suppress_culmination = False
-    first_visible = events.get("first_visible")
-    culmination = events.get("culmination")
-    if first_visible is not None and culmination is not None:
-        try:
-            first_visible_time = pd.Timestamp(first_visible["time_local"])
-            culmination_time = pd.Timestamp(culmination["time_local"])
-            suppress_culmination = abs(culmination_time - first_visible_time) <= pd.Timedelta(minutes=15)
-        except Exception:
-            suppress_culmination = False
-
-    labeled: list[tuple[str, pd.Series]] = []
-    for event_key, event_label in EVENT_LABELS:
-        event = events.get(event_key)
-        if event is None:
-            continue
-        if event_key == "culmination" and suppress_culmination:
-            continue
-        labeled.append((event_label, event))
-    return labeled
+    return direction_marker_segments_cartesian_feature(*args, **kwargs)
 
 
-def sample_direction_indices(length: int, max_markers: int = 6) -> list[int]:
-    if length < 3:
-        return []
-    step = max(1, length // (max_markers + 1))
-    return list(range(step, length - 1, step))
+def direction_marker_segments_radial(*args: Any, **kwargs: Any):
+    from features.explorer.plots import (
+        direction_marker_segments_radial as direction_marker_segments_radial_feature,
+    )
+
+    return direction_marker_segments_radial_feature(*args, **kwargs)
 
 
-def direction_marker_segments_cartesian(
-    track: pd.DataFrame, max_markers: int
-) -> list[tuple[float, float, float, float]]:
-    if track.empty:
-        return []
+def track_event_index(*args: Any, **kwargs: Any):
+    from features.explorer.plots import track_event_index as track_event_index_feature
 
-    az_values = track["az"].to_numpy(dtype=float)
-    alt_values = track["alt"].to_numpy(dtype=float)
-    indices = [idx for idx in sample_direction_indices(len(track), max_markers=max_markers) if idx < len(track) - 1]
-
-    segments: list[tuple[float, float, float, float]] = []
-    for idx in indices:
-        next_idx = idx + 1
-        az_start = float(az_values[idx])
-        az_end = float(az_values[next_idx])
-        alt_start = float(alt_values[idx])
-        alt_end = float(alt_values[next_idx])
-        if abs(az_end - az_start) > 180.0:
-            # Cartesian path view splits across azimuth wrap, so skip wrap-crossing marker segments.
-            continue
-        if abs(az_end - az_start) < 1e-9 and abs(alt_end - alt_start) < 1e-9:
-            continue
-        segments.append((az_start, alt_start, az_end, alt_end))
-    return segments
+    return track_event_index_feature(*args, **kwargs)
 
 
-def direction_marker_segments_radial(
-    track: pd.DataFrame, radial_values: np.ndarray, max_markers: int
-) -> list[tuple[float, float, float, float]]:
-    if track.empty:
-        return []
+def endpoint_marker_segments_cartesian(*args: Any, **kwargs: Any):
+    from features.explorer.plots import (
+        endpoint_marker_segments_cartesian as endpoint_marker_segments_cartesian_feature,
+    )
 
-    theta_values = track["az"].to_numpy(dtype=float)
-    r_values = np.asarray(radial_values, dtype=float)
-    indices = [idx for idx in sample_direction_indices(len(track), max_markers=max_markers) if idx < len(track) - 1]
-
-    segments: list[tuple[float, float, float, float]] = []
-    for idx in indices:
-        next_idx = idx + 1
-        theta_start = float(theta_values[idx])
-        theta_end = float(theta_values[next_idx])
-        r_start = float(r_values[idx])
-        r_end = float(r_values[next_idx])
-        if abs(theta_end - theta_start) > 180.0:
-            continue
-        if abs(theta_end - theta_start) < 1e-9 and abs(r_end - r_start) < 1e-9:
-            continue
-        segments.append((theta_start, r_start, theta_end, r_end))
-    return segments
+    return endpoint_marker_segments_cartesian_feature(*args, **kwargs)
 
 
-def track_event_index(track: pd.DataFrame, event: pd.Series | None) -> int | None:
-    if event is None or track.empty:
-        return None
-    try:
-        position = track.index.get_loc(event.name)
-    except Exception:
-        return None
+def endpoint_marker_segments_radial(*args: Any, **kwargs: Any):
+    from features.explorer.plots import (
+        endpoint_marker_segments_radial as endpoint_marker_segments_radial_feature,
+    )
 
-    if isinstance(position, slice):
-        return int(position.start) if position.start is not None else None
-    if isinstance(position, np.ndarray):
-        if position.size == 0:
-            return None
-        return int(position[0])
-    try:
-        return int(position)
-    except Exception:
-        return None
+    return endpoint_marker_segments_radial_feature(*args, **kwargs)
 
 
-def endpoint_marker_segments_cartesian(
-    track: pd.DataFrame, events: dict[str, pd.Series | None]
-) -> tuple[tuple[float, float, float, float] | None, tuple[float, float, float, float] | None]:
-    rise = events.get("rise")
-    set_event = events.get("set")
-    rise_index = track_event_index(track, rise)
-    set_index = track_event_index(track, set_event)
+def terminal_segment_from_path_arrays(*args: Any, **kwargs: Any):
+    from features.explorer.plots import terminal_segment_from_path_arrays as terminal_segment_from_path_arrays_feature
 
-    rise_segment: tuple[float, float, float, float] | None = None
-    if rise is not None and rise_index is not None:
-        neighbor = rise_index + 1 if rise_index + 1 < len(track) else None
-        if neighbor is not None:
-            az_rise = float(track.iloc[rise_index]["az"])
-            alt_rise = float(track.iloc[rise_index]["alt"])
-            az_next = float(track.iloc[neighbor]["az"])
-            alt_next = float(track.iloc[neighbor]["alt"])
-            if abs(az_next - az_rise) <= 180.0 and (
-                abs(az_next - az_rise) >= 1e-9 or abs(alt_next - alt_rise) >= 1e-9
-            ):
-                # Reverse points so the tail marker is drawn at the rise location.
-                rise_segment = (az_next, alt_next, az_rise, alt_rise)
-
-    set_segment: tuple[float, float, float, float] | None = None
-    if set_event is not None and set_index is not None:
-        neighbor = set_index - 1 if set_index - 1 >= 0 else None
-        if neighbor is not None:
-            az_prev = float(track.iloc[neighbor]["az"])
-            alt_prev = float(track.iloc[neighbor]["alt"])
-            az_set = float(track.iloc[set_index]["az"])
-            alt_set = float(track.iloc[set_index]["alt"])
-            if abs(az_set - az_prev) <= 180.0 and (abs(az_set - az_prev) >= 1e-9 or abs(alt_set - alt_prev) >= 1e-9):
-                set_segment = (az_prev, alt_prev, az_set, alt_set)
-
-    return rise_segment, set_segment
+    return terminal_segment_from_path_arrays_feature(*args, **kwargs)
 
 
-def endpoint_marker_segments_radial(
-    track: pd.DataFrame,
-    events: dict[str, pd.Series | None],
-    radial_values: np.ndarray,
-) -> tuple[tuple[float, float, float, float] | None, tuple[float, float, float, float] | None]:
-    rise = events.get("rise")
-    set_event = events.get("set")
-    rise_index = track_event_index(track, rise)
-    set_index = track_event_index(track, set_event)
+def obstruction_step_profile(*args: Any, **kwargs: Any):
+    from features.explorer.plots import obstruction_step_profile as obstruction_step_profile_feature
 
-    rise_segment: tuple[float, float, float, float] | None = None
-    if rise is not None and rise_index is not None and rise_index + 1 < len(track):
-        neighbor = rise_index + 1
-        theta_rise = float(track.iloc[rise_index]["az"])
-        r_rise = float(radial_values[rise_index])
-        theta_next = float(track.iloc[neighbor]["az"])
-        r_next = float(radial_values[neighbor])
-        if abs(theta_next - theta_rise) <= 180.0 and (
-            abs(theta_next - theta_rise) >= 1e-9 or abs(r_next - r_rise) >= 1e-9
-        ):
-            rise_segment = (theta_next, r_next, theta_rise, r_rise)
-
-    set_segment: tuple[float, float, float, float] | None = None
-    if set_event is not None and set_index is not None and set_index - 1 >= 0:
-        neighbor = set_index - 1
-        theta_prev = float(track.iloc[neighbor]["az"])
-        r_prev = float(radial_values[neighbor])
-        theta_set = float(track.iloc[set_index]["az"])
-        r_set = float(radial_values[set_index])
-        if abs(theta_set - theta_prev) <= 180.0 and (
-            abs(theta_set - theta_prev) >= 1e-9 or abs(r_set - r_prev) >= 1e-9
-        ):
-            set_segment = (theta_prev, r_prev, theta_set, r_set)
-
-    return rise_segment, set_segment
+    return obstruction_step_profile_feature(*args, **kwargs)
 
 
-def terminal_segment_from_path_arrays(
-    x_values: np.ndarray | pd.Series,
-    y_values: np.ndarray | pd.Series,
-) -> tuple[float, float, float, float] | None:
-    x_numeric = np.asarray(x_values, dtype=float)
-    y_numeric = np.asarray(y_values, dtype=float)
-    if x_numeric.size < 2 or y_numeric.size < 2:
-        return None
+def visible_track_segments(*args: Any, **kwargs: Any):
+    from features.explorer.plots import visible_track_segments as visible_track_segments_feature
 
-    finite_mask = np.isfinite(x_numeric) & np.isfinite(y_numeric)
-    finite_indices = np.flatnonzero(finite_mask)
-    if finite_indices.size < 2:
-        return None
-
-    for idx in range(finite_indices.size - 1, 0, -1):
-        prev_idx = int(finite_indices[idx - 1])
-        curr_idx = int(finite_indices[idx])
-        if curr_idx - prev_idx != 1:
-            continue
-        x0 = float(x_numeric[prev_idx])
-        y0 = float(y_numeric[prev_idx])
-        x1 = float(x_numeric[curr_idx])
-        y1 = float(y_numeric[curr_idx])
-        if abs(x1 - x0) < 1e-9 and abs(y1 - y0) < 1e-9:
-            continue
-        return (x0, y0, x1, y1)
-    return None
+    return visible_track_segments_feature(*args, **kwargs)
 
 
-def obstruction_step_profile(obstructions: dict[str, float]) -> tuple[np.ndarray, np.ndarray]:
-    # Hard-floor profile aligned to 16-wind bin boundaries.
-    boundaries = [0.0] + [11.25 + (22.5 * idx) for idx in range(16)] + [360.0]
-    segment_dirs = ["N"] + WIND16[1:] + ["N"]
-    segment_alts = [float(obstructions.get(direction, 20.0)) for direction in segment_dirs]
+def distribute_non_overlapping_values(*args: Any, **kwargs: Any):
+    from features.explorer.plots import (
+        distribute_non_overlapping_values as distribute_non_overlapping_values_feature,
+    )
 
-    x_values: list[float] = []
-    y_values: list[float] = []
-    for idx, altitude in enumerate(segment_alts):
-        left = float(boundaries[idx])
-        right = float(boundaries[idx + 1])
-        x_values.extend([left, right])
-        y_values.extend([altitude, altitude])
-        if idx < len(segment_alts) - 1:
-            next_altitude = float(segment_alts[idx + 1])
-            x_values.append(right)
-            y_values.append(next_altitude)
-
-    return np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=float)
-
-
-def visible_track_segments(track: pd.DataFrame) -> list[pd.DataFrame]:
-    if track.empty or "visible" not in track.columns:
-        return []
-
-    visible_mask = track["visible"].fillna(False).astype(bool).to_numpy()
-    if not visible_mask.any():
-        return []
-
-    segments: list[pd.DataFrame] = []
-    start_idx: int | None = None
-    for idx, is_visible in enumerate(visible_mask):
-        if is_visible and start_idx is None:
-            start_idx = idx
-            continue
-        if (not is_visible) and start_idx is not None:
-            segment = track.iloc[start_idx:idx].copy()
-            if not segment.empty:
-                segments.append(segment)
-            start_idx = None
-    if start_idx is not None:
-        segment = track.iloc[start_idx:].copy()
-        if not segment.empty:
-            segments.append(segment)
-    return segments
-
-
-def distribute_non_overlapping_values(
-    values: list[float],
-    *,
-    lower: float,
-    upper: float,
-    min_gap: float,
-) -> list[float]:
-    if not values:
-        return []
-
-    numeric_values = np.asarray(values, dtype=float)
-    total = int(numeric_values.size)
-    if total <= 1:
-        clipped_single = float(np.clip(numeric_values[0], lower, upper))
-        return [clipped_single]
-
-    bounded_lower = float(min(lower, upper))
-    bounded_upper = float(max(lower, upper))
-    span = max(0.0, bounded_upper - bounded_lower)
-    effective_gap = min(max(0.0, float(min_gap)), span / float(total - 1))
-
-    sorted_indices = np.argsort(numeric_values)
-    sorted_values = np.clip(numeric_values[sorted_indices], bounded_lower, bounded_upper).astype(float)
-    adjusted = sorted_values.copy()
-
-    for idx in range(1, total):
-        adjusted[idx] = max(adjusted[idx], adjusted[idx - 1] + effective_gap)
-
-    overflow = adjusted[-1] - bounded_upper
-    if overflow > 0:
-        adjusted -= overflow
-
-    for idx in range(total - 2, -1, -1):
-        adjusted[idx] = min(adjusted[idx], adjusted[idx + 1] - effective_gap)
-
-    underflow = bounded_lower - adjusted[0]
-    if underflow > 0:
-        adjusted += underflow
-
-    adjusted = np.clip(adjusted, bounded_lower, bounded_upper)
-    unsorted_adjusted = np.empty_like(adjusted)
-    unsorted_adjusted[sorted_indices] = adjusted
-    return [float(value) for value in unsorted_adjusted]
+    return distribute_non_overlapping_values_feature(*args, **kwargs)
 
 
 def build_unobstructed_altitude_area_plot(*args: Any, **kwargs: Any):

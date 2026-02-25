@@ -13,6 +13,358 @@ def _refresh_legacy_globals() -> None:
 
 _refresh_legacy_globals()
 
+def cloud_cover_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    text = str(raw_value).strip()
+    if not text or text == "-":
+        return ""
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if match is None:
+        return ""
+
+    try:
+        cloud_cover_percent = float(match.group(0))
+    except ValueError:
+        return ""
+
+    background_color = _interpolate_cloud_cover_color(cloud_cover_percent)
+    text_color = "#111827" if cloud_cover_percent >= 65.0 else "#FFFFFF"
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def clarity_percentage_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    text = str(raw_value).strip()
+    if not text or text == "-":
+        return ""
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if match is None:
+        return ""
+
+    try:
+        clarity_percent = float(match.group(0))
+    except ValueError:
+        return ""
+
+    clamped_clear = max(0.0, min(100.0, clarity_percent))
+    cloud_equivalent = 100.0 - clamped_clear
+    background_color = _interpolate_cloud_cover_color(cloud_equivalent)
+    text_color = "#111827" if cloud_equivalent >= 65.0 else "#FFFFFF"
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def visibility_condition_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    condition = str(raw_value).strip().lower()
+    if not condition or condition == "-":
+        return ""
+
+    clear_color = "#FFFFFF"
+    fog_color = _interpolate_cloud_cover_color(100.0)
+    gradient_stops = [(0.0, clear_color), (100.0, fog_color)]
+    visibility_color_by_condition = {
+        "clear": clear_color,
+        "misty": _interpolate_color_stops(33.0, gradient_stops),
+        "high haze": _interpolate_color_stops(66.0, gradient_stops),
+        "fog": fog_color,
+    }
+    background_color = visibility_color_by_condition.get(condition)
+    if not background_color:
+        return ""
+
+    text_color = _ideal_text_color_for_hex(background_color)
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def dewpoint_spread_cell_style(raw_value: Any) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return ""
+
+    text = str(raw_value).strip()
+    if not text or text == "-":
+        return ""
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if match is None:
+        return ""
+
+    try:
+        spread_value = float(match.group(0))
+    except ValueError:
+        return ""
+
+    if spread_value > 6.0:
+        return ""
+    clamped_spread = max(0.0, spread_value)
+    background_color = _interpolate_color_stops(
+        clamped_spread,
+        [
+            (0.0, "#FDBA74"),  # light orange at 0°
+            (6.0, "#FFFFFF"),  # fade to white by 6°
+        ],
+    )
+
+    text_color = _ideal_text_color_for_hex(background_color)
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def _temperature_f_from_display_value(raw_value: Any, temperature_unit: str) -> float | None:
+    if raw_value is None or pd.isna(raw_value):
+        return None
+
+    text = str(raw_value).strip()
+    if not text or text == "-":
+        return None
+
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*([FC])", text, flags=re.IGNORECASE)
+    if match is not None:
+        numeric = float(match.group(1))
+        unit = str(match.group(2)).upper()
+        return numeric if unit == "F" else ((numeric * 9.0 / 5.0) + 32.0)
+
+    number_match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if number_match is None:
+        return None
+
+    numeric = float(number_match.group(0))
+    return numeric if str(temperature_unit).strip().lower() == "f" else ((numeric * 9.0 / 5.0) + 32.0)
+
+
+def temperature_cell_style(raw_value: Any, temperature_unit: str) -> str:
+    temp_f = _temperature_f_from_display_value(raw_value, temperature_unit)
+    if temp_f is None:
+        return ""
+    text_color = _interpolate_temperature_color_f(temp_f)
+    return f"color: {text_color}; font-weight: 700;"
+
+
+def format_visibility_value(distance_meters: float | None, temperature_unit: str) -> str:
+    if distance_meters is None or pd.isna(distance_meters):
+        return "-"
+    numeric = max(0.0, float(distance_meters))
+    if str(temperature_unit).strip().lower() == "f":
+        return f"{(numeric * 0.000621371):.1f} mi"
+    return f"{(numeric * 0.001):.1f} km"
+
+
+def format_visibility_condition(distance_meters: float | None) -> str:
+    if distance_meters is None or pd.isna(distance_meters):
+        return "-"
+    miles = max(0.0, float(distance_meters)) * 0.000621371
+    if miles > 6.0:
+        return "Clear"
+    if miles >= 4.0:
+        return "misty"
+    if miles >= 2.0:
+        return "high haze"
+    return "fog"
+
+
+def _dewpoint_spread_celsius(temperature_celsius: Any, dewpoint_celsius: Any) -> float | None:
+    if temperature_celsius is None or dewpoint_celsius is None:
+        return None
+    try:
+        temperature_value = float(temperature_celsius)
+        dewpoint_value = float(dewpoint_celsius)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(temperature_value) or not np.isfinite(dewpoint_value):
+        return None
+    return max(0.0, temperature_value - dewpoint_value)
+
+
+def format_weather_matrix_value(metric_key: str, raw_value: Any, temperature_unit: str) -> str:
+    if raw_value is None or pd.isna(raw_value):
+        return "-"
+
+    try:
+        numeric = float(raw_value)
+    except (TypeError, ValueError):
+        return "-"
+
+    if metric_key in {"temperature_2m", "dew_point_2m"}:
+        return format_temperature(numeric, temperature_unit)
+    if metric_key == "dewpoint_spread":
+        if str(temperature_unit).strip().lower() == "f":
+            return f"{(numeric * 9.0 / 5.0):.0f} F"
+        return f"{numeric:.0f} C"
+    if metric_key == "precipitation_probability":
+        probability = max(0.0, float(numeric))
+        if probability > 20.0:
+            return "🚨"
+        if probability >= 1.0:
+            return "⚠️"
+        return ""
+    if metric_key in {"rain", "showers"}:
+        return format_precipitation(numeric, temperature_unit)
+    if metric_key == "snowfall":
+        return format_snowfall(numeric, temperature_unit)
+    if metric_key in {"relative_humidity_2m", "cloud_cover"}:
+        return f"{numeric:.0f}%"
+    if metric_key == "visibility":
+        return format_visibility_condition(numeric)
+    if metric_key == "wind_gusts_10m":
+        return format_wind_speed(numeric, temperature_unit)
+    return f"{numeric:.2f}"
+
+
+def _positive_float(value: Any) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric) or numeric <= 0.0:
+        return None
+    return numeric
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric):
+        return None
+    return max(0.0, numeric)
+
+
+def resolve_weather_alert_indicator(hour_row: dict[str, Any], temperature_unit: str) -> tuple[str, str]:
+    rain = _positive_float(hour_row.get("rain"))
+    showers = _positive_float(hour_row.get("showers"))
+    snowfall = _positive_float(hour_row.get("snowfall"))
+    precip_probability = _nonnegative_float(hour_row.get("precipitation_probability"))
+
+    tooltip_parts: list[str] = []
+    if precip_probability is not None:
+        tooltip_parts.append(f"Precip probability: {precip_probability:.0f}%")
+    else:
+        tooltip_parts.append("Precip probability: -")
+
+    if rain is not None:
+        tooltip_parts.append(f"Rain: {format_precipitation(rain, temperature_unit)}")
+    if showers is not None:
+        tooltip_parts.append(f"Showers: {format_precipitation(showers, temperature_unit)}")
+    if snowfall is not None:
+        tooltip_parts.append(f"Snowfall: {format_snowfall(snowfall, temperature_unit)}")
+
+    # One icon per hour with explicit precedence:
+    # 1) actual precip (snow > rain > showers), otherwise
+    # 2) precip-probability warning icon.
+    if snowfall is not None:
+        emoji = "❄️"
+    elif rain is not None:
+        emoji = "⛈️"
+    elif showers is not None:
+        emoji = "☔"
+    elif precip_probability is not None and precip_probability > 20.0:
+        emoji = "🚨"
+    elif precip_probability is not None and precip_probability >= 1.0:
+        emoji = "⚠️"
+    else:
+        return "", ""
+
+    tooltip_text = " | ".join(tooltip_parts)
+    return emoji, tooltip_text
+
+
+def build_weather_alert_indicator_html(hour_row: dict[str, Any], temperature_unit: str) -> str:
+    emoji, tooltip_text = resolve_weather_alert_indicator(hour_row, temperature_unit)
+    if not emoji:
+        return ""
+    return (
+        f'<span title="{html.escape(tooltip_text)}" '
+        'style="display:inline-block; margin-left:4px;">'
+        f"{emoji}</span>"
+    )
+
+
+def collect_night_weather_alert_emojis(rows: list[dict[str, Any]], temperature_unit: str) -> list[str]:
+    seen: set[str] = set()
+    for row in rows:
+        emoji, _ = resolve_weather_alert_indicator(row, temperature_unit)
+        if emoji:
+            seen.add(emoji)
+
+    # Render one rain emoji per night using explicit priority:
+    # snow > rain > showers > alarm > caution.
+    # A caution-only night is intentionally excluded from animation.
+    if seen == {"⚠️"}:
+        return []
+
+    for candidate in WEATHER_ALERT_RAIN_PRIORITY:
+        if candidate in seen:
+            return [candidate]
+    return []
+
+
+def normalize_hour_key(value: Any) -> str | None:
+    try:
+        timestamp = pd.Timestamp(value).floor("h")
+    except Exception:
+        return None
+
+    if timestamp.tzinfo is not None:
+        try:
+            timestamp = timestamp.tz_convert("UTC")
+        except Exception:
+            pass
+    return timestamp.isoformat()
+
+
+def build_hourly_weather_maps(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, float], dict[str, float], dict[str, dict[str, Any]]]:
+    temperatures: dict[str, float] = {}
+    cloud_cover_by_hour: dict[str, float] = {}
+    weather_by_hour: dict[str, dict[str, Any]] = {}
+    for weather_row in rows:
+        time_iso = str(weather_row.get("time_iso", "")).strip()
+        if not time_iso:
+            continue
+        hour_key = normalize_hour_key(time_iso)
+        if not hour_key:
+            continue
+
+        temperature_value = weather_row.get("temperature_2m")
+        if temperature_value is not None and not pd.isna(temperature_value):
+            temperatures[hour_key] = float(temperature_value)
+
+        cloud_cover_value = weather_row.get("cloud_cover")
+        if cloud_cover_value is not None and not pd.isna(cloud_cover_value):
+            cloud_cover_by_hour[hour_key] = float(cloud_cover_value)
+
+        weather_by_hour[hour_key] = weather_row
+    return temperatures, cloud_cover_by_hour, weather_by_hour
+
+def _extract_finite_weather_values(rows: list[dict[str, Any]], field: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        raw_value = row.get(field)
+        if raw_value is None or pd.isna(raw_value):
+            continue
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(numeric):
+            values.append(numeric)
+    return values
+
+
+
+
 def compute_hourly_target_recommendations(
     catalog: pd.DataFrame,
     *,
@@ -990,4 +1342,3 @@ def render_astronomy_forecast_summary(
             WEATHER_FORECAST_PERIOD_TONIGHT if selected_offset <= 0 else WEATHER_FORECAST_PERIOD_TOMORROW
         )
         st.rerun()
-
