@@ -166,16 +166,13 @@ def _render_explorer_page_impl(
                 )
 
     selected_row = resolve_selected_row(catalog)
-    active_preview_list_ids = get_list_ids(prefs, get_active_preview_list_id(prefs))
-    if selected_row is not None or bool(active_preview_list_ids):
-        render_detail_panel(
-            selected=selected_row,
-            catalog=catalog,
-            prefs=prefs,
-            temperature_unit=temperature_unit,
-            use_12_hour=use_12_hour,
-            detail_stack_vertical=detail_stack_vertical,
-            weather_forecast_day_offset=weather_forecast_day_offset,
-        )
+    render_detail_panel(
+        selected=selected_row,
+        catalog=catalog,
+        prefs=prefs,
+        temperature_unit=temperature_unit,
+        use_12_hour=use_12_hour,
+        detail_stack_vertical=detail_stack_vertical,
+        weather_forecast_day_offset=weather_forecast_day_offset,
+    )
     st.markdown(refresh_status_html, unsafe_allow_html=True)
-
