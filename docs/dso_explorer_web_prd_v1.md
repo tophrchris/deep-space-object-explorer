@@ -40,15 +40,7 @@
 - `emission_lines`
 
 - Catalog loading behavior:
-- App loader is mediated through `dso_enricher.catalog_service.load_catalog_data(...)` with feature modes:
-- `legacy` (active default)
-- `curated_parquet` (available fallback mode)
-- Legacy path now passes `data/DSO_CATALOG_ENRICHED.CSV` into ingestion.
-- Enriched rows load first and remain authoritative by `primary_id`.
-- Parquet cache rows are appended only for IDs not present in enriched data.
-- Legacy ingest route (OpenNGC + SIMBAD + seed fallback) remains available for rebuild/fallback.
-- Disk cache + metadata include ingestion-version migration behavior.
-- In-app `Refresh catalog cache` control remains available on the Settings page.
+- App reads a shipped `data/dso_catalog_cache.parquet` runtime catalog and builds an in-memory search index.
 - Search index includes `description` in addition to ID/name/aliases/catalog tokens.
 
 ### 3.2 Location handling
@@ -108,7 +100,7 @@
 - background/info link
 - Object attributes presented as key/value property table.
 - Property rows with blank/`-` values are suppressed.
-- Property table includes enrichment fields now surfaced in UI:
+- Property table includes extended catalog metadata fields now surfaced in UI:
 - `dist_value`, `dist_unit`
 - `redshift`
 - `morphology`
@@ -248,10 +240,7 @@
 - Set List pinned state
 - Added bulk Set List toggling from summary table via multi-row selection.
 - Multi-page app refactor with dedicated Settings page sections (issue #42, PR #43).
-- Catalog service layer introduced for loader-mode routing (`legacy` / `curated_parquet`) and centralized search/index behavior.
-- Enrichment pipeline integrated via standalone `dso_enricher/` project and app-side enriched catalog ingestion.
-- App catalog source now includes `data/DSO_CATALOG_ENRICHED.CSV` with enriched schema fields wired through ingestion and UI.
-- Enriched-first + parquet supplementation behavior added to preserve enriched rows while recovering cache-only targets (PR #45).
+- Catalog service layer introduced for centralized runtime catalog search/index behavior.
 - Search indexing expanded to include `description`.
 - Detail panel updated to 3-column layout with:
 - scaled direct image rendering (max 400x400, aspect ratio preserved)
