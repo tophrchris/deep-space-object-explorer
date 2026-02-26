@@ -2046,6 +2046,7 @@ def approximate_location_from_ip() -> dict[str, Any] | None:
     return approximate_location_from_ip_feature()
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
 def fetch_free_use_image(search_phrase: str) -> dict[str, str] | None:
     if not search_phrase.strip():
         return None
