@@ -11,6 +11,17 @@ DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
 DEFAULT_SETTINGS_FILENAME = "dso_explorer_settings.json"
 
 
+class GoogleDriveAPIError(RuntimeError):
+    def __init__(self, status_code: int, message: str) -> None:
+        self.status_code = int(status_code)
+        self.message = str(message)
+        super().__init__(self.message)
+
+    @property
+    def is_auth_error(self) -> bool:
+        return self.status_code in {401, 403}
+
+
 def _auth_headers(access_token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {access_token}",
@@ -39,8 +50,9 @@ def _request_json(
         timeout=timeout_seconds,
     )
     if response.status_code >= 400:
-        raise RuntimeError(
-            f"Google Drive API error ({response.status_code}): {response.text[:300]}"
+        raise GoogleDriveAPIError(
+            response.status_code,
+            f"Google Drive API error ({response.status_code}): {response.text[:300]}",
         )
     if not response.text:
         return {}
@@ -89,8 +101,9 @@ def read_settings_payload(access_token: str, file_id: str) -> dict[str, Any] | N
     if response.status_code == 404:
         return None
     if response.status_code >= 400:
-        raise RuntimeError(
-            f"Google Drive API error ({response.status_code}): {response.text[:300]}"
+        raise GoogleDriveAPIError(
+            response.status_code,
+            f"Google Drive API error ({response.status_code}): {response.text[:300]}",
         )
     payload = response.json()
     if isinstance(payload, dict):
@@ -174,6 +187,10 @@ def upsert_settings_file(
                 resolved_file_id,
                 payload,
             )
+        except GoogleDriveAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            # Fall through to discover/create in case the file id was deleted or stale.
         except Exception:
             # Fall through to discover/create in case the file id was deleted or stale.
             pass

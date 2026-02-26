@@ -1364,6 +1364,48 @@ def render_sidebar_active_settings(
                 index=list(theme_label_to_id.values()).index(current_theme),
                 key="ui_theme_selector",
             )
+            sync_runtime_state = str(
+                st.session_state.get(globals().get("GOOGLE_DRIVE_SYNC_STATE_STATE_KEY", ""), "")
+            ).strip().lower()
+            deferred_sync_action = str(
+                st.session_state.get(globals().get("GOOGLE_DRIVE_SYNC_DEFERRED_ACTION_STATE_KEY", ""), "")
+            ).strip().lower()
+            show_sidebar_reauth = sync_runtime_state == "reauth_required" or bool(deferred_sync_action)
+            if show_sidebar_reauth:
+                st.caption(
+                    "Cloud sync needs Google reauth (this starts with a Google sign-out)."
+                    if sync_runtime_state == "reauth_required"
+                    else "Reconnect Google to resume deferred cloud sync (sign-out/sign-in)."
+                )
+                authlib_available = bool(globals().get("AUTHLIB_AVAILABLE", True))
+                is_logged_in = False
+                try:
+                    is_logged_in = bool(_is_user_logged_in())
+                except Exception:
+                    is_logged_in = False
+                button_label = (
+                    "Reconnect Google (Logs Out First)"
+                    if is_logged_in
+                    else "Sign In to Resume Sync"
+                )
+                if st.button(
+                    button_label,
+                    key="sidebar_google_reauth_resume",
+                    use_container_width=True,
+                    disabled=not authlib_available,
+                    help=(
+                        "Signs you out of Google first; after that, sign back in to resume cloud sync."
+                        if is_logged_in
+                        else "Sign in with Google and resume deferred cloud sync."
+                    ),
+                ):
+                    try:
+                        if is_logged_in:
+                            st.logout()
+                        else:
+                            st.login("google")
+                    except Exception as exc:
+                        st.warning(f"Google auth action failed: {str(exc).strip()}")
     selected_ui_theme = theme_label_to_id[selected_theme_label]
     if selected_ui_theme != current_theme:
         prefs["ui_theme"] = selected_ui_theme
