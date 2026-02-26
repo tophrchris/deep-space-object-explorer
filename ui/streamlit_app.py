@@ -388,7 +388,7 @@ WEATHER_MATRIX_ROWS: list[tuple[str, str]] = [
     ("visibility", "Visibility"),
     ("wind_gusts_10m", "Wind Gusts"),
 ]
-WEATHER_ALERT_INDICATOR_LEGEND_ITEMS = "❄️ Snow | ⛈️ Rain | ☔ Showers | ⚠️ 1-20% | 🚨 >20%"
+WEATHER_ALERT_INDICATOR_LEGEND_ITEMS = "❄️ Snow | ⛈️ Rain | ☔ Showers | ⚠️ Low | 🚨 High"
 WEATHER_ALERT_INDICATOR_LEGEND_CAPTION = f"Weather Alert Indicator: {WEATHER_ALERT_INDICATOR_LEGEND_ITEMS}"
 WEATHER_ALERT_RAIN_PRIORITY = ["❄️", "⛈️", "☔", "🚨", "⚠️"]
 WEATHER_ALERT_RAIN_INTERVAL_SECONDS = 5 * 60
@@ -1734,6 +1734,22 @@ def dew_risk_scale_legend_html() -> str:
         "<span style='margin-left:0.12rem;'>Dew</span>"
         "</div>"
     )
+
+
+def full_moon_scale_legend_html(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        full_moon_scale_legend_html as full_moon_scale_legend_html_feature,
+    )
+
+    return full_moon_scale_legend_html_feature(*args, **kwargs)
+
+
+def site_conditions_legends_table_html(*args: Any, **kwargs: Any):
+    from features.explorer.forecast_panels import (
+        site_conditions_legends_table_html as site_conditions_legends_table_html_feature,
+    )
+
+    return site_conditions_legends_table_html_feature(*args, **kwargs)
 
 
 def cloud_cover_cell_style(*args: Any, **kwargs: Any):
