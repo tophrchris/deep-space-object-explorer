@@ -17,6 +17,7 @@ venv/
 
 # Local persisted prototype state
 .state/preferences.json
+artifacts/
 
 # OS/editor
 .DS_Store
