@@ -1532,12 +1532,14 @@ def build_astronomy_forecast_summary(
             end_local_iso=window_end.isoformat(),
         )
         lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip().lower() or None
-        lunar_phase_change_emoji = ""
+        lunar_phase_display_prefix = ""
         if lunar_phase_key:
             if previous_lunar_phase_key is None:
-                lunar_phase_change_emoji = lunar_phase_emoji(lunar_phase_key)
+                lunar_phase_display_prefix = lunar_phase_emoji(lunar_phase_key)
             elif lunar_phase_key != previous_lunar_phase_key:
-                lunar_phase_change_emoji = lunar_phase_emoji(lunar_phase_key)
+                previous_phase_emoji = lunar_phase_emoji(previous_lunar_phase_key)
+                current_phase_emoji = lunar_phase_emoji(lunar_phase_key)
+                lunar_phase_display_prefix = f"{previous_phase_emoji} \u2192 {current_phase_emoji}"
         previous_lunar_phase_key = lunar_phase_key
 
         if rating_emoji:
@@ -1642,11 +1644,11 @@ def build_astronomy_forecast_summary(
         lunar_avg_altitude_deg = (lunar_summary or {}).get("moon_avg_altitude_deg")
         lunar_max_altitude_deg = (lunar_summary or {}).get("moon_max_altitude_deg")
         lunar_display = format_lunar_percent_display(lunar_below_horizon_pct)
-        if lunar_phase_change_emoji:
+        if lunar_phase_display_prefix:
             if lunar_display == "-":
-                lunar_display = lunar_phase_change_emoji
+                lunar_display = lunar_phase_display_prefix
             else:
-                lunar_display = f"{lunar_phase_change_emoji} {lunar_display}"
+                lunar_display = f"{lunar_phase_display_prefix} {lunar_display}"
 
         summary_rows.append(
             {
