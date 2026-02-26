@@ -15,7 +15,18 @@ from astropy.time import Time
 
 from app_constants import WIND16
 from app_theme import apply_dataframe_styler_theme
+from features.explorer.lunar import (
+    format_lunar_altitude_display,
+    format_lunar_percent_display,
+    lunar_altitude_row_label,
+    lunar_phase_emoji,
+)
 from features.explorer.night_rating import compute_night_rating_details
+from runtime.lunar_ephemeris import (
+    build_hourly_lunar_altitude_map,
+    compute_lunar_night_summary,
+    compute_lunar_phase_for_night,
+)
 from runtime.weather_service import (
     EXTENDED_FORECAST_HOURLY_FIELDS,
     fetch_hourly_weather,
@@ -101,6 +112,329 @@ def weather_forecast_window(*args: Any, **kwargs: Any):
 
 def _get_st_mui_table():
     return _ui_name("st_mui_table")
+
+def _hex_to_rgb_local(value: str) -> tuple[int, int, int] | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+        return None
+    hex_text = text[1:] if text.startswith("#") else text
+    try:
+        return (int(hex_text[0:2], 16), int(hex_text[2:4], 16), int(hex_text[4:6], 16))
+    except ValueError:
+        return None
+
+
+def _rgb_to_hex_local(red: int, green: int, blue: int) -> str:
+    return f"#{max(0, min(255, int(red))):02X}{max(0, min(255, int(green))):02X}{max(0, min(255, int(blue))):02X}"
+
+
+def _neutral_gray_from_hex(color_hex: str) -> str:
+    rgb = _hex_to_rgb_local(color_hex)
+    if rgb is None:
+        return "#2A2A2A"
+    red, green, blue = rgb
+    luminance = int(round(((red * 299) + (green * 587) + (blue * 114)) / 1000.0))
+    return _rgb_to_hex_local(luminance, luminance, luminance)
+
+
+def _lunar_phase_style_bucket_from_label(row_label: Any) -> str:
+    label = str(row_label or "").strip()
+    if "🌑" in label:
+        return "new"
+    if "🌕" in label:
+        return "full"
+    if "🌓" in label or "🌗" in label:
+        return "quarter"
+    return "quarter"
+
+
+def _lunar_phase_style_bucket_from_phase_key(phase_key: Any) -> str:
+    key = str(phase_key or "").strip().lower()
+    if key == "new":
+        return "new"
+    if key == "full":
+        return "full"
+    if key in {"first_quarter", "third_quarter"}:
+        return "quarter"
+    return "quarter"
+
+
+def _lunar_gray_scale_palette() -> dict[str, str]:
+    # Match cloud-cover brightness endpoints, but force grayscale for lunar altitude.
+    low_gray = _neutral_gray_from_hex(_interpolate_cloud_cover_color(0.0))
+    new_moon_high_gray = _neutral_gray_from_hex(_interpolate_cloud_cover_color(100.0))
+    # Full moon is brighter than new moon, but remains a light gray (not pure white).
+    full_moon_high_gray = _interpolate_color_stops(
+        60.0,
+        [
+            (0.0, new_moon_high_gray),
+            (100.0, "#FFFFFF"),
+        ],
+    )
+    # First/third quarter use a midpoint between the low-end gray and full-moon gray.
+    quarter_moon_high_gray = _interpolate_color_stops(
+        50.0,
+        [
+            (0.0, low_gray),
+            (100.0, full_moon_high_gray),
+        ],
+    )
+    return {
+        "low": low_gray,
+        "new": new_moon_high_gray,
+        "quarter": quarter_moon_high_gray,
+        "full": full_moon_high_gray,
+    }
+
+
+def _lunar_gradient_style_for_altitude(
+    altitude_deg: Any,
+    *,
+    phase_bucket: str,
+) -> str:
+    palette = _lunar_gray_scale_palette()
+    low_gray = palette["low"]
+    if phase_bucket == "new":
+        high_gray = palette["new"]
+    elif phase_bucket == "full":
+        high_gray = palette["full"]
+    else:
+        high_gray = palette["quarter"]
+
+    try:
+        numeric_altitude = float(altitude_deg)
+    except (TypeError, ValueError):
+        numeric_altitude = 0.0
+    if not np.isfinite(numeric_altitude):
+        numeric_altitude = 0.0
+
+    clamped_altitude = max(0.0, min(90.0, numeric_altitude))
+    background_color = _interpolate_color_stops(
+        clamped_altitude,
+        [
+            (0.0, low_gray),
+            (90.0, high_gray),
+        ],
+    )
+    text_color = _ideal_text_color_for_hex(background_color)
+    return f"background-color: {background_color}; color: {text_color};"
+
+
+def lunar_altitude_cell_style(raw_value: Any, row_label: Any) -> str:
+    text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
+    if not text or text == "-":
+        return _lunar_gradient_style_for_altitude(0.0, phase_bucket=_lunar_phase_style_bucket_from_label(row_label))
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if match is None:
+        return _lunar_gradient_style_for_altitude(0.0, phase_bucket=_lunar_phase_style_bucket_from_label(row_label))
+
+    try:
+        parsed_altitude = float(match.group(0))
+    except ValueError:
+        parsed_altitude = 0.0
+
+    return _lunar_gradient_style_for_altitude(
+        parsed_altitude,
+        phase_bucket=_lunar_phase_style_bucket_from_label(row_label),
+    )
+
+
+def lunar_forecast_column_cell_style(
+    raw_value: Any,
+    *,
+    lunar_phase_key: Any,
+    lunar_max_altitude_deg: Any,
+) -> str:
+    text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
+    if not text:
+        return ""
+    return _lunar_gradient_style_for_altitude(
+        lunar_max_altitude_deg,
+        phase_bucket=_lunar_phase_style_bucket_from_phase_key(lunar_phase_key),
+    )
+
+
+def full_moon_scale_legend_html() -> str:
+    palette = _lunar_gray_scale_palette()
+    low_gray = palette["low"]
+    quarter_gray = palette["quarter"]
+    full_gray = palette["full"]
+
+    # 12-box legend: darkest -> quarter marker -> lightest.
+    swatch_colors: list[str] = []
+    total_boxes = 12
+    quarter_index = 5
+    for idx in range(total_boxes):
+        if idx <= quarter_index:
+            color = _interpolate_color_stops(
+                float(idx),
+                [
+                    (0.0, low_gray),
+                    (float(quarter_index), quarter_gray),
+                ],
+            )
+        else:
+            color = _interpolate_color_stops(
+                float(idx),
+                [
+                    (float(quarter_index), quarter_gray),
+                    (float(total_boxes - 1), full_gray),
+                ],
+            )
+        swatch_colors.append(color)
+
+    def _swatch(color: str, *, margin_right: str = "0.12rem") -> str:
+        return (
+            "<span style='display:inline-block; width:0.58rem; height:0.58rem; border-radius:2px; "
+            f"margin-right:{margin_right}; border:1px solid rgba(17,24,39,0.28); background:{color};'></span>"
+        )
+
+    left_swatches = "".join(
+        _swatch(color, margin_right=("0.12rem" if idx < (quarter_index) else "0"))
+        for idx, color in enumerate(swatch_colors[: quarter_index + 1])
+    )
+    right_swatches = "".join(
+        _swatch(color, margin_right=("0.12rem" if idx < (len(swatch_colors[quarter_index + 1 :]) - 1) else "0"))
+        for idx, color in enumerate(swatch_colors[quarter_index + 1 :])
+    )
+
+    return (
+        "<div style='font-size:0.88rem; color:#6b7280; margin:0.02rem 0 0.12rem;'>"
+        "🌙 lunar phase brightness scale: "
+        "<span style='margin-left:0.04rem; margin-right:0.14rem;'>🌑</span>"
+        f"{left_swatches}"
+        "<span style='margin-left:0.14rem; margin-right:0.14rem;'>🌓</span>"
+        f"{right_swatches}"
+        "<span style='margin-left:0.14rem;'>🌕</span>"
+        "</div>"
+    )
+
+
+def site_conditions_legends_table_html() -> str:
+    def _swatch(color: str, *, margin_right: str = "0.12rem") -> str:
+        return (
+            "<span style='display:inline-block; width:0.58rem; height:0.58rem; border-radius:2px; "
+            f"margin-right:{margin_right}; border:1px solid rgba(17,24,39,0.28); background:{color};'></span>"
+        )
+
+    # Night-time clarity key (Good -> Bad).
+    clarity_swatches: list[str] = []
+    clarity_boxes = 10
+    for idx in range(clarity_boxes):
+        clear_percent = 100.0 - (float(idx) * (100.0 / float(max(1, clarity_boxes - 1))))
+        cloud_equivalent = max(0.0, min(100.0, 100.0 - clear_percent))
+        color = _interpolate_cloud_cover_color(cloud_equivalent)
+        clarity_swatches.append(_swatch(color))
+    clarity_key_html = (
+        "<div style='display:inline-flex; align-items:center; justify-content:center; flex-wrap:wrap;'>"
+        "<span style='margin-right:0.2rem;'>Good</span>"
+        f"{''.join(clarity_swatches)}"
+        "<span style='margin-left:0.12rem;'>Bad</span>"
+        "</div>"
+    )
+
+    # Dew risk key (Dry -> Dew).
+    dew_swatches: list[str] = []
+    spread_values = list(range(6, -1, -1))
+    for idx, spread_value in enumerate(spread_values):
+        color = _interpolate_color_stops(
+            float(spread_value),
+            [
+                (0.0, "#FDBA74"),
+                (6.0, "#FFFFFF"),
+            ],
+        )
+        margin_right = "0.12rem" if idx < (len(spread_values) - 1) else "0"
+        dew_swatches.append(_swatch(color, margin_right=margin_right))
+    dew_key_html = (
+        "<div style='display:inline-flex; align-items:center; justify-content:center; flex-wrap:wrap;'>"
+        "<span style='margin-right:0.2rem;'>Dry</span>"
+        f"{''.join(dew_swatches)}"
+        "<span style='margin-left:0.12rem;'>Dew</span>"
+        "</div>"
+    )
+
+    # Lunar brightness key (phase-aware grayscale reference).
+    palette = _lunar_gray_scale_palette()
+    low_gray = palette["low"]
+    quarter_gray = palette["quarter"]
+    full_gray = palette["full"]
+    lunar_colors: list[str] = []
+    lunar_boxes = 12
+    quarter_index = 5
+    for idx in range(lunar_boxes):
+        if idx <= quarter_index:
+            color = _interpolate_color_stops(
+                float(idx),
+                [
+                    (0.0, low_gray),
+                    (float(quarter_index), quarter_gray),
+                ],
+            )
+        else:
+            color = _interpolate_color_stops(
+                float(idx),
+                [
+                    (float(quarter_index), quarter_gray),
+                    (float(lunar_boxes - 1), full_gray),
+                ],
+            )
+        lunar_colors.append(color)
+    lunar_left = "".join(
+        _swatch(color, margin_right=("0.12rem" if idx < quarter_index else "0"))
+        for idx, color in enumerate(lunar_colors[: quarter_index + 1])
+    )
+    lunar_right_colors = lunar_colors[quarter_index + 1 :]
+    lunar_right = "".join(
+        _swatch(color, margin_right=("0.12rem" if idx < (len(lunar_right_colors) - 1) else "0"))
+        for idx, color in enumerate(lunar_right_colors)
+    )
+    lunar_key_html = (
+        "<div style='display:inline-flex; align-items:center; justify-content:center; flex-wrap:wrap;'>"
+        "<span style='margin-right:0.14rem;'>🌑</span>"
+        f"{lunar_left}"
+        "<span style='margin-left:0.14rem; margin-right:0.14rem;'>🌓</span>"
+        f"{lunar_right}"
+        "<span style='margin-left:0.14rem;'>🌕</span>"
+        "</div>"
+    )
+
+    weather_alert_key_html = (
+        "<div style='display:inline-flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0.45rem 0.7rem;'>"
+        "<span style='white-space:nowrap;'>❄️ Snow</span>"
+        "<span style='white-space:nowrap;'>⛈️ Rain</span>"
+        "<span style='white-space:nowrap;'>☔ Showers</span>"
+        "<span style='white-space:nowrap;'>⚠️ Low</span>"
+        "<span style='white-space:nowrap;'>🚨 High</span>"
+        "</div>"
+    )
+
+    rows = [
+        ("Weather Alerts", weather_alert_key_html),
+        ("Night Clarity", clarity_key_html),
+        ("Dew Risk", dew_key_html),
+        ("Lunar Altitude", lunar_key_html),
+    ]
+    body_rows = "".join(
+        (
+            "<tr>"
+            f"<td style='padding:0.04rem 0.6rem 0.04rem 0; text-align:right; white-space:nowrap; "
+            "vertical-align:middle; color:#6b7280; font-weight:500;'>"
+            f"{html.escape(label)}</td>"
+            "<td style='padding:0.04rem 0; text-align:center; width:100%; vertical-align:middle;'>"
+            f"{key_html}</td>"
+            "</tr>"
+        )
+        for label, key_html in rows
+    )
+    return (
+        "<table role='presentation' style='width:100%; border-collapse:collapse; "
+        "font-size:0.88rem; margin:0.04rem 0 0.12rem;'>"
+        f"<tbody>{body_rows}</tbody>"
+        "</table>"
+    )
+
 
 def cloud_cover_cell_style(raw_value: Any) -> str:
     if raw_value is None or pd.isna(raw_value):
@@ -641,8 +975,23 @@ def build_hourly_weather_matrix(
     *,
     use_12_hour: bool,
     temperature_unit: str,
+    lunar_hourly_altitude_by_hour: dict[str, float] | None = None,
+    lunar_phase_key: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     weather_matrix_rows = _ui_name("WEATHER_MATRIX_ROWS")
+    metric_label_by_key = {str(key): str(label) for key, label in weather_matrix_rows}
+    visible_metric_keys_in_order = [
+        "cloud_cover",
+        "visibility",
+        "wind_gusts_10m",
+        "dewpoint_spread",
+        "temperature_2m",
+    ]
+    ordered_weather_matrix_rows = [
+        (metric_key, metric_label_by_key[metric_key])
+        for metric_key in visible_metric_keys_in_order
+        if metric_key in metric_label_by_key
+    ]
     if not rows:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -666,7 +1015,34 @@ def build_hourly_weather_matrix(
     matrix_rows: dict[str, list[str]] = {}
     tooltip_rows: dict[str, list[str]] = {}
     indicator_rows: dict[str, list[str]] = {}
-    for metric_key, metric_label in weather_matrix_rows:
+    lunar_row_inserted = False
+
+    def _insert_lunar_row() -> None:
+        nonlocal lunar_row_inserted
+        if lunar_row_inserted:
+            return
+        if not isinstance(lunar_hourly_altitude_by_hour, dict):
+            return
+
+        row_label = lunar_altitude_row_label(lunar_phase_key)
+        matrix_rows[row_label] = [
+            format_lunar_altitude_display(
+                lunar_hourly_altitude_by_hour.get(pd.Timestamp(timestamp).floor("h").isoformat())
+            )
+            for timestamp in ordered_times
+        ]
+        tooltip_rows[row_label] = [
+            (
+                f"Moon average altitude during hour: {format_lunar_altitude_display(avg_alt)}"
+                if (avg_alt := lunar_hourly_altitude_by_hour.get(pd.Timestamp(timestamp).floor('h').isoformat())) is not None
+                else ""
+            )
+            for timestamp in ordered_times
+        ]
+        indicator_rows[row_label] = ["" for _ in ordered_times]
+        lunar_row_inserted = True
+
+    for metric_key, metric_label in ordered_weather_matrix_rows:
         if metric_key == "dewpoint_spread":
             matrix_rows[metric_label] = [
                 format_weather_matrix_value(
@@ -738,6 +1114,12 @@ def build_hourly_weather_matrix(
         else:
             tooltip_rows[metric_label] = ["" for _ in ordered_times]
 
+        if metric_key == "cloud_cover":
+            _insert_lunar_row()
+
+    if not lunar_row_inserted:
+        _insert_lunar_row()
+
     return (
         pd.DataFrame.from_dict(matrix_rows, orient="index", columns=hour_labels),
         pd.DataFrame.from_dict(tooltip_rows, orient="index", columns=hour_labels),
@@ -753,11 +1135,32 @@ def render_hourly_weather_matrix(
     temperature_unit: str,
     tooltip_frame: pd.DataFrame | None = None,
     indicator_frame: pd.DataFrame | None = None,
+    hour_column_states: dict[str, str] | None = None,
 ) -> str | None:
     mui_table = _get_st_mui_table()
     if frame.empty:
         st.info("No hourly weather data available.")
         return None
+
+    normalized_hour_column_states: dict[str, str] = {}
+    if isinstance(hour_column_states, dict):
+        for raw_column_name, raw_state in hour_column_states.items():
+            column_name = str(raw_column_name).strip()
+            state = str(raw_state).strip().lower()
+            if not column_name or state not in {"past", "current"}:
+                continue
+            normalized_hour_column_states[column_name] = state
+
+    def _hour_column_inline_style(column_name: Any) -> str:
+        state = normalized_hour_column_states.get(str(column_name).strip(), "")
+        if state == "past":
+            return "background-color: rgba(148, 163, 184, 0.15); color: #475569;"
+        if state == "current":
+            return (
+                "box-shadow: inset 2px 0 0 #FACC15, inset -2px 0 0 #FACC15;"
+                " background-color: rgba(250, 204, 21, 0.05);"
+            )
+        return ""
 
     aligned_tooltips: pd.DataFrame | None = None
     if tooltip_frame is not None and not tooltip_frame.empty:
@@ -771,6 +1174,12 @@ def render_hourly_weather_matrix(
             aligned_indicators["Element"] = ""
 
     if mui_table is not None:
+        def _display_element_label(raw_element: str) -> str:
+            label = str(raw_element or "").strip()
+            if label.lower().startswith("lunar altitude"):
+                return "Lunar Altitude"
+            return label
+
         def _mui_cell_html(
             text: str,
             style_parts: list[str],
@@ -806,6 +1215,7 @@ def render_hourly_weather_matrix(
         for row_idx, row in frame.iterrows():
             element = str(row.get("Element", "")).strip()
             element_key = element.lower()
+            element_display = _display_element_label(element)
             for column in frame.columns:
                 raw_value = row.get(column)
                 cell_text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
@@ -815,8 +1225,8 @@ def render_hourly_weather_matrix(
 
                 if str(column) == "Element":
                     mui_frame.at[row_idx, ""] = _mui_cell_html(
-                        cell_text,
-                        ["font-weight: 600;", "white-space: nowrap;", "text-align: left;"],
+                        element_display,
+                        ["font-weight: 600;", "white-space: nowrap;", "text-align: right;"],
                     )
                     continue
 
@@ -837,18 +1247,46 @@ def render_hourly_weather_matrix(
                     visibility_style = visibility_condition_cell_style(raw_value)
                     if visibility_style:
                         style_parts.append(visibility_style)
+                elif element_key.startswith("lunar altitude"):
+                    lunar_style = lunar_altitude_cell_style(raw_value, element)
+                    if lunar_style:
+                        style_parts.append(lunar_style)
 
                 indicator_html = ""
                 if aligned_indicators is not None and element_key == "cloud cover":
                     indicator_html = str(aligned_indicators.at[row_idx, column]).strip()
 
-                full_bleed = element_key in {"cloud cover", "humidity", "visibility"}
+                full_bleed = element_key in {"cloud cover", "humidity", "visibility"} or element_key.startswith(
+                    "lunar altitude"
+                )
                 mui_frame.at[row_idx, column] = _mui_cell_html(
                     cell_text,
                     style_parts,
                     title_text=tooltip_text,
                     extra_html=indicator_html,
                     full_bleed=full_bleed,
+                )
+
+        dynamic_column_css_rules: list[str] = []
+        for column_index, column_name in enumerate(frame.columns, start=1):
+            normalized_name = str(column_name).strip()
+            if normalized_name == "Element":
+                continue
+            state = normalized_hour_column_states.get(normalized_name, "")
+            if state == "past":
+                dynamic_column_css_rules.append(
+                    (
+                        f".MuiTableHead-root .MuiTableCell-root:nth-child({column_index})"
+                        "{ background: rgba(148, 163, 184, 0.15) !important; color: #64748b !important; }"
+                    )
+                )
+            elif state == "current":
+                dynamic_column_css_rules.append(
+                    (
+                        f".MuiTableHead-root .MuiTableCell-root:nth-child({column_index})"
+                        "{ background: rgba(250, 204, 21, 0.08) !important; color: #854D0E !important; "
+                        "box-shadow: inset 2px 0 0 #FACC15, inset -2px 0 0 #FACC15, inset 0 2px 0 #FACC15, inset 0 -2px 0 #FACC15 !important; }"
+                    )
                 )
 
         mui_custom_css = """
@@ -880,7 +1318,7 @@ def render_hourly_weather_matrix(
 .MuiTablePagination-root {
   display: none !important;
 }
-"""
+""" + ("\n".join(dynamic_column_css_rules) if dynamic_column_css_rules else "")
         clicked_cell = mui_table(
             mui_frame,
             enablePagination=True,
@@ -921,22 +1359,39 @@ def render_hourly_weather_matrix(
                 return clicked_column_name
         return None
 
-    header_cells = "".join(
-        f'<th style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
-        f'background: #f3f4f6; color: #6b7280; text-align: left; white-space: nowrap;">'
-        f"{html.escape(str(column))}</th>"
-        for column in frame.columns
-    )
+    def _display_element_label(raw_element: str) -> str:
+        label = str(raw_element or "").strip()
+        if label.lower().startswith("lunar altitude"):
+            return "Lunar Altitude"
+        return label
+
+    header_cells_parts: list[str] = []
+    for column in frame.columns:
+        column_name = str(column)
+        header_style = (
+            "padding: 6px 8px; border-bottom: 1px solid #d1d5db; "
+            "background: #f3f4f6; color: #6b7280; text-align: left; white-space: nowrap;"
+        )
+        if column_name != "Element":
+            header_style = header_style.replace("text-align: left;", "text-align: center;")
+            column_state_style = _hour_column_inline_style(column_name)
+            if column_state_style:
+                header_style += column_state_style
+            if normalized_hour_column_states.get(column_name) == "current":
+                header_style += " box-shadow: inset 2px 0 0 #FACC15, inset -2px 0 0 #FACC15, inset 0 2px 0 #FACC15, inset 0 -2px 0 #FACC15;"
+        header_cells_parts.append(f'<th style="{header_style}">{html.escape(column_name)}</th>')
+    header_cells = "".join(header_cells_parts)
 
     body_rows: list[str] = []
     for row_idx, row in frame.iterrows():
         element = str(row.get("Element", "")).strip()
         element_key = element.lower()
+        element_display = _display_element_label(element)
         row_cells = [
             (
                 '<td style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
-                'font-weight: 600; white-space: nowrap; text-align: left;">'
-                f"{html.escape(element) if element else '&nbsp;'}</td>"
+                'font-weight: 600; white-space: nowrap; text-align: right;">'
+                f"{html.escape(element_display) if element_display else '&nbsp;'}</td>"
             )
         ]
 
@@ -963,6 +1418,8 @@ def render_hourly_weather_matrix(
                 cell_style += dewpoint_spread_cell_style(tooltip)
             elif element_key == "visibility":
                 cell_style += visibility_condition_cell_style(raw_value)
+            elif element_key.startswith("lunar altitude"):
+                cell_style += lunar_altitude_cell_style(raw_value, element)
             title_attr = f' title="{html.escape(tooltip)}"' if tooltip else ""
 
             indicator_html = ""
@@ -1045,6 +1502,7 @@ def build_astronomy_forecast_summary(
         return f"{percent:.0f}%"
 
     summary_rows: list[dict[str, Any]] = []
+    previous_lunar_phase_key: str | None = None
     for day_offset, (window_start, window_end) in enumerate(windows):
         night_rows = [
             row
@@ -1068,6 +1526,20 @@ def build_astronomy_forecast_summary(
         if "," in label:
             day_name, date_part = label.split(",", 1)
             label = f"{day_name[:3]}, {date_part.strip()}"
+        lunar_phase_payload = compute_lunar_phase_for_night(
+            tz_name=tz_name,
+            start_local_iso=window_start.isoformat(),
+            end_local_iso=window_end.isoformat(),
+        )
+        lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip().lower() or None
+        lunar_phase_change_emoji = ""
+        if lunar_phase_key:
+            if previous_lunar_phase_key is None:
+                lunar_phase_change_emoji = lunar_phase_emoji(lunar_phase_key)
+            elif lunar_phase_key != previous_lunar_phase_key:
+                lunar_phase_change_emoji = lunar_phase_emoji(lunar_phase_key)
+        previous_lunar_phase_key = lunar_phase_key
+
         if rating_emoji:
             label = f"{label} {rating_emoji}"
 
@@ -1158,12 +1630,33 @@ def build_astronomy_forecast_summary(
         dark_total_minutes = max(0, int(round((window_end - window_start).total_seconds() / 60.0)))
         dark_hours, dark_minutes = divmod(dark_total_minutes, 60)
         dark_duration = f"{dark_hours}h {dark_minutes:02d}m"
+        lunar_summary = compute_lunar_night_summary(
+            lat=lat,
+            lon=lon,
+            tz_name=tz_name,
+            start_local_iso=window_start.isoformat(),
+            end_local_iso=window_end.isoformat(),
+            sample_minutes=10,
+        )
+        lunar_below_horizon_pct = (lunar_summary or {}).get("moon_below_horizon_pct")
+        lunar_avg_altitude_deg = (lunar_summary or {}).get("moon_avg_altitude_deg")
+        lunar_max_altitude_deg = (lunar_summary or {}).get("moon_max_altitude_deg")
+        lunar_display = format_lunar_percent_display(lunar_below_horizon_pct)
+        if lunar_phase_change_emoji:
+            if lunar_display == "-":
+                lunar_display = lunar_phase_change_emoji
+            else:
+                lunar_display = f"{lunar_phase_change_emoji} {lunar_display}"
 
         summary_rows.append(
             {
                 "day_offset": day_offset,
                 "Night": label,
-                "Dark": dark_duration,
+                "Lunar": lunar_display,
+                "Dark Time": dark_duration,
+                "lunar_phase_key": lunar_phase_key or "",
+                "lunar_avg_altitude_deg": lunar_avg_altitude_deg,
+                "lunar_max_altitude_deg": lunar_max_altitude_deg,
                 "Sunset": sunset_text,
                 "Sunrise": sunrise_text,
                 "Clear": clear_display,
@@ -1200,19 +1693,22 @@ def render_astronomy_forecast_summary(
     ordered_columns = [
         "Night",
         "Clear",
+        "Lunar",
         "Calm",
         "Crisp",
-        "Dark",
+        "Dark Time",
         "Avg. Temp",
     ]
     source_frame = frame.copy()
     if "day_offset" not in source_frame.columns:
         source_frame["day_offset"] = 0
+    if "Dark Time" not in source_frame.columns and "Dark" in source_frame.columns:
+        source_frame["Dark Time"] = source_frame["Dark"]
     display_frame = source_frame.reindex(columns=ordered_columns, fill_value="").reset_index(drop=True)
     source_frame = source_frame.reset_index(drop=True)
 
     if mui_table is not None:
-        center_columns = {"Clear", "Calm", "Crisp", "Dark"}
+        center_columns = {"Clear", "Calm", "Crisp", "Lunar", "Dark Time"}
 
         def _mui_cell_html(text: str, style_parts: list[str], *, full_bleed: bool = False) -> str:
             safe_text = html.escape(text) if text else "&nbsp;"
@@ -1251,6 +1747,26 @@ def render_astronomy_forecast_summary(
                     clear_style = clarity_percentage_cell_style(cell_text)
                     if clear_style:
                         style_parts.append(clear_style)
+                if column_name == "Lunar":
+                    lunar_style = lunar_forecast_column_cell_style(
+                        raw_cell_value,
+                        lunar_phase_key=(
+                            source_frame.at[int(row_idx), "lunar_phase_key"]
+                            if "lunar_phase_key" in source_frame.columns
+                            else ""
+                        ),
+                        lunar_max_altitude_deg=(
+                            source_frame.at[int(row_idx), "lunar_max_altitude_deg"]
+                            if "lunar_max_altitude_deg" in source_frame.columns
+                            else (
+                                source_frame.at[int(row_idx), "lunar_avg_altitude_deg"]
+                                if "lunar_avg_altitude_deg" in source_frame.columns
+                                else None
+                            )
+                        ),
+                    )
+                    if lunar_style:
+                        style_parts.append(lunar_style)
                 if column_name == "Avg. Temp":
                     avg_style = temperature_cell_style(cell_text, temperature_unit=temperature_unit)
                     if avg_style:
@@ -1258,23 +1774,32 @@ def render_astronomy_forecast_summary(
                 mui_frame.at[int(row_idx), column_name] = _mui_cell_html(
                     cell_text,
                     style_parts,
-                    full_bleed=(column_name == "Clear"),
+                    full_bleed=(column_name in {"Clear", "Lunar"}),
                 )
+        if "Night" in mui_frame.columns:
+            mui_frame = mui_frame.rename(columns={"Night": ""})
 
         mui_custom_css = """
 .MuiTableCell-root {
   padding: 6px 8px !important;
 }
+.MuiTableHead-root .MuiTableCell-root {
+  vertical-align: bottom !important;
+  padding-top: 10px !important;
+  padding-bottom: 4px !important;
+}
 .MuiTableCell-root:nth-child(2),
 .MuiTableCell-root:nth-child(3),
 .MuiTableCell-root:nth-child(4),
-.MuiTableCell-root:nth-child(5) {
+.MuiTableCell-root:nth-child(5),
+.MuiTableCell-root:nth-child(6) {
   text-align: center !important;
 }
 .MuiTableHead-root .MuiTableCell-root:nth-child(2),
 .MuiTableHead-root .MuiTableCell-root:nth-child(3),
 .MuiTableHead-root .MuiTableCell-root:nth-child(4),
-.MuiTableHead-root .MuiTableCell-root:nth-child(5) {
+.MuiTableHead-root .MuiTableCell-root:nth-child(5),
+.MuiTableHead-root .MuiTableCell-root:nth-child(6) {
   text-align: center !important;
 }
 .MuiTableHead-root .MuiTableCell-root:first-child {
@@ -1357,11 +1882,31 @@ def render_astronomy_forecast_summary(
                 style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
             if column == "Night" and row_is_selected:
                 style_parts.append("font-weight: 700;")
-            if column in {"Dark", "Clear", "Calm", "Crisp"}:
+            if column in {"Lunar", "Dark Time", "Clear", "Calm", "Crisp"}:
                 style_parts.append("text-align: center !important;")
                 style_parts.append("justify-content: center !important;")
             if column == "Clear":
                 style_parts.append(clarity_percentage_cell_style(row.get(column)))
+            if column == "Lunar":
+                style_parts.append(
+                    lunar_forecast_column_cell_style(
+                        row.get(column),
+                        lunar_phase_key=(
+                            source_frame.at[row_idx, "lunar_phase_key"]
+                            if "lunar_phase_key" in source_frame.columns
+                            else ""
+                        ),
+                        lunar_max_altitude_deg=(
+                            source_frame.at[row_idx, "lunar_max_altitude_deg"]
+                            if "lunar_max_altitude_deg" in source_frame.columns
+                            else (
+                                source_frame.at[row_idx, "lunar_avg_altitude_deg"]
+                                if "lunar_avg_altitude_deg" in source_frame.columns
+                                else None
+                            )
+                        ),
+                    )
+                )
             if column == "Avg. Temp":
                 style_parts.append(temperature_cell_style(row.get(column), temperature_unit=temperature_unit))
             styles.append(" ".join(part for part in style_parts if str(part).strip()))
@@ -1369,7 +1914,7 @@ def render_astronomy_forecast_summary(
 
     base_styler = display_frame.style.apply(_style_forecast_row, axis=1)
     base_styler = base_styler.set_properties(
-        subset=["Clear", "Calm", "Crisp", "Dark"],
+        subset=["Clear", "Calm", "Crisp", "Lunar", "Dark Time"],
         **{
             "text-align": "center !important",
             "justify-content": "center !important",
@@ -1385,11 +1930,12 @@ def render_astronomy_forecast_summary(
         selection_mode="single-cell",
         key="astronomy_forecast_table",
         column_config={
-            "Night": st.column_config.TextColumn(width="small"),
+            "Night": st.column_config.TextColumn("", width="small"),
             "Clear": st.column_config.TextColumn(width="small"),
             "Calm": st.column_config.TextColumn(width="small"),
             "Crisp": st.column_config.TextColumn(width="small"),
-            "Dark": st.column_config.TextColumn(width="small"),
+            "Lunar": st.column_config.TextColumn(width="small"),
+            "Dark Time": st.column_config.TextColumn(width="small"),
             "Avg. Temp": st.column_config.TextColumn(width="small"),
         },
     )

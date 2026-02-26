@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 
 from app_constants import WIND16
 from app_theme import resolve_plot_theme_colors
+from features.explorer.lunar import lunar_phase_emoji
 from runtime.weather_service import format_temperature
 
 
@@ -93,6 +94,60 @@ def build_path_hovertext(
         else:
             hover_values.append("")
     return np.asarray(hover_values, dtype=object)
+
+
+def _moon_culmination_point(moon_track: pd.DataFrame) -> dict[str, Any] | None:
+    if not isinstance(moon_track, pd.DataFrame) or moon_track.empty:
+        return None
+
+    moon_times_source = moon_track["time_local"] if "time_local" in moon_track.columns else pd.Series(index=moon_track.index, dtype=object)
+    moon_alt_source = moon_track["alt"] if "alt" in moon_track.columns else pd.Series(index=moon_track.index, dtype=float)
+    moon_az_source = moon_track["az"] if "az" in moon_track.columns else pd.Series(np.nan, index=moon_track.index, dtype=float)
+    moon_times = pd.to_datetime(moon_times_source, errors="coerce")
+    moon_altitudes = pd.to_numeric(moon_alt_source, errors="coerce")
+    moon_azimuths = pd.to_numeric(moon_az_source, errors="coerce")
+    valid_mask = moon_times.notna() & moon_altitudes.notna()
+    valid_mask &= moon_azimuths.notna()
+    if not bool(valid_mask.any()):
+        return None
+
+    moon_times = moon_times.loc[valid_mask]
+    moon_altitudes = moon_altitudes.loc[valid_mask].astype(float)
+    moon_azimuths = moon_azimuths.loc[valid_mask].astype(float)
+
+    altitude_values = moon_altitudes.to_numpy(dtype=float)
+    finite_mask = np.isfinite(altitude_values)
+    if not bool(finite_mask.any()):
+        return None
+
+    moon_times = moon_times.iloc[finite_mask]
+    moon_altitudes = moon_altitudes.iloc[finite_mask]
+    moon_azimuths = moon_azimuths.iloc[finite_mask]
+    if moon_times.empty or moon_altitudes.empty:
+        return None
+
+    max_idx = int(np.argmax(moon_altitudes.to_numpy(dtype=float)))
+    culmination_time = pd.Timestamp(moon_times.iloc[max_idx])
+    culmination_alt = float(moon_altitudes.iloc[max_idx])
+    culmination_az = float(moon_azimuths.iloc[max_idx]) if not moon_azimuths.empty else float("nan")
+    if not np.isfinite(culmination_alt):
+        return None
+    return {
+        "time_local": culmination_time,
+        "alt": culmination_alt,
+        "az": culmination_az,
+    }
+
+
+def _moon_culmination_hovertext(
+    culmination_point: dict[str, Any],
+    *,
+    use_12_hour: bool,
+) -> str:
+    culmination_time = pd.Timestamp(culmination_point["time_local"])
+    time_text = format_display_time(culmination_time, use_12_hour=use_12_hour)
+    altitude_text = f"{float(culmination_point['alt']):.1f} deg"
+    return f"Moon<br>Culmination at {time_text}<br>Altitude: {altitude_text}"
 
 
 def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -432,6 +487,8 @@ def build_unobstructed_altitude_area_plot(
     weather_by_hour: dict[str, dict[str, Any]] | None = None,
     temperature_unit: str = "f",
     mount_choice: str = "none",
+    moon_track: pd.DataFrame | None = None,
+    moon_phase_key: str | None = None,
 ) -> go.Figure:
     unobstructed_area_constant_obstruction_alt_deg = float(
         _ui_name("UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG")
@@ -563,6 +620,72 @@ def build_unobstructed_altitude_area_plot(
                 )
             )
             plotted_any = True
+
+    moon_culmination_point = _moon_culmination_point(moon_track) if isinstance(moon_track, pd.DataFrame) else None
+    if isinstance(moon_track, pd.DataFrame) and not moon_track.empty:
+        moon_times = pd.to_datetime(moon_track.get("time_local"), errors="coerce")
+        moon_altitudes = pd.to_numeric(moon_track.get("alt"), errors="coerce")
+        if moon_times is not None and moon_altitudes is not None:
+            moon_valid_mask = moon_times.notna() & moon_altitudes.notna()
+            if bool(moon_valid_mask.any()):
+                moon_times = moon_times.loc[moon_valid_mask]
+                moon_altitudes = moon_altitudes.loc[moon_valid_mask].astype(float)
+                moon_altitude_values = moon_altitudes.to_numpy(dtype=float)
+                moon_finite_mask = np.isfinite(moon_altitude_values)
+                if bool(moon_finite_mask.any()):
+                    moon_times = moon_times.iloc[moon_finite_mask]
+                    moon_altitude_values = moon_altitude_values[moon_finite_mask]
+                    if not moon_times.empty and moon_altitude_values.size > 0:
+                        plotted_times.extend([pd.Timestamp(value) for value in moon_times.tolist()])
+                        moon_hover_times = np.asarray(
+                            [
+                                format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+                                for value in moon_times.tolist()
+                            ],
+                            dtype=object,
+                        )
+                        moon_hover = build_path_hovertext("Moon", "", moon_hover_times, moon_altitude_values)
+                        fig.add_trace(
+                            go.Scatter(
+                                x=moon_times,
+                                y=moon_altitude_values,
+                                mode="lines",
+                                showlegend=False,
+                                line={"width": 3.0, "color": "rgba(0, 0, 0, 0.45)"},
+                                hoverinfo="skip",
+                            )
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=moon_times,
+                                y=moon_altitude_values,
+                                mode="lines",
+                                name="Moon",
+                                showlegend=False,
+                                line={"width": 1.8, "color": "#ffffff"},
+                                hovertext=moon_hover,
+                                hovertemplate="%{hovertext}<extra></extra>",
+                            )
+                        )
+                        if moon_culmination_point is not None:
+                            moon_emoji = lunar_phase_emoji(moon_phase_key)
+                            moon_culmination_hover = _moon_culmination_hovertext(
+                                moon_culmination_point,
+                                use_12_hour=use_12_hour,
+                            )
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=[pd.Timestamp(moon_culmination_point["time_local"])],
+                                    y=[float(moon_culmination_point["alt"])],
+                                    mode="text",
+                                    text=[moon_emoji],
+                                    textposition="middle center",
+                                    textfont={"size": 18},
+                                    showlegend=False,
+                                    hovertext=[moon_culmination_hover],
+                                    hovertemplate="%{hovertext}<extra></extra>",
+                                )
+                            )
 
     title = "Unobstructed Altitude Coverage"
     if not plotted_any:
@@ -731,6 +854,8 @@ def build_path_plot(
     use_12_hour: bool,
     overlay_tracks: list[dict[str, Any]] | None = None,
     mount_choice: str = "none",
+    moon_track: pd.DataFrame | None = None,
+    moon_phase_key: str | None = None,
 ) -> go.Figure:
     path_endpoint_marker_size_primary = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_PRIMARY"))
     path_endpoint_marker_size_overlay = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_OVERLAY"))
@@ -792,6 +917,34 @@ def build_path_plot(
                 hoverinfo="skip",
             )
         )
+
+    moon_culmination_point = _moon_culmination_point(moon_track) if isinstance(moon_track, pd.DataFrame) else None
+    if isinstance(moon_track, pd.DataFrame) and not moon_track.empty:
+        moon_path_x, moon_path_y, moon_path_times = split_path_on_az_wrap(moon_track, use_12_hour=use_12_hour)
+        if moon_path_x.size > 0:
+            moon_hover = build_path_hovertext("Moon", "", moon_path_times, moon_path_y)
+            fig.add_trace(
+                go.Scatter(
+                    x=moon_path_x,
+                    y=moon_path_y,
+                    mode="lines",
+                    showlegend=False,
+                    line={"width": 3.2, "color": "rgba(0, 0, 0, 0.45)"},
+                    hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=moon_path_x,
+                    y=moon_path_y,
+                    mode="lines",
+                    name="Moon",
+                    showlegend=False,
+                    line={"width": 1.9, "color": "#ffffff"},
+                    hovertext=moon_hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                )
+            )
 
     path_x, path_y, path_times = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
     selected_hover = build_path_hovertext(selected_label, selected_emissions, path_times, path_y)
@@ -915,6 +1068,7 @@ def build_path_plot(
                         hoverinfo="skip",
                     )
                 )
+
             if overlay_set_segment is not None:
                 fig.add_trace(
                     go.Scatter(
@@ -956,6 +1110,23 @@ def build_path_plot(
                     )
                 )
 
+    if moon_culmination_point is not None and np.isfinite(float(moon_culmination_point.get("az", np.nan))):
+        moon_emoji = lunar_phase_emoji(moon_phase_key)
+        moon_culmination_hover = _moon_culmination_hovertext(moon_culmination_point, use_12_hour=use_12_hour)
+        fig.add_trace(
+            go.Scatter(
+                x=[float(moon_culmination_point["az"])],
+                y=[float(moon_culmination_point["alt"])],
+                mode="text",
+                text=[moon_emoji],
+                textposition="middle center",
+                textfont={"size": 18},
+                showlegend=False,
+                hovertext=[moon_culmination_hover],
+                hovertemplate="%{hovertext}<extra></extra>",
+            )
+        )
+
     fig.update_layout(
         title="Target Paths",
         height=360,
@@ -990,6 +1161,8 @@ def build_path_plot_radial(
     use_12_hour: bool,
     overlay_tracks: list[dict[str, Any]] | None = None,
     mount_choice: str = "none",
+    moon_track: pd.DataFrame | None = None,
+    moon_phase_key: str | None = None,
 ) -> go.Figure:
     path_endpoint_marker_size_primary = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_PRIMARY"))
     path_endpoint_marker_size_overlay = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_OVERLAY"))
@@ -1080,6 +1253,57 @@ def build_path_plot_radial(
                 hoverinfo="skip",
             )
         )
+
+    moon_culmination_point = _moon_culmination_point(moon_track) if isinstance(moon_track, pd.DataFrame) else None
+    if isinstance(moon_track, pd.DataFrame) and not moon_track.empty:
+        moon_altitudes = pd.to_numeric(moon_track.get("alt"), errors="coerce")
+        moon_azimuths = pd.to_numeric(moon_track.get("az"), errors="coerce")
+        moon_times = pd.to_datetime(moon_track.get("time_local"), errors="coerce")
+        moon_valid_mask = moon_altitudes.notna() & moon_azimuths.notna() & moon_times.notna()
+        if bool(moon_valid_mask.any()):
+            moon_altitudes = moon_altitudes.loc[moon_valid_mask].astype(float)
+            moon_azimuths = moon_azimuths.loc[moon_valid_mask].astype(float)
+            moon_times = moon_times.loc[moon_valid_mask]
+            moon_altitude_values = moon_altitudes.to_numpy(dtype=float)
+            moon_azimuth_values = moon_azimuths.to_numpy(dtype=float)
+            moon_finite_mask = np.isfinite(moon_altitude_values) & np.isfinite(moon_azimuth_values)
+            if bool(moon_finite_mask.any()):
+                moon_altitude_values = moon_altitude_values[moon_finite_mask]
+                moon_azimuth_values = moon_azimuth_values[moon_finite_mask]
+                moon_times = moon_times.iloc[moon_finite_mask]
+                if moon_altitude_values.size > 0 and not moon_times.empty:
+                    moon_alt_series = pd.Series(moon_altitude_values)
+                    moon_r = (90.0 - moon_alt_series.clip(lower=0.0, upper=90.0)) if dome_view else moon_alt_series.clip(lower=0.0, upper=90.0)
+                    moon_time_values = np.asarray(
+                        [
+                            format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+                            for value in moon_times.tolist()
+                        ],
+                        dtype=object,
+                    )
+                    moon_hover = build_path_hovertext("Moon", "", moon_time_values, moon_altitude_values)
+                    fig.add_trace(
+                        go.Scatterpolar(
+                            theta=moon_azimuth_values,
+                            r=moon_r,
+                            mode="lines",
+                            showlegend=False,
+                            line={"width": 3.2, "color": "rgba(0, 0, 0, 0.45)"},
+                            hoverinfo="skip",
+                        )
+                    )
+                    fig.add_trace(
+                        go.Scatterpolar(
+                            theta=moon_azimuth_values,
+                            r=moon_r,
+                            mode="lines",
+                            name="Moon",
+                            showlegend=False,
+                            line={"width": 1.9, "color": "#ffffff"},
+                            hovertext=moon_hover,
+                            hovertemplate="%{hovertext}<extra></extra>",
+                        )
+                    )
 
     selected_time_values = np.asarray(
         [format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in track["time_local"].tolist()],
@@ -1227,6 +1451,7 @@ def build_path_plot_radial(
                         hoverinfo="skip",
                     )
                 )
+
             if overlay_set_segment is not None:
                 fig.add_trace(
                     go.Scatterpolar(
@@ -1272,6 +1497,25 @@ def build_path_plot_radial(
                         hovertemplate=f"{target_label}<br>%{{customdata[0]}} at %{{customdata[1]}}<extra></extra>",
                     )
                 )
+
+    if moon_culmination_point is not None and np.isfinite(float(moon_culmination_point.get("az", np.nan))):
+        moon_emoji = lunar_phase_emoji(moon_phase_key)
+        moon_alt = float(moon_culmination_point["alt"])
+        moon_r = max(0.0, min(90.0, 90.0 - moon_alt)) if dome_view else max(0.0, min(90.0, moon_alt))
+        moon_culmination_hover = _moon_culmination_hovertext(moon_culmination_point, use_12_hour=use_12_hour)
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[float(moon_culmination_point["az"])],
+                r=[moon_r],
+                mode="text",
+                text=[moon_emoji],
+                textposition="middle center",
+                textfont={"size": 18},
+                showlegend=False,
+                hovertext=[moon_culmination_hover],
+                hovertemplate="%{hovertext}<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title="Target Paths",

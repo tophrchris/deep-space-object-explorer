@@ -108,5 +108,20 @@ def render_condition_tips_panel(
         )
     if bullet_lines:
         st.markdown("\n".join(bullet_lines))
-    for muted_line in muted_lines:
-        st.caption(muted_line)
+    if muted_lines:
+        muted_html = "".join(
+            (
+                "<div style=\"margin:0.02rem 0; line-height:1.12;\">"
+                f"{_tip_text_html(muted_line)}"
+                "</div>"
+            )
+            for muted_line in muted_lines
+        )
+        st.markdown(
+            (
+                "<div style=\"color:#6b7280; font-size:0.88rem; margin-top:0.08rem;\">"
+                f"{muted_html}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )

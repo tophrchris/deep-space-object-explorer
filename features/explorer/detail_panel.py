@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from runtime.lunar_ephemeris import compute_lunar_phase_for_night, compute_moon_track
+
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
 from ui import streamlit_app as _legacy_ui
@@ -58,6 +60,44 @@ def render_detail_panel(
         if numeric is None or numeric <= 0.0:
             return None
         return float(numeric)
+
+    def _compute_moon_track_for_window(
+        *,
+        start_local: datetime,
+        end_local: datetime,
+        tz_name: str,
+    ) -> pd.DataFrame:
+        try:
+            moon_track = compute_moon_track(
+                lat=location_lat,
+                lon=location_lon,
+                tz_name=tz_name,
+                start_local_iso=pd.Timestamp(start_local).isoformat(),
+                end_local_iso=pd.Timestamp(end_local).isoformat(),
+                sample_minutes=10,
+            )
+            if isinstance(moon_track, pd.DataFrame):
+                return moon_track
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    def _compute_moon_phase_key_for_window(
+        *,
+        start_local: datetime,
+        end_local: datetime,
+        tz_name: str,
+    ) -> str | None:
+        try:
+            phase_payload = compute_lunar_phase_for_night(
+                tz_name=tz_name,
+                start_local_iso=pd.Timestamp(start_local).isoformat(),
+                end_local_iso=pd.Timestamp(end_local).isoformat(),
+            )
+            phase_key = str((phase_payload or {}).get("phase_key", "")).strip().lower()
+            return phase_key or None
+        except Exception:
+            return None
 
     def resolve_active_telescope_for_framing() -> dict[str, Any] | None:
         equipment_context = build_owned_equipment_context(prefs)
@@ -142,6 +182,16 @@ def render_detail_panel(
         )
         nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit)
         temperatures, _, weather_by_hour = build_hourly_weather_maps(hourly_weather_rows)
+        moon_track = _compute_moon_track_for_window(
+            start_local=window_start,
+            end_local=window_end,
+            tz_name=tzinfo.key,
+        )
+        moon_phase_key = _compute_moon_phase_key_for_window(
+            start_local=window_start,
+            end_local=window_end,
+            tz_name=tzinfo.key,
+        )
 
         with st.container(border=True):
             st.markdown("### Night Sky Preview")
@@ -322,6 +372,8 @@ def render_detail_panel(
                             use_12_hour=use_12_hour,
                             overlay_tracks=overlay_tracks_for_path,
                             mount_choice=plot_mount_choice,
+                            moon_track=moon_track,
+                            moon_phase_key=moon_phase_key,
                         )
                     else:
                         path_figure = build_path_plot(
@@ -337,6 +389,8 @@ def render_detail_panel(
                             use_12_hour=use_12_hour,
                             overlay_tracks=overlay_tracks_for_path,
                             mount_choice=plot_mount_choice,
+                            moon_track=moon_track,
+                            moon_phase_key=moon_phase_key,
                         )
 
                 path_col, area_col = st.columns([1, 1], gap="small")
@@ -358,11 +412,12 @@ def render_detail_panel(
                             weather_by_hour=weather_by_hour,
                             temperature_unit=temperature_unit,
                             mount_choice=plot_mount_choice,
+                            moon_track=moon_track,
+                            moon_phase_key=moon_phase_key,
                         ),
                         use_container_width=True,
                         key="preview_unobstructed_area_plot",
                     )
-                    st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
         return
 
     target_id = str(selected["primary_id"])
@@ -946,6 +1001,16 @@ def render_detail_panel(
     forecast_hourly_weather_rows = hourly_weather_rows
     nightly_weather_alert_emojis = collect_night_weather_alert_emojis(forecast_hourly_weather_rows, temperature_unit)
     temperatures, cloud_cover_by_hour, weather_by_hour = build_hourly_weather_maps(forecast_hourly_weather_rows)
+    moon_track = _compute_moon_track_for_window(
+        start_local=window_start,
+        end_local=window_end,
+        tz_name=tzinfo.key,
+    )
+    moon_phase_key = _compute_moon_phase_key_for_window(
+        start_local=window_start,
+        end_local=window_end,
+        tz_name=tzinfo.key,
+    )
     if normalized_forecast_day_offset <= 0:
         detail_hourly_period_label = "Tonight"
     elif normalized_forecast_day_offset == 1:
@@ -986,6 +1051,8 @@ def render_detail_panel(
                 use_12_hour=use_12_hour,
                 overlay_tracks=preview_tracks,
                 mount_choice=plot_mount_choice,
+                moon_track=moon_track,
+                moon_phase_key=moon_phase_key,
             )
         else:
             path_figure = build_path_plot(
@@ -999,6 +1066,8 @@ def render_detail_panel(
                 use_12_hour=use_12_hour,
                 overlay_tracks=preview_tracks,
                 mount_choice=plot_mount_choice,
+                moon_track=moon_track,
+                moon_phase_key=moon_phase_key,
             )
 
         should_animate_weather_alerts = normalized_forecast_day_offset == 0
@@ -1068,11 +1137,12 @@ def render_detail_panel(
                     weather_by_hour=weather_by_hour,
                     temperature_unit=temperature_unit,
                     mount_choice=plot_mount_choice,
+                    moon_track=moon_track,
+                    moon_phase_key=moon_phase_key,
                 ),
                 use_container_width=True,
                 key="detail_unobstructed_area_plot",
             )
-            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
 
         local_now = datetime.now(tzinfo)
         show_remaining_column = window_start <= local_now <= window_end
@@ -1299,4 +1369,3 @@ def render_sidebar_active_settings(
         prefs["ui_theme"] = selected_ui_theme
         persist_and_rerun(prefs)
     return selected_ui_theme
-

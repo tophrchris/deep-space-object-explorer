@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from runtime.lunar_ephemeris import (
+    build_hourly_lunar_altitude_map,
+    compute_lunar_phase_for_night,
+)
+
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
 from ui import streamlit_app as _legacy_ui
@@ -91,6 +96,20 @@ def _render_explorer_page_impl(
         hourly_weather_rows,
         temperature_unit=temperature_unit,
     )
+    lunar_hourly_altitude_by_hour = build_hourly_lunar_altitude_map(
+        lat=location_lat,
+        lon=location_lon,
+        tz_name=weather_tzinfo.key,
+        start_local_iso=weather_window_start.isoformat(),
+        end_local_iso=weather_window_end.isoformat(),
+        sample_minutes=10,
+    )
+    lunar_phase_payload = compute_lunar_phase_for_night(
+        tz_name=weather_tzinfo.key,
+        start_local_iso=weather_window_start.isoformat(),
+        end_local_iso=weather_window_end.isoformat(),
+    )
+    lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip() or None
     condition_tips_title = format_condition_tips_title(
         weather_forecast_day_offset,
         weather_window_start,
@@ -101,6 +120,8 @@ def _render_explorer_page_impl(
         hourly_weather_rows,
         use_12_hour=use_12_hour,
         temperature_unit=temperature_unit,
+        lunar_hourly_altitude_by_hour=lunar_hourly_altitude_by_hour,
+        lunar_phase_key=lunar_phase_key,
     )
     selected_summary_row: dict[str, Any] | None = None
     if not astronomy_summary.empty:
@@ -135,9 +156,7 @@ def _render_explorer_page_impl(
                 selected_day_offset=weather_forecast_day_offset,
             )
             st.caption("Click any row to set the active weather night across the page.")
-            st.caption(WEATHER_ALERT_INDICATOR_LEGEND_CAPTION)
-            st.markdown(night_time_clarity_scale_legend_html(), unsafe_allow_html=True)
-            st.markdown(dew_risk_scale_legend_html(), unsafe_allow_html=True)
+            st.markdown(site_conditions_legends_table_html(), unsafe_allow_html=True)
 
         with hourly_container:
             st.markdown(
@@ -146,9 +165,15 @@ def _render_explorer_page_impl(
             weather_display = weather_matrix.reset_index().rename(columns={"index": "Element"})
             weather_tooltip_display = weather_tooltips.reset_index().rename(columns={"index": "Element"})
             weather_indicator_display = weather_indicators.reset_index().rename(columns={"index": "Element"})
-            st.caption("Click an hour column header to search Recommended Targets for that hour.")
 
             hourly_header_to_hour_key: dict[str, str] = {}
+            hourly_header_column_states: dict[str, str] = {}
+            current_local_hour_floor: pd.Timestamp | None = None
+            if weather_forecast_day_offset == 0:
+                try:
+                    current_local_hour_floor = pd.Timestamp(datetime.now(weather_tzinfo)).floor("h")
+                except Exception:
+                    current_local_hour_floor = None
             for hourly_row in hourly_weather_rows:
                 time_iso = str(hourly_row.get("time_iso", "")).strip()
                 if not time_iso:
@@ -161,13 +186,21 @@ def _render_explorer_page_impl(
                 header_hour_key = normalize_hour_key(timestamp)
                 if header_label and header_hour_key and header_label not in hourly_header_to_hour_key:
                     hourly_header_to_hour_key[header_label] = header_hour_key
+                if header_label and current_local_hour_floor is not None and header_label not in hourly_header_column_states:
+                    hour_floor_local = pd.Timestamp(timestamp).floor("h")
+                    if hour_floor_local < current_local_hour_floor:
+                        hourly_header_column_states[header_label] = "past"
+                    elif hour_floor_local == current_local_hour_floor:
+                        hourly_header_column_states[header_label] = "current"
 
             clicked_hour_column_label = render_hourly_weather_matrix(
                 weather_display,
                 temperature_unit=temperature_unit,
                 tooltip_frame=weather_tooltip_display,
                 indicator_frame=weather_indicator_display,
+                hour_column_states=(hourly_header_column_states or None),
             )
+            st.caption("Click an hour column header to search Recommended Targets for that hour.")
             clicked_hour_key = (
                 hourly_header_to_hour_key.get(str(clicked_hour_column_label).strip(), "")
                 if clicked_hour_column_label is not None
