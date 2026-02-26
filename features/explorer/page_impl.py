@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import math
+
 from runtime.lunar_ephemeris import (
     build_hourly_lunar_altitude_map,
     compute_lunar_phase_for_night,
 )
+from runtime.noaa_goes_cloud_loop import resolve_site_cloud_loop
 
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
@@ -17,6 +21,182 @@ def _refresh_legacy_globals() -> None:
 
 
 _refresh_legacy_globals()
+
+
+def _render_observed_cloud_panel(goes_cloud_loop: dict[str, Any] | None) -> None:
+    payload = goes_cloud_loop if isinstance(goes_cloud_loop, dict) else {}
+    if not bool(payload.get("available", False)):
+        return
+
+    panel_label = str(payload.get("panel_label", "")).strip()
+    product_name = str(payload.get("product_name", "")).strip()
+    source_page_url = str(payload.get("source_page_url", "")).strip()
+    image_url = str(payload.get("image_url", "")).strip()
+    raw_frame_urls = payload.get("frame_urls", [])
+    frame_urls = [str(url).strip() for url in raw_frame_urls if str(url).strip()] if isinstance(raw_frame_urls, list) else []
+    site_pin_payload: dict[str, Any] | None = None
+    raw_site_pin = payload.get("site_overlay_pin", None)
+    if isinstance(raw_site_pin, dict):
+        try:
+            pin_x = float(raw_site_pin.get("x_frac", "nan"))
+            pin_y = float(raw_site_pin.get("y_frac", "nan"))
+        except (TypeError, ValueError):
+            pin_x = float("nan")
+            pin_y = float("nan")
+        if (
+            math.isfinite(pin_x)
+            and math.isfinite(pin_y)
+            and 0.0 <= pin_x <= 1.0
+            and 0.0 <= pin_y <= 1.0
+        ):
+            site_pin_payload = {
+                "x_frac": pin_x,
+                "y_frac": pin_y,
+                "label": str(raw_site_pin.get("label", "")).strip() or "Site (approx)",
+                "method": str(raw_site_pin.get("method", "")).strip(),
+            }
+
+    if panel_label or product_name:
+        title_bits = [bit for bit in [panel_label, product_name] if bit]
+        st.caption("Observed cloud loop: " + " | ".join(title_bits))
+
+    if len(frame_urls) >= 2:
+        sampled_frame_urls = frame_urls[-12:]
+        frame_list_json = json.dumps(sampled_frame_urls)
+        site_pin_json = json.dumps(site_pin_payload) if site_pin_payload else "null"
+        first_frame = sampled_frame_urls[0]
+        slideshow_html = f"""
+        <html>
+          <body style="margin:0;background:transparent;">
+            <div id="dso-noaa-cloud-loop-wrap" style="position:relative; width:100%; height:300px; display:flex; justify-content:center; align-items:center; background:#0b0b0b; border-radius:6px; overflow:hidden;">
+              <img id="dso-noaa-cloud-loop" src="{first_frame}" alt="Observed cloud loop" style="width:100%; height:100%; object-fit:contain; display:block;" />
+              <div id="dso-noaa-cloud-site-pin" title="Approximate site location" style="position:absolute; width:18px; height:24px; display:none; pointer-events:none; transform:translate(-50%, -92%); z-index:3;">
+                <svg viewBox="0 0 24 32" width="18" height="24" aria-hidden="true">
+                  <path d="M12 31 C12 31 3 20 3 12.5 C3 7.25 7.25 3 12.5 3 C17.75 3 22 7.25 22 12.5 C22 20 12 31 12 31 Z" fill="rgba(255,255,255,0.10)" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>
+                  <circle cx="12.5" cy="12.5" r="3.5" fill="#ffffff" opacity="0.92"/>
+                </svg>
+              </div>
+              <div id="dso-noaa-cloud-ts" style="position:absolute; right:10px; bottom:10px; background:rgba(0,0,0,0.65); color:#f1f1f1; font:12px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; padding:5px 8px; border-radius:4px; pointer-events:none; white-space:nowrap;">
+                Frame time (local)
+              </div>
+            </div>
+            <script>
+              const frames = {frame_list_json};
+              const sitePin = {site_pin_json};
+              let idx = 0;
+              const wrap = document.getElementById("dso-noaa-cloud-loop-wrap");
+              const img = document.getElementById("dso-noaa-cloud-loop");
+              const pinEl = document.getElementById("dso-noaa-cloud-site-pin");
+              const tsEl = document.getElementById("dso-noaa-cloud-ts");
+              const localFormatter = new Intl.DateTimeFormat(undefined, {{
+                month: "numeric",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+                timeZoneName: "short",
+              }});
+              function parseNoaaFrameDate(url) {{
+                if (typeof url !== "string") return null;
+                const match = url.match(/\\/(\\d{{11}})_GOES\\d+/i);
+                if (!match) return null;
+                const token = match[1];
+                const year = Number(token.slice(0, 4));
+                const dayOfYear = Number(token.slice(4, 7));
+                const hour = Number(token.slice(7, 9));
+                const minute = Number(token.slice(9, 11));
+                if (!Number.isFinite(year) || !Number.isFinite(dayOfYear) || !Number.isFinite(hour) || !Number.isFinite(minute)) {{
+                  return null;
+                }}
+                const dt = new Date(Date.UTC(year, 0, 1, hour, minute));
+                dt.setUTCDate(dayOfYear);
+                return dt;
+              }}
+              function positionSitePin() {{
+                if (!pinEl || !wrap || !img || !sitePin || typeof sitePin !== "object") {{
+                  if (pinEl) pinEl.style.display = "none";
+                  return;
+                }}
+                const xFrac = Number(sitePin.x_frac);
+                const yFrac = Number(sitePin.y_frac);
+                if (!Number.isFinite(xFrac) || !Number.isFinite(yFrac)) {{
+                  pinEl.style.display = "none";
+                  return;
+                }}
+                const wrapRect = wrap.getBoundingClientRect();
+                const wrapW = Number(wrapRect.width) || 0;
+                const wrapH = Number(wrapRect.height) || 0;
+                const naturalW = Number(img.naturalWidth) || 1;
+                const naturalH = Number(img.naturalHeight) || 1;
+                if (!(wrapW > 0 && wrapH > 0 && naturalW > 0 && naturalH > 0)) {{
+                  pinEl.style.display = "none";
+                  return;
+                }}
+                const imageAspect = naturalW / naturalH;
+                const wrapAspect = wrapW / wrapH;
+                let drawW = wrapW;
+                let drawH = wrapH;
+                let offsetX = 0;
+                let offsetY = 0;
+                if (imageAspect > wrapAspect) {{
+                  drawW = wrapW;
+                  drawH = wrapW / imageAspect;
+                  offsetY = (wrapH - drawH) / 2;
+                }} else {{
+                  drawH = wrapH;
+                  drawW = wrapH * imageAspect;
+                  offsetX = (wrapW - drawW) / 2;
+                }}
+                const clampedX = Math.max(0, Math.min(1, xFrac));
+                const clampedY = Math.max(0, Math.min(1, yFrac));
+                pinEl.style.left = (offsetX + (clampedX * drawW)) + "px";
+                pinEl.style.top = (offsetY + (clampedY * drawH)) + "px";
+                pinEl.style.display = "block";
+              }}
+              function setFrame(frameIndex) {{
+                if (!img || !Array.isArray(frames) || frames.length < 1) return;
+                idx = ((frameIndex % frames.length) + frames.length) % frames.length;
+                const nextUrl = frames[idx];
+                img.src = nextUrl;
+                if (tsEl) {{
+                  const parsedDate = parseNoaaFrameDate(nextUrl);
+                  tsEl.textContent = parsedDate
+                    ? "Frame (local): " + localFormatter.format(parsedDate)
+                    : "Frame (local time unavailable)";
+                }}
+              }}
+              if (img) {{
+                img.addEventListener("load", () => {{
+                  positionSitePin();
+                }});
+              }}
+              if (typeof window !== "undefined") {{
+                window.addEventListener("resize", () => {{
+                  positionSitePin();
+                }});
+              }}
+              if (img && Array.isArray(frames) && frames.length > 0) {{
+                setFrame(0);
+              }}
+              if (img && Array.isArray(frames) && frames.length > 1) {{
+                setInterval(() => {{
+                  setFrame(idx + 1);
+                }}, 700);
+              }}
+              setTimeout(positionSitePin, 0);
+            </script>
+          </body>
+        </html>
+        """
+        try:
+            st.components.v1.html(slideshow_html, height=310, scrolling=False)
+        except Exception:
+            if image_url:
+                st.image(image_url, use_container_width=True)
+    elif image_url:
+        st.image(image_url, use_container_width=True)
+
+    if source_page_url:
+        st.caption(f"[NOAA GOES source page]({source_page_url})")
 
 def _render_explorer_page_impl(
     catalog: pd.DataFrame,
@@ -110,6 +290,7 @@ def _render_explorer_page_impl(
         end_local_iso=weather_window_end.isoformat(),
     )
     lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip() or None
+    goes_cloud_loop = resolve_site_cloud_loop(location_lat, location_lon)
     condition_tips_title = format_condition_tips_title(
         weather_forecast_day_offset,
         weather_window_start,
@@ -157,6 +338,7 @@ def _render_explorer_page_impl(
             )
             st.caption("Click any row to set the active weather night across the page.")
             st.markdown(site_conditions_legends_table_html(), unsafe_allow_html=True)
+            _render_observed_cloud_panel(goes_cloud_loop)
 
         with hourly_container:
             st.markdown(
