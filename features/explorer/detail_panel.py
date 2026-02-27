@@ -754,34 +754,43 @@ def render_detail_panel(
                 if not editable_list_ids:
                     st.caption("No editable lists available yet.")
                 else:
-                    preferred_action_list_id = (
-                        active_preview_list_id if active_preview_list_id in editable_list_ids else editable_list_ids[0]
-                    )
-                    action_select_key = "detail_add_to_list_select"
-                    current_action_selection = str(st.session_state.get(action_select_key, "")).strip()
-                    if current_action_selection not in editable_list_ids:
-                        st.session_state[action_select_key] = preferred_action_list_id
-                        current_action_selection = preferred_action_list_id
+                    current_member_list_ids = [
+                        list_id for list_id in editable_list_ids if target_id in set(get_list_ids(prefs, list_id))
+                    ]
+                    action_multiselect_key = "detail_add_to_lists_multiselect"
+                    action_multiselect_target_key = "detail_add_to_lists_multiselect_target"
+                    if (
+                        action_multiselect_key not in st.session_state
+                        or str(st.session_state.get(action_multiselect_target_key, "")).strip() != target_id
+                    ):
+                        st.session_state[action_multiselect_key] = list(current_member_list_ids)
+                        st.session_state[action_multiselect_target_key] = target_id
 
-                    selected_action_list_id = st.selectbox(
-                        "Add to list...",
+                    selected_action_list_ids = st.multiselect(
+                        "Lists",
                         options=editable_list_ids,
-                        index=editable_list_ids.index(current_action_selection),
-                        key=action_select_key,
+                        key=action_multiselect_key,
                         format_func=lambda list_id: get_list_name(prefs, list_id),
+                        help="Select one or more lists to include this target.",
                     )
-                    selected_action_list_name = get_list_name(prefs, selected_action_list_id)
-                    selected_action_list_members = set(get_list_ids(prefs, selected_action_list_id))
-                    is_in_selected_action_list = target_id in selected_action_list_members
-                    list_action_label = "Remove" if is_in_selected_action_list else "Add"
-                    if st.button(list_action_label, use_container_width=True, key="detail_add_to_list_apply"):
-                        if toggle_target_in_list(prefs, selected_action_list_id, target_id):
+                    selected_action_list_set = {
+                        list_id for list_id in selected_action_list_ids if list_id in editable_list_ids
+                    }
+                    current_member_list_set = set(current_member_list_ids)
+                    if selected_action_list_set != current_member_list_set:
+                        membership_changed = False
+                        for list_id in editable_list_ids:
+                            should_include = list_id in selected_action_list_set
+                            currently_included = list_id in current_member_list_set
+                            if should_include == currently_included:
+                                continue
+                            if toggle_target_in_list(prefs, list_id, target_id):
+                                membership_changed = True
+                        if membership_changed:
                             st.session_state["selected_id"] = target_id
                             st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
                             persist_and_rerun(prefs)
-                    st.caption(
-                        f"{'In' if is_in_selected_action_list else 'Not in'} list: {selected_action_list_name}"
-                    )
+                    st.caption(f"In {len(current_member_list_ids)} editable list(s).")
 
                 ra_deg_value = parse_numeric(selected.get("ra_deg"))
                 dec_deg_value = parse_numeric(selected.get("dec_deg"))
