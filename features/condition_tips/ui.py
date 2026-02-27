@@ -53,6 +53,7 @@ def render_condition_tips_panel(
     summary_row: dict[str, Any] | None,
     temperature_unit: str,
     use_12_hour: bool,
+    eclipse_visibility: dict[str, Any] | None = None,
     prepended_muted_lines: list[str] | None = None,
 ) -> None:
     rendered_title = html.escape(str(title or "").strip() or "Conditions")
@@ -76,6 +77,7 @@ def render_condition_tips_panel(
         summary_row=summary_row,
         temperature_unit=temperature_unit,
         use_12_hour=use_12_hour,
+        eclipse_visibility=eclipse_visibility,
     )
     tips = collect_condition_tips(context)
     if not tips:

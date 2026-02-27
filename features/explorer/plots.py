@@ -12,6 +12,9 @@ from app_theme import resolve_plot_theme_colors
 from features.explorer.lunar import lunar_phase_emoji
 from runtime.weather_service import format_temperature
 
+_ECLIPSE_ACCENT_HEX = "#7A1E2C"
+_ECLIPSE_ACCENT_SHADOW = "rgba(122, 30, 44, 0.44)"
+
 
 @lru_cache(maxsize=None)
 def _ui_name(name: str) -> Any:
@@ -148,6 +151,125 @@ def _moon_culmination_hovertext(
     time_text = format_display_time(culmination_time, use_12_hour=use_12_hour)
     altitude_text = f"{float(culmination_point['alt']):.1f} deg"
     return f"Moon<br>Culmination at {time_text}<br>Altitude: {altitude_text}"
+
+
+def _interpolate_moon_track_alt_az(moon_track: pd.DataFrame, target_time: pd.Timestamp) -> tuple[float, float] | None:
+    if not isinstance(moon_track, pd.DataFrame) or moon_track.empty:
+        return None
+    times = pd.to_datetime(moon_track.get("time_local"), errors="coerce")
+    altitudes = pd.to_numeric(moon_track.get("alt"), errors="coerce")
+    azimuths = pd.to_numeric(moon_track.get("az"), errors="coerce")
+    valid_mask = times.notna() & altitudes.notna() & azimuths.notna()
+    if not bool(valid_mask.any()):
+        return None
+
+    working = pd.DataFrame(
+        {
+            "time_local": times.loc[valid_mask],
+            "alt": altitudes.loc[valid_mask].astype(float),
+            "az": azimuths.loc[valid_mask].astype(float),
+        }
+    ).sort_values("time_local")
+    if working.empty:
+        return None
+
+    time_ns = pd.to_datetime(working["time_local"]).astype("int64").to_numpy(dtype=np.int64)
+    altitude_values = working["alt"].to_numpy(dtype=float)
+    azimuth_values = np.mod(working["az"].to_numpy(dtype=float), 360.0)
+    if time_ns.size < 1 or altitude_values.size < 1 or azimuth_values.size < 1:
+        return None
+
+    target_timestamp = pd.Timestamp(target_time)
+    target_ns = int(target_timestamp.value)
+    if target_ns < int(time_ns[0]) or target_ns > int(time_ns[-1]):
+        return None
+
+    right_idx = int(np.searchsorted(time_ns, target_ns, side="left"))
+    left_idx = max(0, right_idx - 1)
+    if right_idx >= len(time_ns):
+        return float(altitude_values[-1]), float(azimuth_values[-1])
+
+    left_ns = int(time_ns[left_idx])
+    right_ns = int(time_ns[right_idx])
+    if right_ns <= left_ns:
+        return float(altitude_values[left_idx]), float(azimuth_values[left_idx])
+
+    fraction = float((target_ns - left_ns) / float(right_ns - left_ns))
+    fraction = max(0.0, min(1.0, fraction))
+    alt_left = float(altitude_values[left_idx])
+    alt_right = float(altitude_values[right_idx])
+    interpolated_alt = alt_left + ((alt_right - alt_left) * fraction)
+
+    az_left = float(azimuth_values[left_idx]) % 360.0
+    az_right = float(azimuth_values[right_idx]) % 360.0
+    az_delta = ((az_right - az_left + 540.0) % 360.0) - 180.0
+    interpolated_az = (az_left + (az_delta * fraction)) % 360.0
+    return float(interpolated_alt), float(interpolated_az)
+
+
+def _eclipse_phase_plot_points(
+    moon_track: pd.DataFrame | None,
+    eclipse_visibility: dict[str, Any] | None,
+    *,
+    use_12_hour: bool,
+) -> list[dict[str, Any]]:
+    if not isinstance(moon_track, pd.DataFrame) or moon_track.empty:
+        return []
+    payload = eclipse_visibility if isinstance(eclipse_visibility, dict) else {}
+    raw_events = payload.get("events", [])
+    if not isinstance(raw_events, list) or not raw_events:
+        return []
+
+    points: list[dict[str, Any]] = []
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        raw_phases = event.get("phases", [])
+        if not isinstance(raw_phases, list):
+            continue
+        for phase in raw_phases:
+            if not isinstance(phase, dict):
+                continue
+            phase_name = str(phase.get("name", "")).strip().lower()
+            if phase_name not in {"partial", "total"}:
+                continue
+            phase_prefix = "T" if phase_name == "total" else "P"
+            phase_label = "Total" if phase_name == "total" else "Partial"
+            for boundary in ("start", "end"):
+                phase_time = pd.to_datetime(phase.get(f"{boundary}_local_iso"), errors="coerce")
+                if phase_time is None or pd.isna(phase_time):
+                    continue
+                interpolated = _interpolate_moon_track_alt_az(moon_track, pd.Timestamp(phase_time))
+                if interpolated is None:
+                    continue
+                altitude_deg, azimuth_deg = interpolated
+                if not np.isfinite(altitude_deg) or not np.isfinite(azimuth_deg):
+                    continue
+                boundary_title = "Start" if boundary == "start" else "End"
+                time_label = format_display_time(pd.Timestamp(phase_time), use_12_hour=use_12_hour)
+                points.append(
+                    {
+                        "time_local": pd.Timestamp(phase_time),
+                        "alt": float(altitude_deg),
+                        "az": float(azimuth_deg),
+                        "text": f"{phase_prefix} {boundary.lower()}",
+                        "hover": (
+                            f"{phase_label} {boundary_title}<br>{time_label}<br>"
+                            f"Azimuth: {float(azimuth_deg):.1f} deg<br>"
+                            f"Altitude: {float(altitude_deg):.1f} deg"
+                        ),
+                    }
+                )
+
+    points.sort(key=lambda item: pd.Timestamp(item["time_local"]))
+    return points
+
+
+def _moon_path_colors(eclipse_visibility: dict[str, Any] | None) -> tuple[str, str]:
+    payload = eclipse_visibility if isinstance(eclipse_visibility, dict) else {}
+    if bool(payload.get("has_visible_eclipse", False)):
+        return _ECLIPSE_ACCENT_SHADOW, _ECLIPSE_ACCENT_HEX
+    return "rgba(0, 0, 0, 0.45)", "#ffffff"
 
 
 def split_path_on_az_wrap(track: pd.DataFrame, use_12_hour: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -489,6 +611,7 @@ def build_unobstructed_altitude_area_plot(
     mount_choice: str = "none",
     moon_track: pd.DataFrame | None = None,
     moon_phase_key: str | None = None,
+    eclipse_visibility: dict[str, Any] | None = None,
 ) -> go.Figure:
     unobstructed_area_constant_obstruction_alt_deg = float(
         _ui_name("UNOBSTRUCTED_AREA_CONSTANT_OBSTRUCTION_ALT_DEG")
@@ -636,6 +759,7 @@ def build_unobstructed_altitude_area_plot(
                     moon_times = moon_times.iloc[moon_finite_mask]
                     moon_altitude_values = moon_altitude_values[moon_finite_mask]
                     if not moon_times.empty and moon_altitude_values.size > 0:
+                        moon_shadow_color, moon_line_color = _moon_path_colors(eclipse_visibility)
                         plotted_times.extend([pd.Timestamp(value) for value in moon_times.tolist()])
                         moon_hover_times = np.asarray(
                             [
@@ -651,7 +775,7 @@ def build_unobstructed_altitude_area_plot(
                                 y=moon_altitude_values,
                                 mode="lines",
                                 showlegend=False,
-                                line={"width": 3.0, "color": "rgba(0, 0, 0, 0.45)"},
+                                line={"width": 3.0, "color": moon_shadow_color},
                                 hoverinfo="skip",
                             )
                         )
@@ -662,11 +786,39 @@ def build_unobstructed_altitude_area_plot(
                                 mode="lines",
                                 name="Moon",
                                 showlegend=False,
-                                line={"width": 1.8, "color": "#ffffff"},
+                                line={"width": 1.8, "color": moon_line_color},
                                 hovertext=moon_hover,
                                 hovertemplate="%{hovertext}<extra></extra>",
                             )
                         )
+                        eclipse_phase_points = _eclipse_phase_plot_points(
+                            moon_track,
+                            eclipse_visibility,
+                            use_12_hour=use_12_hour,
+                        )
+                        if eclipse_phase_points:
+                            phase_text_positions = [
+                                ("top center" if (idx % 2 == 0) else "bottom center")
+                                for idx in range(len(eclipse_phase_points))
+                            ]
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=[pd.Timestamp(point["time_local"]) for point in eclipse_phase_points],
+                                    y=[float(point["alt"]) for point in eclipse_phase_points],
+                                    mode="markers+text",
+                                    text=[str(point["text"]) for point in eclipse_phase_points],
+                                    textposition=phase_text_positions,
+                                    textfont={"size": 10, "color": _ECLIPSE_ACCENT_HEX},
+                                    marker={
+                                        "size": 7,
+                                        "color": _ECLIPSE_ACCENT_HEX,
+                                        "line": {"width": 1, "color": "#FFFFFF"},
+                                    },
+                                    showlegend=False,
+                                    hovertext=[str(point["hover"]) for point in eclipse_phase_points],
+                                    hovertemplate="%{hovertext}<extra></extra>",
+                                )
+                            )
                         if moon_culmination_point is not None:
                             moon_emoji = lunar_phase_emoji(moon_phase_key)
                             moon_culmination_hover = _moon_culmination_hovertext(
@@ -856,6 +1008,7 @@ def build_path_plot(
     mount_choice: str = "none",
     moon_track: pd.DataFrame | None = None,
     moon_phase_key: str | None = None,
+    eclipse_visibility: dict[str, Any] | None = None,
 ) -> go.Figure:
     path_endpoint_marker_size_primary = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_PRIMARY"))
     path_endpoint_marker_size_overlay = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_OVERLAY"))
@@ -922,6 +1075,7 @@ def build_path_plot(
     if isinstance(moon_track, pd.DataFrame) and not moon_track.empty:
         moon_path_x, moon_path_y, moon_path_times = split_path_on_az_wrap(moon_track, use_12_hour=use_12_hour)
         if moon_path_x.size > 0:
+            moon_shadow_color, moon_line_color = _moon_path_colors(eclipse_visibility)
             moon_hover = build_path_hovertext("Moon", "", moon_path_times, moon_path_y)
             fig.add_trace(
                 go.Scatter(
@@ -929,7 +1083,7 @@ def build_path_plot(
                     y=moon_path_y,
                     mode="lines",
                     showlegend=False,
-                    line={"width": 3.2, "color": "rgba(0, 0, 0, 0.45)"},
+                    line={"width": 3.2, "color": moon_shadow_color},
                     hoverinfo="skip",
                 )
             )
@@ -940,11 +1094,39 @@ def build_path_plot(
                     mode="lines",
                     name="Moon",
                     showlegend=False,
-                    line={"width": 1.9, "color": "#ffffff"},
+                    line={"width": 1.9, "color": moon_line_color},
                     hovertext=moon_hover,
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
+            eclipse_phase_points = _eclipse_phase_plot_points(
+                moon_track,
+                eclipse_visibility,
+                use_12_hour=use_12_hour,
+            )
+            if eclipse_phase_points:
+                phase_text_positions = [
+                    ("top center" if (idx % 2 == 0) else "bottom center")
+                    for idx in range(len(eclipse_phase_points))
+                ]
+                fig.add_trace(
+                    go.Scatter(
+                        x=[float(point["az"]) for point in eclipse_phase_points],
+                        y=[float(point["alt"]) for point in eclipse_phase_points],
+                        mode="markers+text",
+                        text=[str(point["text"]) for point in eclipse_phase_points],
+                        textposition=phase_text_positions,
+                        textfont={"size": 10, "color": _ECLIPSE_ACCENT_HEX},
+                        marker={
+                            "size": 7,
+                            "color": _ECLIPSE_ACCENT_HEX,
+                            "line": {"width": 1, "color": "#FFFFFF"},
+                        },
+                        showlegend=False,
+                        hovertext=[str(point["hover"]) for point in eclipse_phase_points],
+                        hovertemplate="%{hovertext}<extra></extra>",
+                    )
+                )
 
     path_x, path_y, path_times = split_path_on_az_wrap(track, use_12_hour=use_12_hour)
     selected_hover = build_path_hovertext(selected_label, selected_emissions, path_times, path_y)
@@ -1163,6 +1345,7 @@ def build_path_plot_radial(
     mount_choice: str = "none",
     moon_track: pd.DataFrame | None = None,
     moon_phase_key: str | None = None,
+    eclipse_visibility: dict[str, Any] | None = None,
 ) -> go.Figure:
     path_endpoint_marker_size_primary = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_PRIMARY"))
     path_endpoint_marker_size_overlay = int(_ui_name("PATH_ENDPOINT_MARKER_SIZE_OVERLAY"))
@@ -1272,6 +1455,7 @@ def build_path_plot_radial(
                 moon_azimuth_values = moon_azimuth_values[moon_finite_mask]
                 moon_times = moon_times.iloc[moon_finite_mask]
                 if moon_altitude_values.size > 0 and not moon_times.empty:
+                    moon_shadow_color, moon_line_color = _moon_path_colors(eclipse_visibility)
                     moon_alt_series = pd.Series(moon_altitude_values)
                     moon_r = (90.0 - moon_alt_series.clip(lower=0.0, upper=90.0)) if dome_view else moon_alt_series.clip(lower=0.0, upper=90.0)
                     moon_time_values = np.asarray(
@@ -1288,7 +1472,7 @@ def build_path_plot_radial(
                             r=moon_r,
                             mode="lines",
                             showlegend=False,
-                            line={"width": 3.2, "color": "rgba(0, 0, 0, 0.45)"},
+                            line={"width": 3.2, "color": moon_shadow_color},
                             hoverinfo="skip",
                         )
                     )
@@ -1299,11 +1483,47 @@ def build_path_plot_radial(
                             mode="lines",
                             name="Moon",
                             showlegend=False,
-                            line={"width": 1.9, "color": "#ffffff"},
+                            line={"width": 1.9, "color": moon_line_color},
                             hovertext=moon_hover,
                             hovertemplate="%{hovertext}<extra></extra>",
                         )
                     )
+                    eclipse_phase_points = _eclipse_phase_plot_points(
+                        moon_track,
+                        eclipse_visibility,
+                        use_12_hour=use_12_hour,
+                    )
+                    if eclipse_phase_points:
+                        phase_text_positions = [
+                            ("top center" if (idx % 2 == 0) else "bottom center")
+                            for idx in range(len(eclipse_phase_points))
+                        ]
+                        phase_r = [
+                            (
+                                max(0.0, min(90.0, 90.0 - float(point["alt"])))
+                                if dome_view
+                                else max(0.0, min(90.0, float(point["alt"])))
+                            )
+                            for point in eclipse_phase_points
+                        ]
+                        fig.add_trace(
+                            go.Scatterpolar(
+                                theta=[float(point["az"]) for point in eclipse_phase_points],
+                                r=phase_r,
+                                mode="markers+text",
+                                text=[str(point["text"]) for point in eclipse_phase_points],
+                                textposition=phase_text_positions,
+                                textfont={"size": 10, "color": _ECLIPSE_ACCENT_HEX},
+                                marker={
+                                    "size": 7,
+                                    "color": _ECLIPSE_ACCENT_HEX,
+                                    "line": {"width": 1, "color": "#FFFFFF"},
+                                },
+                                showlegend=False,
+                                hovertext=[str(point["hover"]) for point in eclipse_phase_points],
+                                hovertemplate="%{hovertext}<extra></extra>",
+                            )
+                        )
 
     selected_time_values = np.asarray(
         [format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour) for value in track["time_local"].tolist()],

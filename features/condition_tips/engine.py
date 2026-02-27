@@ -28,6 +28,7 @@ class ConditionTipsContext:
     summary_row: dict[str, Any] | None
     temperature_unit: str
     use_12_hour: bool
+    eclipse_visibility: dict[str, Any] | None = None
 
 
 ConditionTipRule = Callable[[ConditionTipsContext], ConditionTip | None]
@@ -112,6 +113,35 @@ def _format_duration(duration: pd.Timedelta) -> str:
     total_minutes = max(0, int(round(duration.total_seconds() / 60.0)))
     hours, minutes = divmod(total_minutes, 60)
     return f"{hours:02d}:{minutes:02d}"
+
+
+def _format_minutes_compact(total_minutes: float) -> str:
+    minutes = max(0, int(round(float(total_minutes))))
+    hours, rem_minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {rem_minutes:02d}m" if rem_minutes > 0 else f"{hours}h"
+    return f"{rem_minutes}m"
+
+
+def _sky_region_from_wind16(direction: str) -> str | None:
+    key = str(direction or "").strip().upper()
+    if key in {"N", "NNE", "NNW"}:
+        return "northern sky"
+    if key in {"NE", "ENE"}:
+        return "northeastern sky"
+    if key in {"E", "ESE"}:
+        return "eastern sky"
+    if key in {"SE", "SSE"}:
+        return "southeastern sky"
+    if key in {"S", "SSW"}:
+        return "southern sky"
+    if key in {"SW", "WSW"}:
+        return "southwestern sky"
+    if key in {"W", "WNW"}:
+        return "western sky"
+    if key in {"NW"}:
+        return "northwestern sky"
+    return None
 
 
 def _temperature_delta_for_display(delta_c: float, temperature_unit: str) -> float:
@@ -456,7 +486,127 @@ def _tip_temperature(context: ConditionTipsContext) -> ConditionTip | None:
     return _make_tip("temp", f"Temperature range: {low:.0f}-{high:.0f} {unit}.", "muted")
 
 
+def _tip_eclipse_opportunity(context: ConditionTipsContext) -> ConditionTip | None:
+    payload = context.eclipse_visibility if isinstance(context.eclipse_visibility, dict) else {}
+    if not bool(payload.get("has_visible_eclipse", False)):
+        return None
+
+    raw_events = payload.get("events", [])
+    if not isinstance(raw_events, list):
+        return None
+
+    event_descriptions: list[str] = []
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        if not bool(event.get("has_visible_phase", False)):
+            continue
+        raw_phases = event.get("phases", [])
+        if not isinstance(raw_phases, list):
+            continue
+
+        phase_bits: list[str] = []
+        for raw_phase in raw_phases:
+            if not isinstance(raw_phase, dict):
+                continue
+            phase_name = str(raw_phase.get("name", "")).strip().lower()
+            if phase_name not in {"partial", "total"}:
+                continue
+
+            phase_start = _parse_timestamp(raw_phase.get("start_local_iso"))
+            phase_end = _parse_timestamp(raw_phase.get("end_local_iso"))
+            if phase_start is None or phase_end is None or phase_end <= phase_start:
+                continue
+
+            duration_minutes = _positive_float(raw_phase.get("duration_minutes"))
+            if duration_minutes is None:
+                duration_minutes = (phase_end - phase_start).total_seconds() / 60.0
+            if duration_minutes is None or duration_minutes <= 0.0:
+                continue
+
+            start_text = _format_tip_time(phase_start, use_12_hour=context.use_12_hour)
+            end_text = _format_tip_time(phase_end, use_12_hour=context.use_12_hour)
+            duration_text = _format_minutes_compact(duration_minutes)
+            azimuth_dir = str(raw_phase.get("azimuth_dir", "")).strip().upper()
+            sky_region = _sky_region_from_wind16(azimuth_dir)
+            phase_label = "Totality" if phase_name == "total" else "Partial phase"
+            if sky_region:
+                phase_bits.append(
+                    f"{phase_label} runs {start_text}-{end_text} ({duration_text}) in the {sky_region}"
+                )
+            else:
+                phase_bits.append(
+                    f"{phase_label} runs {start_text}-{end_text} ({duration_text})"
+                )
+
+        if phase_bits:
+            event_descriptions.append("; ".join(phase_bits))
+
+    if not event_descriptions:
+        return None
+
+    if len(event_descriptions) == 1:
+        return _make_tip("eclipse_opportunity", f"Lunar eclipse: {event_descriptions[0]}.", "opportunity")
+    return _make_tip(
+        "eclipse_opportunity",
+        "Lunar eclipse phases: " + " | ".join(event_descriptions) + ".",
+        "opportunity",
+    )
+
+
+def _tip_eclipse_obstruction_warning(context: ConditionTipsContext) -> ConditionTip | None:
+    payload = context.eclipse_visibility if isinstance(context.eclipse_visibility, dict) else {}
+    if not bool(payload.get("has_visible_eclipse", False)):
+        return None
+    if not bool(payload.get("has_obstructed_eclipse_phase", False)):
+        return None
+
+    raw_events = payload.get("events", [])
+    obstructed_phase_labels: list[str] = []
+    if isinstance(raw_events, list):
+        for event in raw_events:
+            if not isinstance(event, dict):
+                continue
+            if not bool(event.get("has_visible_phase", False)):
+                continue
+            raw_phases = event.get("phases", [])
+            if not isinstance(raw_phases, list):
+                continue
+            for raw_phase in raw_phases:
+                if not isinstance(raw_phase, dict):
+                    continue
+                if not bool(raw_phase.get("obstructed", False)):
+                    continue
+                phase_name = str(raw_phase.get("name", "")).strip().lower()
+                phase_start = _parse_timestamp(raw_phase.get("start_local_iso"))
+                phase_end = _parse_timestamp(raw_phase.get("end_local_iso"))
+                if phase_start is not None and phase_end is not None and phase_end > phase_start:
+                    start_text = _format_tip_time(phase_start, use_12_hour=context.use_12_hour)
+                    end_text = _format_tip_time(phase_end, use_12_hour=context.use_12_hour)
+                    label = "Totality" if phase_name == "total" else "Partial phase"
+                    obstructed_phase_labels.append(f"{label} ({start_text}-{end_text})")
+                elif phase_name == "total":
+                    obstructed_phase_labels.append("Totality")
+                elif phase_name == "partial":
+                    obstructed_phase_labels.append("Partial phase")
+
+    if obstructed_phase_labels:
+        details = ", ".join(obstructed_phase_labels[:3])
+        return _make_tip(
+            "eclipse_obstructed",
+            f"Eclipse is partly obstructed at this site (below local obstruction profile/horizon during {details}).",
+            "warning",
+        )
+    return _make_tip(
+        "eclipse_obstructed",
+        "Eclipse is partly obstructed at this site (below local obstruction profile/horizon during one or more phases).",
+        "warning",
+    )
+
+
 _CONDITION_RULES: tuple[ConditionTipRule, ...] = (
+    _tip_eclipse_opportunity,
+    _tip_eclipse_obstruction_warning,
     _tip_sky_cover,
     _tip_clear_window,
     _tip_precipitation,

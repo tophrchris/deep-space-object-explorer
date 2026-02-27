@@ -5,6 +5,7 @@ import math
 
 from runtime.lunar_ephemeris import (
     build_hourly_lunar_altitude_map,
+    compute_lunar_eclipse_visibility_for_night,
     compute_lunar_phase_for_night,
 )
 from runtime.noaa_goes_cloud_loop import resolve_site_cloud_loop
@@ -279,6 +280,7 @@ def _render_explorer_page_impl(
         browser_locale=browser_locale,
         browser_month_day_pattern=browser_month_day_pattern,
         nights=selected_forecast_nights,
+        obstructions=(prefs.get("obstructions") if isinstance(prefs.get("obstructions"), dict) else None),
     )
     hourly_weather_rows = fetch_hourly_weather(
         lat=location_lat,
@@ -306,6 +308,20 @@ def _render_explorer_page_impl(
         end_local_iso=weather_window_end.isoformat(),
     )
     lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip() or None
+    lunar_eclipse_visibility = compute_lunar_eclipse_visibility_for_night(
+        lat=location_lat,
+        lon=location_lon,
+        tz_name=weather_tzinfo.key,
+        start_local_iso=weather_window_start.isoformat(),
+        end_local_iso=weather_window_end.isoformat(),
+        sample_minutes=1,
+        obstructions=(prefs.get("obstructions") if isinstance(prefs.get("obstructions"), dict) else None),
+    )
+    lunar_eclipse_minutes_by_hour = (
+        dict((lunar_eclipse_visibility or {}).get("hourly_visible_minutes_by_hour", {}))
+        if isinstance((lunar_eclipse_visibility or {}).get("hourly_visible_minutes_by_hour"), dict)
+        else {}
+    )
     goes_cloud_loop = resolve_site_cloud_loop(location_lat, location_lon)
     condition_tips_title = format_condition_tips_title(
         weather_forecast_day_offset,
@@ -319,6 +335,7 @@ def _render_explorer_page_impl(
         temperature_unit=temperature_unit,
         lunar_hourly_altitude_by_hour=lunar_hourly_altitude_by_hour,
         lunar_phase_key=lunar_phase_key,
+        eclipse_hourly_minutes_by_hour=(lunar_eclipse_minutes_by_hour or None),
     )
     selected_summary_row: dict[str, Any] | None = None
     if not astronomy_summary.empty:
@@ -350,13 +367,17 @@ def _render_explorer_page_impl(
             with forecast_title_col:
                 st.markdown("#### Astronomy Forecast")
             with forecast_range_col:
-                st.segmented_control(
-                    "Forecast Nights",
-                    options=[5, int(ASTRONOMY_FORECAST_NIGHTS)],
-                    format_func=lambda value: f"{int(value)} nights",
-                    key=forecast_night_count_state_key,
-                    label_visibility="collapsed",
-                )
+                nights_label_col, nights_control_col = st.columns([1, 2], gap="small")
+                with nights_label_col:
+                    st.markdown("Nights:")
+                with nights_control_col:
+                    st.segmented_control(
+                        "Forecast Nights",
+                        options=[5, int(ASTRONOMY_FORECAST_NIGHTS)],
+                        format_func=lambda value: str(int(value)),
+                        key=forecast_night_count_state_key,
+                        label_visibility="collapsed",
+                    )
             render_astronomy_forecast_summary(
                 astronomy_summary,
                 temperature_unit=temperature_unit,
@@ -441,6 +462,7 @@ def _render_explorer_page_impl(
                     summary_row=selected_summary_row,
                     temperature_unit=temperature_unit,
                     use_12_hour=use_12_hour,
+                    eclipse_visibility=lunar_eclipse_visibility,
                     prepended_muted_lines=prepended_muted_condition_lines,
                 )
 

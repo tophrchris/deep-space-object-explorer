@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from runtime.lunar_ephemeris import compute_lunar_phase_for_night, compute_moon_track
+from runtime.lunar_ephemeris import (
+    compute_lunar_eclipse_visibility_for_night,
+    compute_lunar_phase_for_night,
+    compute_moon_track,
+)
 
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
@@ -99,6 +103,28 @@ def render_detail_panel(
         except Exception:
             return None
 
+    def _compute_lunar_eclipse_visibility_for_window(
+        *,
+        start_local: datetime,
+        end_local: datetime,
+        tz_name: str,
+    ) -> dict[str, Any]:
+        try:
+            payload = compute_lunar_eclipse_visibility_for_night(
+                lat=location_lat,
+                lon=location_lon,
+                tz_name=tz_name,
+                start_local_iso=pd.Timestamp(start_local).isoformat(),
+                end_local_iso=pd.Timestamp(end_local).isoformat(),
+                sample_minutes=1,
+                obstructions=(prefs.get("obstructions") if isinstance(prefs.get("obstructions"), dict) else None),
+            )
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {}
+
     def resolve_active_telescope_for_framing() -> dict[str, Any] | None:
         equipment_context = build_owned_equipment_context(prefs)
         telescope_lookup = equipment_context.get("telescope_lookup", {})
@@ -188,6 +214,11 @@ def render_detail_panel(
             tz_name=tzinfo.key,
         )
         moon_phase_key = _compute_moon_phase_key_for_window(
+            start_local=window_start,
+            end_local=window_end,
+            tz_name=tzinfo.key,
+        )
+        lunar_eclipse_visibility = _compute_lunar_eclipse_visibility_for_window(
             start_local=window_start,
             end_local=window_end,
             tz_name=tzinfo.key,
@@ -380,6 +411,7 @@ def render_detail_panel(
                             mount_choice=plot_mount_choice,
                             moon_track=moon_track,
                             moon_phase_key=moon_phase_key,
+                            eclipse_visibility=lunar_eclipse_visibility,
                         )
                     else:
                         path_figure = build_path_plot(
@@ -397,6 +429,7 @@ def render_detail_panel(
                             mount_choice=plot_mount_choice,
                             moon_track=moon_track,
                             moon_phase_key=moon_phase_key,
+                            eclipse_visibility=lunar_eclipse_visibility,
                         )
 
                 path_col, area_col = st.columns([1, 1], gap="small")
@@ -420,6 +453,7 @@ def render_detail_panel(
                             mount_choice=plot_mount_choice,
                             moon_track=moon_track,
                             moon_phase_key=moon_phase_key,
+                            eclipse_visibility=lunar_eclipse_visibility,
                         ),
                         use_container_width=True,
                         key="preview_unobstructed_area_plot",
@@ -1023,6 +1057,11 @@ def render_detail_panel(
         end_local=window_end,
         tz_name=tzinfo.key,
     )
+    lunar_eclipse_visibility = _compute_lunar_eclipse_visibility_for_window(
+        start_local=window_start,
+        end_local=window_end,
+        tz_name=tzinfo.key,
+    )
     if normalized_forecast_day_offset <= 0:
         detail_hourly_period_label = "Tonight"
     elif normalized_forecast_day_offset == 1:
@@ -1065,6 +1104,7 @@ def render_detail_panel(
                 mount_choice=plot_mount_choice,
                 moon_track=moon_track,
                 moon_phase_key=moon_phase_key,
+                eclipse_visibility=lunar_eclipse_visibility,
             )
         else:
             path_figure = build_path_plot(
@@ -1080,6 +1120,7 @@ def render_detail_panel(
                 mount_choice=plot_mount_choice,
                 moon_track=moon_track,
                 moon_phase_key=moon_phase_key,
+                eclipse_visibility=lunar_eclipse_visibility,
             )
 
         should_animate_weather_alerts = normalized_forecast_day_offset == 0
@@ -1160,6 +1201,7 @@ def render_detail_panel(
                     mount_choice=plot_mount_choice,
                     moon_track=moon_track,
                     moon_phase_key=moon_phase_key,
+                    eclipse_visibility=lunar_eclipse_visibility,
                 ),
                 use_container_width=True,
                 key="detail_unobstructed_area_plot",

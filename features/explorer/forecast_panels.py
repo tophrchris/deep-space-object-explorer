@@ -24,6 +24,7 @@ from features.explorer.lunar import (
 from features.explorer.night_rating import compute_night_rating_details
 from runtime.lunar_ephemeris import (
     build_hourly_lunar_altitude_map,
+    compute_lunar_eclipse_visibility_for_night,
     compute_lunar_night_summary,
     compute_lunar_phase_for_night,
 )
@@ -166,6 +167,8 @@ _LUNAR_PHASE_ANCHOR_AGE_DAYS: dict[str, float] = {
     "third_quarter": 22.15,
 }
 _SYNODIC_MONTH_DAYS = 29.53
+_ECLIPSE_ACCENT_HEX = "#7A1E2C"
+_DEFAULT_TABLE_CELL_HEX = "#FFFFFF"
 
 
 def _phase_anchor_distance_days(phase_key: Any, phase_age_days: Any) -> float:
@@ -181,6 +184,83 @@ def _phase_anchor_distance_days(phase_key: Any, phase_age_days: Any) -> float:
     anchor = float(_LUNAR_PHASE_ANCHOR_AGE_DAYS[key])
     distance = abs(age - anchor)
     return float(min(distance, _SYNODIC_MONTH_DAYS - distance))
+
+
+def _parse_eclipse_duration_minutes(raw_value: Any) -> float | None:
+    if raw_value is None or pd.isna(raw_value):
+        return None
+    text = str(raw_value).strip().lower()
+    if not text or text == "-":
+        return None
+
+    total_minutes = 0.0
+    parsed_any = False
+    hour_match = re.search(r"(\d+)\s*h", text)
+    minute_match = re.search(r"(\d+)\s*m", text)
+    if hour_match is not None:
+        try:
+            total_minutes += float(hour_match.group(1)) * 60.0
+            parsed_any = True
+        except (TypeError, ValueError):
+            pass
+    if minute_match is not None:
+        try:
+            total_minutes += float(minute_match.group(1))
+            parsed_any = True
+        except (TypeError, ValueError):
+            pass
+    if not parsed_any:
+        return None
+    if not np.isfinite(total_minutes) or total_minutes <= 0.0:
+        return None
+    return float(total_minutes)
+
+
+def _eclipse_row_duration_bounds(row: pd.Series, columns: Any) -> tuple[float | None, float | None]:
+    positive_values: list[float] = []
+    for column_name in columns:
+        if str(column_name) == "Element":
+            continue
+        parsed_minutes = _parse_eclipse_duration_minutes(row.get(column_name))
+        if parsed_minutes is None:
+            continue
+        if parsed_minutes > 0.0 and np.isfinite(parsed_minutes):
+            positive_values.append(float(parsed_minutes))
+    if not positive_values:
+        return None, None
+    return float(min(positive_values)), 60.0
+
+
+def eclipse_duration_cell_style(
+    raw_value: Any,
+    *,
+    min_minutes: float | None,
+    max_minutes: float | None,
+) -> str:
+    parsed_minutes = _parse_eclipse_duration_minutes(raw_value)
+    if parsed_minutes is None:
+        return ""
+    if min_minutes is None or max_minutes is None:
+        return ""
+    if not np.isfinite(min_minutes) or not np.isfinite(max_minutes):
+        return ""
+    if max_minutes <= 0.0:
+        return ""
+
+    if max_minutes <= min_minutes:
+        scaled = 1.0
+    else:
+        scaled = (parsed_minutes - min_minutes) / (max_minutes - min_minutes)
+    clamped_scaled = max(0.0, min(1.0, float(scaled)))
+    background_color = _interpolate_color_stops(
+        clamped_scaled * 100.0,
+        [
+            (0.0, _DEFAULT_TABLE_CELL_HEX),
+            (100.0, _ECLIPSE_ACCENT_HEX),
+        ],
+    )
+    text_color = _ideal_text_color_for_hex(background_color)
+    return f"background-color: {background_color}; color: {text_color};"
 
 
 def _lunar_gray_scale_palette() -> dict[str, str]:
@@ -269,14 +349,18 @@ def lunar_forecast_column_cell_style(
     *,
     lunar_phase_key: Any,
     lunar_max_altitude_deg: Any,
+    has_visible_eclipse: Any = False,
 ) -> str:
     text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
     if not text:
         return ""
-    return _lunar_gradient_style_for_altitude(
+    base_style = _lunar_gradient_style_for_altitude(
         lunar_max_altitude_deg,
         phase_bucket=_lunar_phase_style_bucket_from_phase_key(lunar_phase_key),
     )
+    if bool(has_visible_eclipse):
+        base_style = f"{base_style} border: 2px solid {_ECLIPSE_ACCENT_HEX};"
+    return base_style
 
 
 def full_moon_scale_legend_html() -> str:
@@ -1001,6 +1085,7 @@ def build_hourly_weather_matrix(
     temperature_unit: str,
     lunar_hourly_altitude_by_hour: dict[str, float] | None = None,
     lunar_phase_key: str | None = None,
+    eclipse_hourly_minutes_by_hour: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     weather_matrix_rows = _ui_name("WEATHER_MATRIX_ROWS")
     metric_label_by_key = {str(key): str(label) for key, label in weather_matrix_rows}
@@ -1040,6 +1125,55 @@ def build_hourly_weather_matrix(
     tooltip_rows: dict[str, list[str]] = {}
     indicator_rows: dict[str, list[str]] = {}
     lunar_row_inserted = False
+    eclipse_row_inserted = False
+
+    def _format_eclipse_minutes_display(raw_minutes: Any) -> str:
+        try:
+            numeric_minutes = float(raw_minutes)
+        except (TypeError, ValueError):
+            return "-"
+        if not np.isfinite(numeric_minutes) or numeric_minutes <= 0.0:
+            return "-"
+        rounded_minutes = int(round(numeric_minutes))
+        if rounded_minutes <= 0:
+            return "-"
+        hours, minutes = divmod(rounded_minutes, 60)
+        if hours > 0:
+            return f"{hours}h {minutes:02d}m" if minutes > 0 else f"{hours}h"
+        return f"{minutes}m"
+
+    def _insert_eclipse_row() -> None:
+        nonlocal eclipse_row_inserted
+        if eclipse_row_inserted:
+            return
+        if not isinstance(eclipse_hourly_minutes_by_hour, dict) or not eclipse_hourly_minutes_by_hour:
+            return
+
+        has_any_visible_minutes = False
+        for raw_minutes in eclipse_hourly_minutes_by_hour.values():
+            try:
+                numeric_minutes = float(raw_minutes)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(numeric_minutes) and numeric_minutes > 0.0:
+                has_any_visible_minutes = True
+                break
+        if not has_any_visible_minutes:
+            return
+
+        matrix_rows["Eclipse"] = []
+        tooltip_rows["Eclipse"] = []
+        indicator_rows["Eclipse"] = ["" for _ in ordered_times]
+        for timestamp in ordered_times:
+            hour_key = pd.Timestamp(timestamp).floor("h").isoformat()
+            raw_minutes = eclipse_hourly_minutes_by_hour.get(hour_key)
+            matrix_rows["Eclipse"].append(_format_eclipse_minutes_display(raw_minutes))
+            display_text = _format_eclipse_minutes_display(raw_minutes)
+            if display_text != "-":
+                tooltip_rows["Eclipse"].append(f"Visible eclipse duration during hour: {display_text}")
+            else:
+                tooltip_rows["Eclipse"].append("")
+        eclipse_row_inserted = True
 
     def _insert_lunar_row() -> None:
         nonlocal lunar_row_inserted
@@ -1065,6 +1199,7 @@ def build_hourly_weather_matrix(
         ]
         indicator_rows[row_label] = ["" for _ in ordered_times]
         lunar_row_inserted = True
+        _insert_eclipse_row()
 
     for metric_key, metric_label in ordered_weather_matrix_rows:
         if metric_key == "dewpoint_spread":
@@ -1143,6 +1278,8 @@ def build_hourly_weather_matrix(
 
     if not lunar_row_inserted:
         _insert_lunar_row()
+    if not eclipse_row_inserted:
+        _insert_eclipse_row()
 
     return (
         pd.DataFrame.from_dict(matrix_rows, orient="index", columns=hour_labels),
@@ -1240,6 +1377,10 @@ def render_hourly_weather_matrix(
             element = str(row.get("Element", "")).strip()
             element_key = element.lower()
             element_display = _display_element_label(element)
+            eclipse_min_minutes: float | None = None
+            eclipse_max_minutes: float | None = None
+            if element_key == "eclipse":
+                eclipse_min_minutes, eclipse_max_minutes = _eclipse_row_duration_bounds(row, frame.columns)
             for column in frame.columns:
                 raw_value = row.get(column)
                 cell_text = str(raw_value).strip() if raw_value is not None and not pd.isna(raw_value) else ""
@@ -1275,12 +1416,20 @@ def render_hourly_weather_matrix(
                     lunar_style = lunar_altitude_cell_style(raw_value, element)
                     if lunar_style:
                         style_parts.append(lunar_style)
+                elif element_key == "eclipse":
+                    eclipse_style = eclipse_duration_cell_style(
+                        raw_value,
+                        min_minutes=eclipse_min_minutes,
+                        max_minutes=eclipse_max_minutes,
+                    )
+                    if eclipse_style:
+                        style_parts.append(eclipse_style)
 
                 indicator_html = ""
                 if aligned_indicators is not None and element_key == "cloud cover":
                     indicator_html = str(aligned_indicators.at[row_idx, column]).strip()
 
-                full_bleed = element_key in {"cloud cover", "humidity", "visibility"} or element_key.startswith(
+                full_bleed = element_key in {"cloud cover", "humidity", "visibility", "eclipse"} or element_key.startswith(
                     "lunar altitude"
                 )
                 mui_frame.at[row_idx, column] = _mui_cell_html(
@@ -1411,6 +1560,10 @@ def render_hourly_weather_matrix(
         element = str(row.get("Element", "")).strip()
         element_key = element.lower()
         element_display = _display_element_label(element)
+        eclipse_min_minutes: float | None = None
+        eclipse_max_minutes: float | None = None
+        if element_key == "eclipse":
+            eclipse_min_minutes, eclipse_max_minutes = _eclipse_row_duration_bounds(row, frame.columns)
         row_cells = [
             (
                 '<td style="padding: 6px 8px; border-bottom: 1px solid #d1d5db; '
@@ -1444,6 +1597,12 @@ def render_hourly_weather_matrix(
                 cell_style += visibility_condition_cell_style(raw_value)
             elif element_key.startswith("lunar altitude"):
                 cell_style += lunar_altitude_cell_style(raw_value, element)
+            elif element_key == "eclipse":
+                cell_style += eclipse_duration_cell_style(
+                    raw_value,
+                    min_minutes=eclipse_min_minutes,
+                    max_minutes=eclipse_max_minutes,
+                )
             title_attr = f' title="{html.escape(tooltip)}"' if tooltip else ""
 
             indicator_html = ""
@@ -1479,6 +1638,7 @@ def build_astronomy_forecast_summary(
     browser_locale: str | None = None,
     browser_month_day_pattern: str | None = None,
     nights: int | None = None,
+    obstructions: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     astronomy_forecast_nights = int(_ui_name("ASTRONOMY_FORECAST_NIGHTS"))
     night_count = max(1, int(astronomy_forecast_nights if nights is None else nights))
@@ -1655,9 +1815,19 @@ def build_astronomy_forecast_summary(
             end_local_iso=window_end.isoformat(),
             sample_minutes=10,
         )
+        lunar_eclipse_summary = compute_lunar_eclipse_visibility_for_night(
+            lat=lat,
+            lon=lon,
+            tz_name=tz_name,
+            start_local_iso=window_start.isoformat(),
+            end_local_iso=window_end.isoformat(),
+            sample_minutes=1,
+            obstructions=obstructions,
+        )
         lunar_below_horizon_pct = (lunar_summary or {}).get("moon_below_horizon_pct")
         lunar_avg_altitude_deg = (lunar_summary or {}).get("moon_avg_altitude_deg")
         lunar_max_altitude_deg = (lunar_summary or {}).get("moon_max_altitude_deg")
+        lunar_eclipse_visible = bool((lunar_eclipse_summary or {}).get("has_visible_eclipse", False))
         lunar_display = format_lunar_percent_display(lunar_below_horizon_pct)
 
         summary_rows.append(
@@ -1670,6 +1840,7 @@ def build_astronomy_forecast_summary(
                 "lunar_phase_age_days": lunar_phase_age_days,
                 "lunar_avg_altitude_deg": lunar_avg_altitude_deg,
                 "lunar_max_altitude_deg": lunar_max_altitude_deg,
+                "lunar_eclipse_visible": lunar_eclipse_visible,
                 "Sunset": sunset_text,
                 "Sunrise": sunrise_text,
                 "Clear": clear_display,
@@ -1817,6 +1988,11 @@ def render_astronomy_forecast_summary(
                                 else None
                             )
                         ),
+                        has_visible_eclipse=(
+                            source_frame.at[int(row_idx), "lunar_eclipse_visible"]
+                            if "lunar_eclipse_visible" in source_frame.columns
+                            else False
+                        ),
                     )
                     if lunar_style:
                         style_parts.append(lunar_style)
@@ -1957,6 +2133,11 @@ def render_astronomy_forecast_summary(
                                 if "lunar_avg_altitude_deg" in source_frame.columns
                                 else None
                             )
+                        ),
+                        has_visible_eclipse=(
+                            source_frame.at[row_idx, "lunar_eclipse_visible"]
+                            if "lunar_eclipse_visible" in source_frame.columns
+                            else False
                         ),
                     )
                 )
