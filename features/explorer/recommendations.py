@@ -512,7 +512,7 @@ def render_target_recommendations(
     telescope_fov_maj: float | None = None
     telescope_fov_min: float | None = None
     telescope_fov_area: float | None = None
-    recommendation_min_framing_pct = 1.0
+    recommendation_min_framing_pct = 0.0
     recommendation_max_framing_pct = 500.0
 
     with criteria_col_3:
@@ -1269,7 +1269,11 @@ def render_target_recommendations(
                                     )
                                 ].copy()
 
-                            if size_filtered_recommended.empty and not recommended_before_size_filters.empty:
+                            if (
+                                size_filtered_recommended.empty
+                                and not recommended_before_size_filters.empty
+                                and keyword_search_active
+                            ):
                                 recommended = recommended_before_size_filters
                                 size_framing_fallback_active = True
                                 size_framing_fallback_message = (
