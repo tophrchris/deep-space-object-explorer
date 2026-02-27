@@ -231,6 +231,38 @@ def render_target_recommendations(
             return True
         return _target_has_emissions_data(emission_lines_value)
 
+    def _coerce_bool_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value or "").strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n", ""}:
+            return False
+        return bool(value)
+
+    def _active_filter_emission_band_set(filter_item: Any) -> set[str]:
+        if not isinstance(filter_item, dict):
+            return set()
+
+        explicit_band_set = _parse_emission_band_set(filter_item.get("emission_bands", []))
+        if explicit_band_set:
+            return explicit_band_set
+
+        for emission_field in ("emission_lines", "Emission_lines"):
+            parsed = _parse_emission_band_set(filter_item.get(emission_field))
+            if parsed:
+                return parsed
+
+        inferred_bands: set[str] = set()
+        if _coerce_bool_flag(filter_item.get("has_HA")):
+            inferred_bands.add("HA")
+        if _coerce_bool_flag(filter_item.get("has_OIII")):
+            inferred_bands.add("OIII")
+        if _coerce_bool_flag(filter_item.get("has_SII")):
+            inferred_bands.add("SII")
+        return inferred_bands
+
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
@@ -255,11 +287,7 @@ def render_target_recommendations(
     active_filter = active_equipment.get("active_filter")
     if not isinstance(active_filter, dict):
         active_filter = filter_lookup.get(active_filter_id) if active_filter_id != "__none__" else None
-    active_filter_bands = (
-        _parse_emission_band_set(active_filter.get("emission_bands", []))
-        if isinstance(active_filter, dict)
-        else set()
-    )
+    active_filter_bands = _active_filter_emission_band_set(active_filter)
     narrowband_filter_active = bool(active_filter_bands)
 
     active_mount_choice = _normalize_mount_choice(

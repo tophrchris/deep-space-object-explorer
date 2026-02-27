@@ -380,65 +380,589 @@
       "description": "Filters you own.",
       "display_columns": [
         {
-          "field": "emission_bands",
-          "label": "Emission Bands"
+          "field": "filter",
+          "label": "filter"
+        },
+        {
+          "field": "manufacturer",
+          "label": "manufacturer"
+        },
+        {
+          "field": "type",
+          "label": "type"
+        },
+        {
+          "field": "bands_purpose",
+          "label": "bands_purpose"
+        },
+        {
+          "field": "best_for",
+          "label": "best_for"
+        },
+        {
+          "field": "has_HA",
+          "label": "has_HA"
+        },
+        {
+          "field": "has_OIII",
+          "label": "has_OIII"
+        },
+        {
+          "field": "has_SII",
+          "label": "has_SII"
+        },
+        {
+          "field": "notes",
+          "label": "notes"
+        },
+        {
+          "field": "Emission_lines",
+          "label": "Emission_lines"
         }
       ],
       "items": [
         {
-          "id": "uv-ir-cut",
-          "name": "UV/IR-Cut",
-          "emission_bands": []
-        },
-        {
-          "id": "broadband-lp",
-          "name": "Broadband LP",
-          "emission_bands": []
-        },
-        {
-          "id": "cls",
-          "name": "CLS",
-          "emission_bands": []
-        },
-        {
-          "id": "uhc",
-          "name": "UHC",
-          "emission_bands": []
-        },
-        {
-          "id": "dual-band-duo-narrowband",
-          "name": "Dual Band/Duo Narroband",
+          "id": "optolong-l-extreme",
+          "name": "L-eXtreme (Optolong)",
+          "filter": "L-eXtreme",
+          "manufacturer": "Optolong",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Classic \u201ccity nebula\u201d dual-band pick.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
           "emission_bands": [
             "HA",
             "OIII"
           ]
         },
         {
-          "id": "tri-band-multiband",
-          "name": "Tri-band/Multiband",
+          "id": "optolong-l-enhance",
+          "name": "L-eNhance (Optolong)",
+          "filter": "L-eNhance",
+          "manufacturer": "Optolong",
+          "type": "tri/dual narrowband",
+          "bands_purpose": "Ha + OIII (+H\u03b2)",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Wider passband than L-eXtreme; still no SII.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "optolong-l-ultimate",
+          "name": "L-Ultimate (Optolong)",
+          "filter": "L-Ultimate",
+          "manufacturer": "Optolong",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Ultra-narrow class variant exists.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "optolong-l-pro",
+          "name": "L-Pro (Optolong)",
+          "filter": "L-Pro",
+          "manufacturer": "Optolong",
+          "type": "broadband LP",
+          "bands_purpose": "broadband LP suppression",
+          "best_for": "Broadband targets in LP (galaxies/reflection/clusters)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Not line-isolating.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "antlia-alp-t",
+          "name": "ALP-T (Antlia)",
+          "filter": "ALP-T",
+          "manufacturer": "Antlia",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Often chosen to reduce halos vs some alternatives.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "askar-d1",
+          "name": "D1 (Askar)",
+          "filter": "D1",
+          "manufacturer": "Askar",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Commonly cross-shopped in dual-band category.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "askar-d2",
+          "name": "D2 (Askar)",
+          "filter": "D2",
+          "manufacturer": "Askar",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Same family as D1; popular alternative.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "idas-hutech-nbz",
+          "name": "NBZ (IDAS (Hutech))",
+          "filter": "NBZ",
+          "manufacturer": "IDAS (Hutech)",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Premium dual-band option.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "stc-duo-narrowband",
+          "name": "Duo-Narrowband (STC)",
+          "filter": "Duo-Narrowband",
+          "manufacturer": "STC",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Frequently included in dual-band comparisons.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "radian-triad",
+          "name": "Triad (Radian)",
+          "filter": "Triad",
+          "manufacturer": "Radian",
+          "type": "tri-band",
+          "bands_purpose": "Ha + OIII + SII",
+          "best_for": "Emission nebulae (OSC; tri-band)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": true,
+          "notes": "\u201cTrue\u201d tri-band includes SII.",
+          "Emission_lines": "HA;OIII;SII",
+          "emission_lines": "HA;OIII;SII",
           "emission_bands": [
             "HA",
             "OIII",
-            "HB"
+            "SII"
           ]
         },
         {
-          "id": "line-filter-oiii",
-          "name": "Line Filter -OIII",
+          "id": "radian-triad-ultra",
+          "name": "Triad Ultra (Radian)",
+          "filter": "Triad Ultra",
+          "manufacturer": "Radian",
+          "type": "tri-band (narrow)",
+          "bands_purpose": "Ha + OIII + SII (narrower)",
+          "best_for": "Emission nebulae (OSC; tri-band)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": true,
+          "notes": "Narrower tri-band variant.",
+          "Emission_lines": "HA;OIII;SII",
+          "emission_lines": "HA;OIII;SII",
+          "emission_bands": [
+            "HA",
+            "OIII",
+            "SII"
+          ]
+        },
+        {
+          "id": "astronomik-cls",
+          "name": "CLS (Astronomik)",
+          "filter": "CLS",
+          "manufacturer": "Astronomik",
+          "type": "broadband LP",
+          "bands_purpose": "city-light suppression",
+          "best_for": "Broadband targets in LP (galaxies/reflection/clusters)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Broadband LP notch style.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "altair-astro-cls",
+          "name": "CLS (Altair Astro)",
+          "filter": "CLS",
+          "manufacturer": "Altair Astro",
+          "type": "broadband LP",
+          "bands_purpose": "city-light suppression",
+          "best_for": "Broadband targets in LP (galaxies/reflection/clusters)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Similar broadband LP category.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "idas-hutech-lps-d1",
+          "name": "LPS-D1 (IDAS (Hutech))",
+          "filter": "LPS-D1",
+          "manufacturer": "IDAS (Hutech)",
+          "type": "broadband LP",
+          "bands_purpose": "multi-notch LP suppression",
+          "best_for": "Broadband targets in LP (galaxies/reflection/clusters)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Broadband shaping; not line-isolating.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "idas-hutech-lps-d2",
+          "name": "LPS-D2 (IDAS (Hutech))",
+          "filter": "LPS-D2",
+          "manufacturer": "IDAS (Hutech)",
+          "type": "broadband LP",
+          "bands_purpose": "multi-notch LP suppression",
+          "best_for": "Broadband targets in LP (galaxies/reflection/clusters)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Broadband shaping; not line-isolating.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "baader-moon-skyglow-neodymium",
+          "name": "Moon & Skyglow (Neodymium) (Baader)",
+          "filter": "Moon & Skyglow (Neodymium)",
+          "manufacturer": "Baader",
+          "type": "broadband contrast",
+          "bands_purpose": "broadband contrast / LP shaping",
+          "best_for": "Broadband targets + star color",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Contrast/LP shaping; not narrowband.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "baader-uhc-uhc-s",
+          "name": "UHC / UHC-S (Baader)",
+          "filter": "UHC / UHC-S",
+          "manufacturer": "Baader",
+          "type": "UHC-style nebula",
+          "bands_purpose": "nebula contrast boost",
+          "best_for": "Bright nebulae (EAA/visual; some OSC)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "UHC-style passband, not explicit Ha/OIII narrow passbands.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "astronomik-uhc",
+          "name": "UHC (Astronomik)",
+          "filter": "UHC",
+          "manufacturer": "Astronomik",
+          "type": "UHC-style nebula",
+          "bands_purpose": "nebula contrast boost",
+          "best_for": "Bright nebulae (EAA/visual; some OSC)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "UHC-style, not explicit line-only.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "svbony-sv240",
+          "name": "SV240 (SVBONY)",
+          "filter": "SV240",
+          "manufacturer": "SVBONY",
+          "type": "multi-narrowband",
+          "bands_purpose": "Ha + OIII + H\u03b2",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Multi-band OSC nebula filter (no SII).",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "svbony-sv260",
+          "name": "SV260 (SVBONY)",
+          "filter": "SV260",
+          "manufacturer": "SVBONY",
+          "type": "multi-bandpass / broadband shaping",
+          "bands_purpose": "broadband LP shaping (multi-pass)",
+          "best_for": "Starfields + mixed DSOs",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Not a line-isolation filter.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "svbony-sv220-ha-oiii-7nm",
+          "name": "SV220 (Ha+OIII, 7nm) (SVBONY)",
+          "filter": "SV220 (Ha+OIII, 7nm)",
+          "manufacturer": "SVBONY",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "SVBONY dual-band \u201cnebula\u201d filter variant.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "svbony-sv220-ha-oiii-3nm",
+          "name": "SV220 (Ha+OIII, 3nm) (SVBONY)",
+          "filter": "SV220 (Ha+OIII, 3nm)",
+          "manufacturer": "SVBONY",
+          "type": "dual narrowband",
+          "bands_purpose": "Ha + OIII",
+          "best_for": "Emission nebulae (OSC)",
+          "has_HA": true,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "Ultra-narrow dual-band variant.",
+          "Emission_lines": "HA;OIII",
+          "emission_lines": "HA;OIII",
+          "emission_bands": [
+            "HA",
+            "OIII"
+          ]
+        },
+        {
+          "id": "svbony-sv220-sii-oiii-7nm",
+          "name": "SV220 (SII+OIII, 7nm) (SVBONY)",
+          "filter": "SV220 (SII+OIII, 7nm)",
+          "manufacturer": "SVBONY",
+          "type": "dual narrowband",
+          "bands_purpose": "SII + OIII",
+          "best_for": "Emission nebulae (OSC/mono; SII emphasis)",
+          "has_HA": false,
+          "has_OIII": true,
+          "has_SII": true,
+          "notes": "Distinct SV220 variant (not Ha/OIII).",
+          "Emission_lines": "OIII;SII",
+          "emission_lines": "OIII;SII",
+          "emission_bands": [
+            "OIII",
+            "SII"
+          ]
+        },
+        {
+          "id": "svbony-uhc",
+          "name": "UHC (SVBONY)",
+          "filter": "UHC",
+          "manufacturer": "SVBONY",
+          "type": "UHC-style nebula",
+          "bands_purpose": "nebula contrast boost",
+          "best_for": "Bright nebulae (EAA/visual; some OSC)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "UHC-style; not explicit line passbands.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "svbony-cls",
+          "name": "CLS (SVBONY)",
+          "filter": "CLS",
+          "manufacturer": "SVBONY",
+          "type": "broadband LP",
+          "bands_purpose": "city-light suppression",
+          "best_for": "Broadband targets in LP (galaxies/reflection/clusters)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Broadband LP notch style.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "svbony-sv231-fringe-killer-color-correction",
+          "name": "SV231 (Fringe Killer / Color Correction) (SVBONY)",
+          "filter": "SV231 (Fringe Killer / Color Correction)",
+          "manufacturer": "SVBONY",
+          "type": "lunar/planetary",
+          "bands_purpose": "color correction / CA reduction",
+          "best_for": "Lunar + planetary (esp. achromats)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Not an emission-line filter.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "astromania-uhc",
+          "name": "UHC (Astromania)",
+          "filter": "UHC",
+          "manufacturer": "Astromania",
+          "type": "UHC-style nebula",
+          "bands_purpose": "nebula contrast boost",
+          "best_for": "Bright nebulae (EAA/visual; some OSC)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "UHC-style; not explicit line passbands.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "astromania-o-iii",
+          "name": "O-III (Astromania)",
+          "filter": "O-III",
+          "manufacturer": "Astromania",
+          "type": "narrowband (visual/EAA)",
+          "bands_purpose": "OIII emphasis",
+          "best_for": "Planetary nebulae + SNR (visual/EAA)",
+          "has_HA": false,
+          "has_OIII": true,
+          "has_SII": false,
+          "notes": "OIII-only style filter.",
+          "Emission_lines": "OIII",
+          "emission_lines": "OIII",
           "emission_bands": [
             "OIII"
           ]
         },
         {
-          "id": "line-filter-ha",
-          "name": "Line Filter - HA",
+          "id": "astromania-s-ii",
+          "name": "S-II (Astromania)",
+          "filter": "S-II",
+          "manufacturer": "Astromania",
+          "type": "narrowband (mono/specialty)",
+          "bands_purpose": "SII emphasis",
+          "best_for": "SHO / mono narrowband work",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": true,
+          "notes": "SII-only style filter.",
+          "Emission_lines": "SII",
+          "emission_lines": "SII",
           "emission_bands": [
-            "HA"
+            "SII"
           ]
         },
         {
-          "id": "moon-skyglow",
-          "name": "Moon/Skyglow",
+          "id": "astromania-moon-variable-polarizer",
+          "name": "Moon / Variable Polarizer (Astromania)",
+          "filter": "Moon / Variable Polarizer",
+          "manufacturer": "Astromania",
+          "type": "lunar",
+          "bands_purpose": "brightness control",
+          "best_for": "Moon (visual/planetary brightness control)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Not an emission-line filter.",
+          "Emission_lines": "",
+          "emission_lines": "",
+          "emission_bands": []
+        },
+        {
+          "id": "astromania-luminance-ir-cut-style",
+          "name": "Luminance / IR-cut style (Astromania)",
+          "filter": "Luminance / IR-cut style",
+          "manufacturer": "Astromania",
+          "type": "luminance/broadband",
+          "bands_purpose": "broadband control / L channel",
+          "best_for": "L channel / IR management (mono/OSC)",
+          "has_HA": false,
+          "has_OIII": false,
+          "has_SII": false,
+          "notes": "Broadband/IR management.",
+          "Emission_lines": "",
+          "emission_lines": "",
           "emission_bands": []
         }
       ]
