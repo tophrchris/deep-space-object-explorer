@@ -625,29 +625,30 @@ def build_unobstructed_altitude_area_plot(
     plotted_times: list[pd.Timestamp] = []
     obstruction_ceiling = max(0.0, min(90.0, unobstructed_area_constant_obstruction_alt_deg))
 
-    fig.add_shape(
-        type="rect",
-        xref="paper",
-        yref="y",
-        x0=0.0,
-        x1=1.0,
-        y0=0.0,
-        y1=obstruction_ceiling,
-        fillcolor=theme_colors["obstruction_fill"],
-        line={"width": 0},
-        layer="below",
-    )
-    fig.add_shape(
-        type="line",
-        xref="paper",
-        yref="y",
-        x0=0.0,
-        x1=1.0,
-        y0=obstruction_ceiling,
-        y1=obstruction_ceiling,
-        line={"width": 1, "color": theme_colors["obstruction_line"]},
-        layer="below",
-    )
+    if obstruction_ceiling > 0.0:
+        fig.add_shape(
+            type="rect",
+            xref="paper",
+            yref="y",
+            x0=0.0,
+            x1=1.0,
+            y0=0.0,
+            y1=obstruction_ceiling,
+            fillcolor=theme_colors["obstruction_fill"],
+            line={"width": 0},
+            layer="below",
+        )
+        fig.add_shape(
+            type="line",
+            xref="paper",
+            yref="y",
+            x0=0.0,
+            x1=1.0,
+            y0=obstruction_ceiling,
+            y1=obstruction_ceiling,
+            line={"width": 1, "color": theme_colors["obstruction_line"]},
+            layer="below",
+        )
     mount_warning_zone = mount_warning_zone_altitude_bounds(mount_choice)
     if mount_warning_zone is not None:
         warning_y0, warning_y1, _warning_label = mount_warning_zone
