@@ -3,6 +3,16 @@ from __future__ import annotations
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
 from ui import streamlit_app as _legacy_ui
+from runtime.brightness_policy import (
+    STATUS_BROADBAND_BORDERLINE,
+    STATUS_IN_RANGE,
+    STATUS_NARROWBAND_BOOSTED,
+    STATUS_UNKNOWN,
+    classify_target_magnitude,
+    resolve_magnitude_thresholds,
+    resolve_telescope_max_magnitude,
+    slider_upper_bound,
+)
 
 def _refresh_legacy_globals() -> None:
     for _name, _value in vars(_legacy_ui).items():
@@ -35,16 +45,6 @@ def render_target_recommendations(
 
     def _parse_emission_band_set(value: Any) -> set[str]:
         return parse_emission_band_set(value)
-
-    def _filter_match_tier(target_bands: set[str], reference_bands: set[str]) -> int:
-        if not reference_bands:
-            return 0
-        overlap_count = len(target_bands & reference_bands)
-        if overlap_count <= 0:
-            return 0
-        if overlap_count >= len(reference_bands):
-            return 2
-        return 1
 
     def _build_keyword_priority_tokens(query_text: str) -> list[str]:
         cleaned = str(query_text or "").strip()
@@ -179,21 +179,43 @@ def render_target_recommendations(
     def _format_threshold_text(value: float) -> str:
         return f"{float(value):.1f}".rstrip("0").rstrip(".")
 
-    def _recommended_min_brightness_magnitude(telescope: dict[str, Any] | None) -> float:
-        if not isinstance(telescope, dict):
-            return 10.5
-        fov_maj = _safe_positive_float(telescope.get("fov_maj_deg"))
-        fov_min = _safe_positive_float(telescope.get("fov_min_deg"))
-        if fov_maj is None or fov_min is None:
-            return 10.5
-        fov_area = float(fov_maj * fov_min)
-        if fov_area <= 1.0:
-            return 12.5
-        if fov_area <= 2.5:
-            return 11.5
-        if fov_area <= 5.0:
-            return 10.5
-        return 9.5
+    def _target_emission_band_set(value: Any) -> set[str]:
+        if isinstance(value, set):
+            return {str(token).strip() for token in value if str(token).strip()}
+        if isinstance(value, (list, tuple)):
+            return {str(token).strip() for token in value if str(token).strip()}
+        return _parse_emission_band_set(value)
+
+    def _target_has_emissions_data(value: Any) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        return text.lower() not in {"-", "none", "nan"}
+
+    def _is_hii_object_type(value: Any) -> bool:
+        compact = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return compact in {"hii", "hiiregion"}
+
+    def _is_bright_nebula_group(value: Any) -> bool:
+        compact = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return compact == "brightnebula"
+
+    def _target_is_narrowband_target(
+        *,
+        object_type_group_value: Any,
+        object_type_value: Any,
+        emission_tokens_value: Any,
+        emission_lines_value: Any,
+    ) -> bool:
+        if _is_bright_nebula_group(object_type_group_value):
+            return True
+        if _is_hii_object_type(object_type_value):
+            return True
+        if _target_emission_band_set(emission_tokens_value):
+            return True
+        return _target_has_emissions_data(emission_lines_value)
 
     location = prefs["location"]
     location_lat = float(location["lat"])
@@ -209,7 +231,6 @@ def render_target_recommendations(
     telescope_lookup = dict(active_equipment.get("telescope_lookup", {}))
     filter_lookup = dict(active_equipment.get("filter_lookup", {}))
     owned_telescopes = list(active_equipment.get("owned_telescopes", []))
-    owned_filters = list(active_equipment.get("owned_filters", []))
 
     active_telescope_id = str(active_equipment.get("active_telescope_id", "")).strip()
     active_telescope = active_equipment.get("active_telescope")
@@ -220,6 +241,12 @@ def render_target_recommendations(
     active_filter = active_equipment.get("active_filter")
     if not isinstance(active_filter, dict):
         active_filter = filter_lookup.get(active_filter_id) if active_filter_id != "__none__" else None
+    active_filter_bands = (
+        _parse_emission_band_set(active_filter.get("emission_bands", []))
+        if isinstance(active_filter, dict)
+        else set()
+    )
+    narrowband_filter_active = bool(active_filter_bands)
 
     active_mount_choice = _normalize_mount_choice(
         active_equipment.get("active_mount_choice", "altaz"),
@@ -285,14 +312,13 @@ def render_target_recommendations(
     object_type_key = "recommended_targets_object_types"
     keyword_key = "recommended_targets_keyword"
     include_telescope_key = "recommended_targets_include_telescope_details"
-    include_filter_key = "recommended_targets_include_filter_criteria"
     include_mount_key = "recommended_targets_include_mount_adaptation"
     min_size_enabled_key = "recommended_targets_min_size_enabled"
     min_size_value_key = "recommended_targets_min_size_pct"
-    min_brightness_enabled_key = "recommended_targets_min_brightness_enabled"
-    min_brightness_value_key = "recommended_targets_min_brightness_value"
-    min_brightness_default_telescope_key = "recommended_targets_min_brightness_default_telescope_id"
-    min_brightness_last_recommended_key = "recommended_targets_min_brightness_last_recommended"
+    max_magnitude_enabled_key = "recommended_targets_max_magnitude_enabled"
+    max_magnitude_value_key = "recommended_targets_max_magnitude_value"
+    max_magnitude_default_telescope_key = "recommended_targets_max_magnitude_default_telescope_id"
+    max_magnitude_last_recommended_key = "recommended_targets_max_magnitude_last_recommended"
     page_size_key = "recommended_targets_page_size"
     page_number_key = "recommended_targets_page_number"
     sort_field_key = "recommended_targets_sort_field"
@@ -335,18 +361,14 @@ def render_target_recommendations(
 
     if include_telescope_key not in st.session_state:
         st.session_state[include_telescope_key] = active_telescope is not None
-    if include_filter_key not in st.session_state:
-        st.session_state[include_filter_key] = active_filter is not None
     if include_mount_key not in st.session_state:
         st.session_state[include_mount_key] = True
     if min_size_enabled_key not in st.session_state:
         st.session_state[min_size_enabled_key] = False
     if min_size_value_key not in st.session_state:
         st.session_state[min_size_value_key] = 0
-    if min_brightness_enabled_key not in st.session_state:
-        st.session_state[min_brightness_enabled_key] = False
-    if not isinstance(st.session_state.get(min_brightness_value_key), str):
-        st.session_state[min_brightness_value_key] = ""
+    if max_magnitude_enabled_key not in st.session_state:
+        st.session_state[max_magnitude_enabled_key] = False
     if page_size_key not in st.session_state:
         st.session_state[page_size_key] = 100
     elif int(st.session_state.get(page_size_key, 100)) not in {10, 100, 200}:
@@ -378,26 +400,59 @@ def render_target_recommendations(
         if isinstance(active_telescope, dict)
         else "__none__"
     )
-    recommended_min_brightness_default = _recommended_min_brightness_magnitude(
-        active_telescope if isinstance(active_telescope, dict) else None
+    recommended_max_magnitude_default = resolve_telescope_max_magnitude(
+        active_telescope if isinstance(active_telescope, dict) else None,
+        fallback=10.5,
     )
-    recommended_min_brightness_text = _format_threshold_text(recommended_min_brightness_default)
+    max_magnitude_slider_max = slider_upper_bound(recommended_max_magnitude_default)
+    legacy_min_brightness_value = _safe_finite_float(
+        st.session_state.get("recommended_targets_min_brightness_value")
+    )
+    seed_max_magnitude_value = _safe_finite_float(st.session_state.get(max_magnitude_value_key))
+    if seed_max_magnitude_value is None and legacy_min_brightness_value is not None:
+        seed_max_magnitude_value = float(legacy_min_brightness_value)
+    if seed_max_magnitude_value is None:
+        seed_max_magnitude_value = float(recommended_max_magnitude_default)
     previous_default_telescope_marker = str(
-        st.session_state.get(min_brightness_default_telescope_key, "")
+        st.session_state.get(max_magnitude_default_telescope_key, "")
     ).strip()
-    previous_recommended_text = str(
-        st.session_state.get(min_brightness_last_recommended_key, "")
-    ).strip()
-    current_min_brightness_text = str(st.session_state.get(min_brightness_value_key, "")).strip()
-    if not current_min_brightness_text:
-        st.session_state[min_brightness_value_key] = recommended_min_brightness_text
-    elif (
+    previous_recommended_value = _safe_finite_float(
+        st.session_state.get(max_magnitude_last_recommended_key)
+    )
+    if (
         previous_default_telescope_marker != active_telescope_default_marker
-        and current_min_brightness_text == previous_recommended_text
+        and previous_recommended_value is not None
+        and abs(float(seed_max_magnitude_value) - float(previous_recommended_value)) < 1e-6
     ):
-        st.session_state[min_brightness_value_key] = recommended_min_brightness_text
-    st.session_state[min_brightness_default_telescope_key] = active_telescope_default_marker
-    st.session_state[min_brightness_last_recommended_key] = recommended_min_brightness_text
+        seed_max_magnitude_value = float(recommended_max_magnitude_default)
+    seed_max_magnitude_value = min(
+        max(0.0, float(seed_max_magnitude_value)),
+        float(max_magnitude_slider_max),
+    )
+    seed_max_magnitude_value = round(float(seed_max_magnitude_value), 1)
+    if max_magnitude_value_key not in st.session_state:
+        st.session_state[max_magnitude_value_key] = seed_max_magnitude_value
+    current_max_magnitude_value = _safe_finite_float(
+        st.session_state.get(max_magnitude_value_key)
+    )
+    if current_max_magnitude_value is None:
+        current_max_magnitude_value = seed_max_magnitude_value
+    current_max_magnitude_value = min(
+        max(0.0, float(current_max_magnitude_value)),
+        float(max_magnitude_slider_max),
+    )
+    current_max_magnitude_value = round(float(current_max_magnitude_value), 1)
+    st.session_state[max_magnitude_default_telescope_key] = active_telescope_default_marker
+    st.session_state[max_magnitude_last_recommended_key] = float(recommended_max_magnitude_default)
+    recommended_max_magnitude_default = round(float(recommended_max_magnitude_default), 1)
+    recommended_max_magnitude_text = _format_threshold_text(recommended_max_magnitude_default)
+    estimated_magnitude_telescope_name = (
+        str(active_telescope.get("name", "selected telescope")).strip()
+        if isinstance(active_telescope, dict)
+        else "selected telescope"
+    )
+    if not estimated_magnitude_telescope_name:
+        estimated_magnitude_telescope_name = "selected telescope"
 
     criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 3, 3], gap="small")
     search_notes_placeholder: Any | None = None
@@ -447,39 +502,20 @@ def render_target_recommendations(
 
     selected_telescope: dict[str, Any] | None = None
     include_telescope_details = False
-    include_filter_criteria = False
     include_mount_adaptation = False
     use_minimum_size = False
     minimum_size_pct: float | None = None
-    use_minimum_brightness = False
-    minimum_brightness_mag: float | None = None
+    maximum_magnitude_mag = float(current_max_magnitude_value)
+    use_maximum_magnitude = False
+    magnitude_filter_available = False
+    magnitude_filter_active = False
     telescope_fov_maj: float | None = None
     telescope_fov_min: float | None = None
     telescope_fov_area: float | None = None
-    recommendation_min_framing_pct = 1.0
+    recommendation_min_framing_pct = 0.0
     recommendation_max_framing_pct = 500.0
 
     with criteria_col_3:
-        if isinstance(active_telescope, dict):
-            active_telescope_name = str(active_telescope.get("name", "Selected telescope")).strip() or "Selected telescope"
-            include_telescope_details = st.checkbox(
-                "Include telescope details in recommendations",
-                key=include_telescope_key,
-                help=f"Equipped telescope: {active_telescope_name}",
-            )
-
-        if owned_filters:
-            active_filter_name = (
-                str(active_filter.get("name", active_filter_id)).strip()
-                if isinstance(active_filter, dict)
-                else "None"
-            )
-            include_filter_criteria = st.checkbox(
-                "Include filter choice as criteria for recommendations",
-                key=include_filter_key,
-                help=f"Equipped filter: {active_filter_name or 'None'}",
-            )
-
         include_mount_adaptation = st.checkbox(
             "Adapt visibility calculations to selected mount",
             key=include_mount_key,
@@ -493,9 +529,19 @@ def render_target_recommendations(
                 mount_note_text = "increased likelihood of field rotation artifacts above 80 degrees"
             if mount_note_text:
                 st.caption(mount_note_text)
+        if isinstance(active_telescope, dict):
+            active_telescope_name = str(active_telescope.get("name", "Selected telescope")).strip() or "Selected telescope"
+            include_telescope_details = st.checkbox(
+                "Include telescope details in recommendations",
+                key=include_telescope_key,
+                help=f"Equipped telescope: {active_telescope_name}",
+            )
+            if not include_telescope_details:
+                st.caption("including Telescope details enables filtering by target size and magnitude")
         if include_telescope_details and isinstance(active_telescope, dict):
             selected_telescope = active_telescope
 
+        magnitude_filter_available = selected_telescope is not None
         telescope_fov_maj = _safe_positive_float(selected_telescope.get("fov_maj_deg")) if selected_telescope else None
         telescope_fov_min = _safe_positive_float(selected_telescope.get("fov_min_deg")) if selected_telescope else None
         telescope_fov_area = (
@@ -531,52 +577,65 @@ def render_target_recommendations(
                 )
             if use_minimum_size:
                 minimum_size_pct = float(min_size_value)
-        else:
-            st.caption("Minimum Size filter requires a selected telescope with FOV dimensions.")
 
-        use_minimum_brightness = st.checkbox(
-            "Enable Minimum Brightness",
-            key=min_brightness_enabled_key,
-            help=(
-                "Uses catalog magnitude (lower number = brighter). "
-                "Targets with unknown magnitude are excluded when enabled."
-            ),
-        )
-        min_brightness_value_text = st.text_input(
-            "Minimum Brightness",
-            key=min_brightness_value_key,
-            disabled=(not use_minimum_brightness),
-            help=f"Recommended for the active telescope: magnitude ≤ {recommended_min_brightness_text}",
-        )
-        st.caption(
-            f"Recommended default for current telescope: magnitude ≤ {recommended_min_brightness_text} "
-            "(lower magnitude = brighter)."
-        )
-        if use_minimum_brightness:
-            parsed_min_brightness = _safe_finite_float(min_brightness_value_text)
-            if parsed_min_brightness is None:
-                st.warning("Enter a valid magnitude value for Minimum Brightness (for example: 10.5).")
-            else:
-                minimum_brightness_mag = float(parsed_min_brightness)
+        if magnitude_filter_available:
+            use_maximum_magnitude = st.checkbox("Enable Maximum Magnitude", key=max_magnitude_enabled_key)
+            magnitude_filter_active = bool(use_maximum_magnitude)
+            max_magnitude_slider_col, _ = st.columns([1, 1], gap="small")
+            with max_magnitude_slider_col:
+                max_magnitude_slider_value = st.slider(
+                    "Maximum Magnitude",
+                    min_value=0.0,
+                    max_value=float(max_magnitude_slider_max),
+                    value=float(current_max_magnitude_value),
+                    step=0.1,
+                    key=max_magnitude_value_key,
+                    disabled=not use_maximum_magnitude,
+                    help=(
+                        f"The estimated max magnitude for {estimated_magnitude_telescope_name} is "
+                        f"{recommended_max_magnitude_text}. "
+                        "Targets are filtered by catalog magnitude (lower number = brighter). "
+                        "Targets with unknown magnitude are excluded."
+                    ),
+                )
+            if use_maximum_magnitude:
+                maximum_magnitude_mag = round(float(max_magnitude_slider_value), 1)
+            slider_thresholds = resolve_magnitude_thresholds(maximum_magnitude_mag)
+            if use_maximum_magnitude and narrowband_filter_active:
+                st.markdown(
+                    (
+                        "<div style=\"margin:0.1rem 0 0 0; color:#6b7280; font-size:0.875rem; line-height:1.35;\">"
+                        "<div>Narrowband filter adjustment:</div>"
+                        "<div>broadband effective &lt;= "
+                        f"<span style=\"color:#991b1b; font-weight:700;\">{slider_thresholds.broadband_effective_max:.1f}</span>"
+                        "</div>"
+                        "<div>narrowband effective &lt;= "
+                        f"<span style=\"color:#1d4ed8; font-weight:700;\">{slider_thresholds.narrowband_effective_max:.1f}</span>."
+                        "</div>"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+            elif use_maximum_magnitude:
+                st.caption(f"Maximum magnitude applied: <= {slider_thresholds.selected_max:.1f}.")
 
     mount_mode = active_mount_choice if include_mount_adaptation else "none"
-    selected_filter_item = active_filter if (include_filter_criteria and isinstance(active_filter, dict)) else None
-    selected_filter_bands = _parse_emission_band_set(selected_filter_item.get("emission_bands", [])) if selected_filter_item else set()
-    filter_reference_band_sets: list[set[str]] = []
+    magnitude_thresholds = resolve_magnitude_thresholds(maximum_magnitude_mag)
 
     if search_notes_placeholder is not None:
         with search_notes_placeholder.container():
-            if include_filter_criteria and selected_filter_item is not None:
-                filter_name = str(selected_filter_item.get("name", "selected filter")).strip() or "selected filter"
-                st.caption(f"Camera filter applied: {filter_name} (hard-filter: any emission-band overlap required).")
-            elif include_filter_criteria and active_filter_id == "__none__":
-                st.caption("Filter criteria enabled, but Camera Filter is set to None.")
-            if use_minimum_brightness and minimum_brightness_mag is not None:
+            if magnitude_filter_active:
                 st.caption(
-                    "Minimum Brightness applied: "
-                    f"catalog magnitude <= {minimum_brightness_mag:.1f} "
+                    "Maximum Magnitude applied: "
+                    f"selected <= {magnitude_thresholds.selected_max:.1f} "
                     "(targets with unknown magnitude are excluded)."
                 )
+                if narrowband_filter_active:
+                    st.caption(
+                        "Narrowband adjustment active: "
+                        f"broadband effective <= {magnitude_thresholds.broadband_effective_max:.1f}, "
+                        f"narrowband effective <= {magnitude_thresholds.narrowband_effective_max:.1f}."
+                    )
 
     has_selected_hour_window = bool(selected_visible_hours)
     altitude_sort_label = "Max Alt in Window" if has_selected_hour_window else "Altitude at Peak"
@@ -655,15 +714,21 @@ def render_target_recommendations(
             "object_types": sorted(selected_object_types),
             "keyword": str(keyword_query).strip().lower(),
             "include_telescope": bool(include_telescope_details),
-            "include_filter": bool(include_filter_criteria),
             "include_mount": bool(include_mount_adaptation),
-            "filter_id": active_filter_id if include_filter_criteria else "__disabled__",
+            "active_filter_id_for_brightness": active_filter_id,
+            "narrowband_filter_active": bool(narrowband_filter_active),
             "mount_mode": mount_mode,
             "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
             "min_size_enabled": bool(use_minimum_size),
             "min_size_pct": minimum_size_pct if minimum_size_pct is not None else "",
-            "min_brightness_enabled": bool(use_minimum_brightness),
-            "min_brightness_mag": minimum_brightness_mag if minimum_brightness_mag is not None else "",
+            "max_magnitude_enabled": bool(magnitude_filter_active),
+            "max_magnitude_selected": float(maximum_magnitude_mag) if magnitude_filter_active else None,
+            "max_magnitude_broadband_effective": (
+                float(magnitude_thresholds.broadband_effective_max) if magnitude_filter_active else None
+            ),
+            "max_magnitude_narrowband_effective": (
+                float(magnitude_thresholds.narrowband_effective_max) if magnitude_filter_active else None
+            ),
             "telescope_fov_filter_min_pct": recommendation_min_framing_pct,
             "telescope_fov_filter_max_pct": recommendation_max_framing_pct,
             "catalog_mtime_ns": int(catalog_fingerprint[0]),
@@ -816,27 +881,74 @@ def render_target_recommendations(
                 working_catalog["object_type_group_norm"].isin(effective_group_set)
             ]
 
-        if minimum_brightness_mag is not None:
-            if "magnitude_numeric" not in working_catalog.columns:
-                working_catalog = working_catalog.copy()
-                if "magnitude" in working_catalog.columns:
-                    working_catalog["magnitude_numeric"] = pd.to_numeric(working_catalog["magnitude"], errors="coerce")
-                else:
-                    working_catalog["magnitude_numeric"] = np.nan
-            working_catalog = working_catalog[
-                working_catalog["magnitude_numeric"].apply(
-                    lambda value: (
-                        value is not None
-                        and not pd.isna(value)
-                        and np.isfinite(float(value))
-                        and float(value) <= float(minimum_brightness_mag)
-                    )
+        if "magnitude_numeric" not in working_catalog.columns:
+            working_catalog = working_catalog.copy()
+            if "magnitude" in working_catalog.columns:
+                working_catalog["magnitude_numeric"] = pd.to_numeric(working_catalog["magnitude"], errors="coerce")
+            else:
+                working_catalog["magnitude_numeric"] = np.nan
+        if "emission_band_tokens" not in working_catalog.columns:
+            working_catalog = working_catalog.copy()
+            if "emission_lines" in working_catalog.columns:
+                working_catalog["emission_band_tokens"] = working_catalog["emission_lines"].apply(
+                    lambda value: tuple(sorted(_parse_emission_band_set(value)))
                 )
-            ]
+            else:
+                working_catalog["emission_band_tokens"] = [tuple() for _ in range(len(working_catalog))]
+
+        magnitude_keep_mask: list[bool] = []
+        magnitude_statuses: list[str] = []
+        target_is_narrowband_flags: list[bool] = []
+        object_type_group_values = (
+            working_catalog["object_type_group"].tolist()
+            if "object_type_group" in working_catalog.columns
+            else ["" for _ in range(len(working_catalog))]
+        )
+        object_type_values = (
+            working_catalog["object_type"].tolist()
+            if "object_type" in working_catalog.columns
+            else ["" for _ in range(len(working_catalog))]
+        )
+        emission_lines_values = (
+            working_catalog["emission_lines"].tolist()
+            if "emission_lines" in working_catalog.columns
+            else ["" for _ in range(len(working_catalog))]
+        )
+        for magnitude_value, emission_tokens, object_type_group_value, object_type_value, emission_lines_value in zip(
+            working_catalog["magnitude_numeric"].tolist(),
+            working_catalog["emission_band_tokens"].tolist(),
+            object_type_group_values,
+            object_type_values,
+            emission_lines_values,
+        ):
+            target_is_narrowband = _target_is_narrowband_target(
+                object_type_group_value=object_type_group_value,
+                object_type_value=object_type_value,
+                emission_tokens_value=emission_tokens,
+                emission_lines_value=emission_lines_value,
+            )
+            if magnitude_filter_active:
+                include_target, status, _ = classify_target_magnitude(
+                    magnitude_value,
+                    selected_max=maximum_magnitude_mag,
+                    narrowband_filter_active=narrowband_filter_active,
+                    target_is_narrowband=target_is_narrowband,
+                )
+            else:
+                include_target = True
+                status = STATUS_IN_RANGE if _safe_finite_float(magnitude_value) is not None else STATUS_UNKNOWN
+            magnitude_keep_mask.append(bool(include_target))
+            magnitude_statuses.append(str(status))
+            target_is_narrowband_flags.append(target_is_narrowband)
+
+        working_catalog = working_catalog.copy()
+        working_catalog["magnitude_policy_status"] = magnitude_statuses
+        working_catalog["target_is_narrowband"] = target_is_narrowband_flags
+        working_catalog = working_catalog[np.asarray(magnitude_keep_mask, dtype=bool)]
 
         if working_catalog.empty:
-            if minimum_brightness_mag is not None:
-                empty_query_message = "No targets match the current Minimum Brightness threshold."
+            if magnitude_filter_active:
+                empty_query_message = "No targets match the current Maximum Magnitude threshold."
             else:
                 empty_query_message = "No targets match the current criteria."
         else:
@@ -995,33 +1107,8 @@ def render_target_recommendations(
                                     dtype=object,
                                 )
 
-                    emission_token_values = candidates.get("emission_band_tokens")
-                    if emission_token_values is None:
-                        target_emission_sets = [
-                            _parse_emission_band_set(value)
-                            for value in candidates.get("emission_lines", pd.Series(dtype=object)).tolist()
-                        ]
-                    else:
-                        target_emission_sets = [set(value) for value in emission_token_values.tolist()]
-
-                    if selected_filter_item is not None and selected_filter_bands:
-                        filter_match_tier = np.array(
-                            [_filter_match_tier(target_bands, selected_filter_bands) for target_bands in target_emission_sets],
-                            dtype=int,
-                        )
-                        filter_visibility_mask = filter_match_tier > 0
-                    else:
-                        if filter_reference_band_sets:
-                            filter_match_tier = np.array(
-                                [
-                                    max(_filter_match_tier(target_bands, reference_bands) for reference_bands in filter_reference_band_sets)
-                                    for target_bands in target_emission_sets
-                                ],
-                                dtype=int,
-                            )
-                        else:
-                            filter_match_tier = np.zeros(len(candidate_col_indices), dtype=int)
-                        filter_visibility_mask = np.ones(len(candidate_col_indices), dtype=bool)
+                    filter_match_tier = np.zeros(len(candidate_col_indices), dtype=int)
+                    filter_visibility_mask = np.ones(len(candidate_col_indices), dtype=bool)
 
                     above_horizon_matrix = altitude_matrix >= 0.0
                     selected_window_matrix = selected_hours_mask[:, np.newaxis]
@@ -1061,9 +1148,7 @@ def render_target_recommendations(
                         )
 
                     eligible_mask = eligible_visible_mask | include_fallback_mask
-                    if not np.any(filter_visibility_mask):
-                        empty_query_message = "No targets match the selected camera filter."
-                    elif not np.any(eligible_mask):
+                    if not np.any(eligible_mask):
                         if no_visible_targets:
                             empty_query_message = "No targets above the horizon meet the current visibility/weather/mount constraints."
                         else:
@@ -1184,7 +1269,11 @@ def render_target_recommendations(
                                     )
                                 ].copy()
 
-                            if size_filtered_recommended.empty and not recommended_before_size_filters.empty:
+                            if (
+                                size_filtered_recommended.empty
+                                and not recommended_before_size_filters.empty
+                                and keyword_search_active
+                            ):
                                 recommended = recommended_before_size_filters
                                 size_framing_fallback_active = True
                                 size_framing_fallback_message = (
@@ -1299,7 +1388,6 @@ def render_target_recommendations(
             )
         )
         st.caption("Framing highlight legend: red = too small, amber = too large, gray = unknown size.")
-
     start_index = (page_number - 1) * int(page_size)
     end_index = min(total_results, start_index + int(page_size))
     page_frame = recommended.iloc[start_index:end_index].copy().reset_index(drop=True)
@@ -1329,6 +1417,29 @@ def render_target_recommendations(
         )
     else:
         page_frame["magnitude_display"] = "--"
+    magnitude_policy_statuses: list[str] = []
+    for row_idx in range(len(page_frame)):
+        emission_tokens = page_frame.iloc[row_idx].get("emission_band_tokens")
+        emission_lines_value = page_frame.iloc[row_idx].get("emission_lines")
+        object_type_group_value = page_frame.iloc[row_idx].get("object_type_group")
+        target_is_narrowband = _target_is_narrowband_target(
+            object_type_group_value=object_type_group_value,
+            object_type_value=page_frame.iloc[row_idx].get("object_type"),
+            emission_tokens_value=emission_tokens,
+            emission_lines_value=emission_lines_value,
+        )
+        raw_magnitude = page_frame.iloc[row_idx].get(magnitude_source_column) if magnitude_source_column else None
+        if magnitude_filter_active:
+            _, magnitude_status, _ = classify_target_magnitude(
+                raw_magnitude,
+                selected_max=maximum_magnitude_mag,
+                narrowband_filter_active=narrowband_filter_active,
+                target_is_narrowband=target_is_narrowband,
+            )
+        else:
+            magnitude_status = STATUS_IN_RANGE if _safe_finite_float(raw_magnitude) is not None else STATUS_UNKNOWN
+        magnitude_policy_statuses.append(str(magnitude_status))
+    page_frame["magnitude_policy_status"] = magnitude_policy_statuses
 
     def _thumbnail_numeric(value: Any) -> float | None:
         try:
@@ -1443,6 +1554,30 @@ def render_target_recommendations(
             "padding-left": "0px !important",
         },
     )
+    if (
+        magnitude_filter_active
+        and "Magnitude" in display_table.columns
+        and "magnitude_policy_status" in page_frame.columns
+    ):
+        def _style_magnitude_cells(series: pd.Series) -> list[str]:
+            styles: list[str] = []
+            for row_idx in series.index:
+                status = str(page_frame.at[int(row_idx), "magnitude_policy_status"]).strip().lower()
+                if status == STATUS_BROADBAND_BORDERLINE:
+                    styles.append(
+                        "color: #991b1b; font-weight: 700;"
+                    )
+                elif status == STATUS_NARROWBAND_BOOSTED:
+                    styles.append(
+                        "color: #1d4ed8; font-weight: 700;"
+                    )
+                elif status == STATUS_IN_RANGE:
+                    styles.append("")
+                else:
+                    styles.append("")
+            return styles
+
+        recommendation_styler = recommendation_styler.apply(_style_magnitude_cells, subset=["Magnitude"])
     if "Framing" in display_table.columns and "framing_constraint_status" in page_frame.columns:
         def _style_framing_cells(series: pd.Series) -> list[str]:
             styles: list[str] = []
