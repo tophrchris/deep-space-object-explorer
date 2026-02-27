@@ -238,6 +238,12 @@ def render_detail_panel(
                     {
                         "primary_id": preview_target_id,
                         "common_name": preview_common_name,
+                        "image_url": clean_text(preview_target.get("image_url")),
+                        "hero_image_url": clean_text(preview_target.get("hero_image_url")),
+                        "ra_deg": parse_numeric(preview_target.get("ra_deg")),
+                        "dec_deg": parse_numeric(preview_target.get("dec_deg")),
+                        "ang_size_maj_arcmin": parse_numeric(preview_target.get("ang_size_maj_arcmin")),
+                        "ang_size_min_arcmin": parse_numeric(preview_target.get("ang_size_min_arcmin")),
                         "label": preview_label,
                         "object_type_group": preview_group,
                         "emission_lines_display": preview_emission_details,
@@ -922,6 +928,12 @@ def render_detail_panel(
             {
                 "primary_id": preview_target_id,
                 "common_name": preview_common_name,
+                "image_url": clean_text(preview_target.get("image_url")),
+                "hero_image_url": clean_text(preview_target.get("hero_image_url")),
+                "ra_deg": parse_numeric(preview_target.get("ra_deg")),
+                "dec_deg": parse_numeric(preview_target.get("dec_deg")),
+                "ang_size_maj_arcmin": parse_numeric(preview_target.get("ang_size_maj_arcmin")),
+                "ang_size_min_arcmin": parse_numeric(preview_target.get("ang_size_min_arcmin")),
                 "label": preview_label,
                 "object_type_group": preview_group,
                 "emission_lines_display": preview_emission_details,
@@ -1096,6 +1108,15 @@ def render_detail_panel(
             selected_track=track,
             overlay_tracks=preview_tracks,
             list_member_ids=active_preview_list_members,
+            selected_metadata={
+                "common_name": clean_text(selected.get("common_name")),
+                "image_url": clean_text(selected.get("image_url")),
+                "hero_image_url": clean_text(selected.get("hero_image_url")),
+                "ra_deg": parse_numeric(selected.get("ra_deg")),
+                "dec_deg": parse_numeric(selected.get("dec_deg")),
+                "ang_size_maj_arcmin": parse_numeric(selected.get("ang_size_maj_arcmin")),
+                "ang_size_min_arcmin": parse_numeric(selected.get("ang_size_min_arcmin")),
+            },
             now_local=pd.Timestamp(datetime.now(tzinfo)),
             row_order_ids=(
                 [target_id] + [str(item) for item in active_preview_list_ids if str(item) != target_id]

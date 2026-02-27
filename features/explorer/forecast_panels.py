@@ -159,6 +159,30 @@ def _lunar_phase_style_bucket_from_phase_key(phase_key: Any) -> str:
     return "quarter"
 
 
+_LUNAR_PHASE_ANCHOR_AGE_DAYS: dict[str, float] = {
+    "new": 0.0,
+    "first_quarter": 7.38,
+    "full": 14.77,
+    "third_quarter": 22.15,
+}
+_SYNODIC_MONTH_DAYS = 29.53
+
+
+def _phase_anchor_distance_days(phase_key: Any, phase_age_days: Any) -> float:
+    key = str(phase_key or "").strip().lower()
+    if key not in _LUNAR_PHASE_ANCHOR_AGE_DAYS:
+        return float("inf")
+    try:
+        age = float(phase_age_days)
+    except (TypeError, ValueError):
+        return float("inf")
+    if not np.isfinite(age):
+        return float("inf")
+    anchor = float(_LUNAR_PHASE_ANCHOR_AGE_DAYS[key])
+    distance = abs(age - anchor)
+    return float(min(distance, _SYNODIC_MONTH_DAYS - distance))
+
+
 def _lunar_gray_scale_palette() -> dict[str, str]:
     # Match cloud-cover brightness endpoints, but force grayscale for lunar altitude.
     low_gray = _neutral_gray_from_hex(_interpolate_cloud_cover_color(0.0))
@@ -1502,7 +1526,6 @@ def build_astronomy_forecast_summary(
         return f"{percent:.0f}%"
 
     summary_rows: list[dict[str, Any]] = []
-    previous_lunar_phase_key: str | None = None
     for day_offset, (window_start, window_end) in enumerate(windows):
         night_rows = [
             row
@@ -1532,15 +1555,7 @@ def build_astronomy_forecast_summary(
             end_local_iso=window_end.isoformat(),
         )
         lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip().lower() or None
-        lunar_phase_display_prefix = ""
-        if lunar_phase_key:
-            if previous_lunar_phase_key is None:
-                lunar_phase_display_prefix = lunar_phase_emoji(lunar_phase_key)
-            elif lunar_phase_key != previous_lunar_phase_key:
-                previous_phase_emoji = lunar_phase_emoji(previous_lunar_phase_key)
-                current_phase_emoji = lunar_phase_emoji(lunar_phase_key)
-                lunar_phase_display_prefix = f"{previous_phase_emoji} \u2192 {current_phase_emoji}"
-        previous_lunar_phase_key = lunar_phase_key
+        lunar_phase_age_days = (lunar_phase_payload or {}).get("phase_age_days")
 
         if rating_emoji:
             label = f"{label} {rating_emoji}"
@@ -1644,11 +1659,6 @@ def build_astronomy_forecast_summary(
         lunar_avg_altitude_deg = (lunar_summary or {}).get("moon_avg_altitude_deg")
         lunar_max_altitude_deg = (lunar_summary or {}).get("moon_max_altitude_deg")
         lunar_display = format_lunar_percent_display(lunar_below_horizon_pct)
-        if lunar_phase_display_prefix:
-            if lunar_display == "-":
-                lunar_display = lunar_phase_display_prefix
-            else:
-                lunar_display = f"{lunar_phase_display_prefix} {lunar_display}"
 
         summary_rows.append(
             {
@@ -1657,6 +1667,7 @@ def build_astronomy_forecast_summary(
                 "Lunar": lunar_display,
                 "Dark Time": dark_duration,
                 "lunar_phase_key": lunar_phase_key or "",
+                "lunar_phase_age_days": lunar_phase_age_days,
                 "lunar_avg_altitude_deg": lunar_avg_altitude_deg,
                 "lunar_max_altitude_deg": lunar_max_altitude_deg,
                 "Sunset": sunset_text,
@@ -1673,6 +1684,41 @@ def build_astronomy_forecast_summary(
             }
         )
 
+    phase_anchor_best_by_key: dict[str, tuple[int, float]] = {}
+    for row_index, row in enumerate(summary_rows):
+        row_phase_key = str(row.get("lunar_phase_key", "")).strip().lower()
+        if not row_phase_key:
+            continue
+        anchor_distance = _phase_anchor_distance_days(row_phase_key, row.get("lunar_phase_age_days"))
+        if not np.isfinite(anchor_distance):
+            continue
+        previous_best = phase_anchor_best_by_key.get(row_phase_key)
+        if previous_best is None or anchor_distance < previous_best[1]:
+            phase_anchor_best_by_key[row_phase_key] = (row_index, anchor_distance)
+    phase_anchor_row_indices = {item[0] for item in phase_anchor_best_by_key.values()}
+
+    previous_lunar_phase_key: str | None = None
+    for row_index, row in enumerate(summary_rows):
+        row_phase_key = str(row.get("lunar_phase_key", "")).strip().lower() or None
+        lunar_phase_display_prefix = ""
+        if row_phase_key:
+            if previous_lunar_phase_key is None:
+                lunar_phase_display_prefix = lunar_phase_emoji(row_phase_key)
+            elif row_phase_key != previous_lunar_phase_key:
+                previous_phase_emoji = lunar_phase_emoji(previous_lunar_phase_key)
+                current_phase_emoji = lunar_phase_emoji(row_phase_key)
+                lunar_phase_display_prefix = f"{previous_phase_emoji} \u2192 {current_phase_emoji}"
+            elif row_index in phase_anchor_row_indices:
+                lunar_phase_display_prefix = lunar_phase_emoji(row_phase_key)
+        previous_lunar_phase_key = row_phase_key
+
+        lunar_display = str(row.get("Lunar", "-")).strip() or "-"
+        if lunar_phase_display_prefix:
+            if lunar_display == "-":
+                row["Lunar"] = lunar_phase_display_prefix
+            else:
+                row["Lunar"] = f"{lunar_phase_display_prefix} {lunar_display}"
+
     return pd.DataFrame(summary_rows)
 
 
@@ -1681,15 +1727,20 @@ def render_astronomy_forecast_summary(
     *,
     temperature_unit: str,
     selected_day_offset: int,
+    forecast_nights: int | None = None,
 ) -> None:
     astronomy_forecast_nights = int(_ui_name("ASTRONOMY_FORECAST_NIGHTS"))
+    effective_night_count = max(
+        1,
+        int(astronomy_forecast_nights if forecast_nights is None else forecast_nights),
+    )
     weather_forecast_day_offset_state_key = str(_ui_name("WEATHER_FORECAST_DAY_OFFSET_STATE_KEY"))
     weather_forecast_period_state_key = str(_ui_name("WEATHER_FORECAST_PERIOD_STATE_KEY"))
     weather_forecast_period_tonight = _ui_name("WEATHER_FORECAST_PERIOD_TONIGHT")
     weather_forecast_period_tomorrow = _ui_name("WEATHER_FORECAST_PERIOD_TOMORROW")
     mui_table = _get_st_mui_table()
     if frame.empty:
-        st.info("No 5-night forecast data available.")
+        st.info(f"No {effective_night_count}-night forecast data available.")
         return
 
     ordered_columns = [
@@ -1732,7 +1783,7 @@ def render_astronomy_forecast_summary(
         for row_idx, row in display_frame.iterrows():
             row_day_offset = normalize_weather_forecast_day_offset(
                 source_frame.at[int(row_idx), "day_offset"],
-                max_offset=astronomy_forecast_nights - 1,
+                max_offset=effective_night_count - 1,
             )
             row_is_selected = row_day_offset == selected_day_offset
             for column_name in ordered_columns:
@@ -1853,7 +1904,7 @@ def render_astronomy_forecast_summary(
 
         selected_offset = normalize_weather_forecast_day_offset(
             source_frame.at[selected_index, "day_offset"],
-            max_offset=astronomy_forecast_nights - 1,
+            max_offset=effective_night_count - 1,
         )
         selection_token = f"{selected_index}:{selected_offset}"
         last_selection_token = str(st.session_state.get("astronomy_forecast_last_selection_token", ""))
@@ -1873,7 +1924,7 @@ def render_astronomy_forecast_summary(
         row_idx = int(row.name)
         row_day_offset = normalize_weather_forecast_day_offset(
             source_frame.at[row_idx, "day_offset"],
-            max_offset=astronomy_forecast_nights - 1,
+            max_offset=effective_night_count - 1,
         )
         row_is_selected = row_day_offset == selected_day_offset
 
@@ -1987,7 +2038,7 @@ def render_astronomy_forecast_summary(
 
     selected_offset = normalize_weather_forecast_day_offset(
         source_frame.at[selected_index, "day_offset"],
-        max_offset=astronomy_forecast_nights - 1,
+        max_offset=effective_night_count - 1,
     )
     selection_token = f"{selected_index}:{selected_offset}"
     last_selection_token = str(st.session_state.get("astronomy_forecast_last_selection_token", ""))

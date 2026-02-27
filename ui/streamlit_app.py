@@ -415,7 +415,7 @@ WEATHER_FORECAST_PERIOD_STATE_KEY = "weather_forecast_period"
 WEATHER_FORECAST_PERIOD_TONIGHT = "tonight"
 WEATHER_FORECAST_PERIOD_TOMORROW = "tomorrow"
 WEATHER_FORECAST_DAY_OFFSET_STATE_KEY = "weather_forecast_day_offset"
-ASTRONOMY_FORECAST_NIGHTS = 5
+ASTRONOMY_FORECAST_NIGHTS = 10
 NIGHT_RATING_FACTOR_WEIGHTS: dict[str, float] = {
     "precipitation": 0.05,
     "precip_probability": 0.10,
@@ -1407,6 +1407,7 @@ def build_sky_position_summary_rows(
     selected_track: pd.DataFrame | None,
     overlay_tracks: list[dict[str, Any]],
     list_member_ids: set[str],
+    selected_metadata: dict[str, Any] | None = None,
     now_local: pd.Timestamp | datetime | None = None,
     row_order_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -1423,6 +1424,7 @@ def build_sky_position_summary_rows(
         selected_track=selected_track,
         overlay_tracks=overlay_tracks,
         list_member_ids=list_member_ids,
+        selected_metadata=selected_metadata,
         now_local=now_local,
         row_order_ids=row_order_ids,
     )

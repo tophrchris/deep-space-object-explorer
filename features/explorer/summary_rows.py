@@ -127,6 +127,7 @@ def build_sky_position_summary_rows(
     selected_track: pd.DataFrame | None,
     overlay_tracks: list[dict[str, Any]],
     list_member_ids: set[str],
+    selected_metadata: dict[str, Any] | None = None,
     now_local: pd.Timestamp | datetime | None = None,
     row_order_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -138,15 +139,24 @@ def build_sky_position_summary_rows(
         color: str,
         events: dict[str, pd.Series | None],
         is_in_list: bool,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         culmination = events.get("culmination")
         culmination_dir = str(culmination["wind16"]) if culmination is not None else "--"
         culmination_alt = f"{float(culmination['alt']):.1f} deg" if culmination is not None else "--"
+        metadata = metadata if isinstance(metadata, dict) else {}
         return {
             "primary_id": primary_id,
             "line_color": color,
             "target": label,
             "object_type_group": type_group or "other",
+            "common_name": str(metadata.get("common_name", "") or "").strip(),
+            "image_url": str(metadata.get("image_url", "") or "").strip(),
+            "hero_image_url": str(metadata.get("hero_image_url", "") or "").strip(),
+            "ra_deg": metadata.get("ra_deg"),
+            "dec_deg": metadata.get("dec_deg"),
+            "ang_size_maj_arcmin": metadata.get("ang_size_maj_arcmin"),
+            "ang_size_min_arcmin": metadata.get("ang_size_min_arcmin"),
             "rise": event_time_value(events.get("rise")),
             "first_visible": event_time_value(events.get("first_visible")),
             "culmination": event_time_value(events.get("culmination")),
@@ -169,6 +179,7 @@ def build_sky_position_summary_rows(
             str(selected_color or "#22c55e"),
             selected_events or {},
             selected_primary_id in list_member_ids,
+            selected_metadata,
         )
         selected_row["visible_total"] = format_duration_hm(compute_total_visible_time(selected_track))
         selected_row["visible_remaining"] = format_duration_hm(
@@ -184,6 +195,15 @@ def build_sky_position_summary_rows(
             str(target_track.get("color", "#22c55e")),
             target_track.get("events", {}),
             primary_id in list_member_ids,
+            {
+                "common_name": target_track.get("common_name"),
+                "image_url": target_track.get("image_url"),
+                "hero_image_url": target_track.get("hero_image_url"),
+                "ra_deg": target_track.get("ra_deg"),
+                "dec_deg": target_track.get("dec_deg"),
+                "ang_size_maj_arcmin": target_track.get("ang_size_maj_arcmin"),
+                "ang_size_min_arcmin": target_track.get("ang_size_min_arcmin"),
+            },
         )
         overlay_track = target_track.get("track")
         if isinstance(overlay_track, pd.DataFrame):
@@ -198,4 +218,3 @@ def build_sky_position_summary_rows(
         default_rank = len(order_map)
         rows = sorted(rows, key=lambda row: order_map.get(str(row.get("primary_id", "")), default_rank))
     return rows
-
