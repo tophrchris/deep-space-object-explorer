@@ -74,6 +74,8 @@ def load_equipment_catalog(catalog_path: str = str(EQUIPMENT_CATALOG_PATH)) -> d
 def format_equipment_value(value: Any) -> str:
     if value is None:
         return "-"
+    if isinstance(value, bool):
+        return "✅" if value else "-"
     if isinstance(value, (list, tuple, set)):
         parts = [str(item).strip() for item in value if str(item).strip()]
         return "; ".join(parts) if parts else "-"

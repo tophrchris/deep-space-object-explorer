@@ -231,6 +231,38 @@ def render_target_recommendations(
             return True
         return _target_has_emissions_data(emission_lines_value)
 
+    def _coerce_bool_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value or "").strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n", ""}:
+            return False
+        return bool(value)
+
+    def _active_filter_emission_band_set(filter_item: Any) -> set[str]:
+        if not isinstance(filter_item, dict):
+            return set()
+
+        explicit_band_set = _parse_emission_band_set(filter_item.get("emission_bands", []))
+        if explicit_band_set:
+            return explicit_band_set
+
+        for emission_field in ("emission_lines", "Emission_lines"):
+            parsed = _parse_emission_band_set(filter_item.get(emission_field))
+            if parsed:
+                return parsed
+
+        inferred_bands: set[str] = set()
+        if _coerce_bool_flag(filter_item.get("has_HA")):
+            inferred_bands.add("HA")
+        if _coerce_bool_flag(filter_item.get("has_OIII")):
+            inferred_bands.add("OIII")
+        if _coerce_bool_flag(filter_item.get("has_SII")):
+            inferred_bands.add("SII")
+        return inferred_bands
+
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
@@ -255,11 +287,7 @@ def render_target_recommendations(
     active_filter = active_equipment.get("active_filter")
     if not isinstance(active_filter, dict):
         active_filter = filter_lookup.get(active_filter_id) if active_filter_id != "__none__" else None
-    active_filter_bands = (
-        _parse_emission_band_set(active_filter.get("emission_bands", []))
-        if isinstance(active_filter, dict)
-        else set()
-    )
+    active_filter_bands = _active_filter_emission_band_set(active_filter)
     narrowband_filter_active = bool(active_filter_bands)
 
     active_mount_choice = _normalize_mount_choice(
@@ -1571,6 +1599,7 @@ def render_target_recommendations(
     else:
         page_frame["magnitude_display"] = "--"
     magnitude_policy_statuses: list[str] = []
+    target_is_narrowband_row_flags: list[bool] = []
     for row_idx in range(len(page_frame)):
         emission_tokens = page_frame.iloc[row_idx].get("emission_band_tokens")
         emission_lines_value = page_frame.iloc[row_idx].get("emission_lines")
@@ -1595,8 +1624,26 @@ def render_target_recommendations(
                     magnitude_status = STATUS_OUT_OF_RANGE
         else:
             magnitude_status = STATUS_IN_RANGE if _safe_finite_float(raw_magnitude) is not None else STATUS_UNKNOWN
+        target_is_narrowband_row_flags.append(bool(target_is_narrowband))
         magnitude_policy_statuses.append(str(magnitude_status))
     page_frame["magnitude_policy_status"] = magnitude_policy_statuses
+    page_frame["target_is_narrowband"] = target_is_narrowband_row_flags
+
+    emissions_display_values: list[str] = []
+    emissions_filter_compatible_flags: list[bool] = []
+    for row_idx in range(len(page_frame)):
+        raw_emissions = str(page_frame.iloc[row_idx].get("emissions", "") or "").strip()
+        emissions_text = raw_emissions if raw_emissions else "-"
+        filter_compatible = bool(narrowband_filter_active) and bool(page_frame.iloc[row_idx].get("target_is_narrowband", False))
+        if filter_compatible:
+            if emissions_text in {"-", "--"}:
+                emissions_text = "Filter Compatible"
+            else:
+                emissions_text = f"{emissions_text} | Filter Compatible"
+        emissions_display_values.append(emissions_text)
+        emissions_filter_compatible_flags.append(filter_compatible)
+    page_frame["emissions_display"] = emissions_display_values
+    page_frame["emissions_filter_compatible"] = emissions_filter_compatible_flags
 
     def _thumbnail_numeric(value: Any) -> float | None:
         try:
@@ -1665,7 +1712,7 @@ def render_target_recommendations(
         "visibility_duration",
         "object_type",
         "magnitude_display",
-        "emissions",
+        "emissions_display",
         "apparent_size",
     ]
     if selected_telescope is not None:
@@ -1678,7 +1725,7 @@ def render_target_recommendations(
         "visibility_duration": "Duration of visibility",
         "object_type": "Object Type",
         "magnitude_display": "Magnitude",
-        "emissions": "Emissions",
+        "emissions_display": "Emissions",
         "apparent_size": "Apparent size",
         "framing_percent": "Framing",
     }
@@ -1735,6 +1782,17 @@ def render_target_recommendations(
             return styles
 
         recommendation_styler = recommendation_styler.apply(_style_magnitude_cells, subset=["Magnitude"])
+    if "Emissions" in display_table.columns and "emissions_filter_compatible" in page_frame.columns:
+        def _style_emissions_cells(series: pd.Series) -> list[str]:
+            styles: list[str] = []
+            for row_idx in series.index:
+                if bool(page_frame.at[int(row_idx), "emissions_filter_compatible"]):
+                    styles.append("color: #c2410c; font-weight: 700;")
+                else:
+                    styles.append("")
+            return styles
+
+        recommendation_styler = recommendation_styler.apply(_style_emissions_cells, subset=["Emissions"])
     if "Framing" in display_table.columns and "framing_constraint_status" in page_frame.columns:
         def _style_framing_cells(series: pd.Series) -> list[str]:
             styles: list[str] = []
