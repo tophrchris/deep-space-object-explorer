@@ -35,6 +35,119 @@ def render_sky_position_summary_table(
         st.session_state["sky_summary_highlight_primary_id"] = ""
         return
 
+    def _thumbnail_numeric(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(parsed):
+            return None
+        return float(parsed)
+
+    def _thumbnail_cutout_fov_deg(row: pd.Series) -> tuple[float, float]:
+        major_arcmin = _thumbnail_numeric(row.get("ang_size_maj_arcmin"))
+        minor_arcmin = _thumbnail_numeric(row.get("ang_size_min_arcmin"))
+        span_deg_candidates = [
+            float(value) / 60.0
+            for value in (major_arcmin, minor_arcmin)
+            if value is not None and value > 0.0
+        ]
+        if span_deg_candidates:
+            estimated_span = max(span_deg_candidates) * 3.0
+            framed_span = float(max(0.5, min(8.0, estimated_span)))
+            return framed_span, framed_span
+        return 1.5, 1.5
+
+    def _resolve_thumbnail_url(row: pd.Series) -> str | None:
+        for key in ("image_url", "hero_image_url"):
+            raw_value = str(row.get(key, "") or "").strip()
+            if raw_value.lower().startswith(("https://", "http://")):
+                return raw_value
+
+        wikimedia_search_phrase = (
+            str(row.get("common_name") or "").strip()
+            or str(row.get("primary_id") or "").strip()
+        )
+        if wikimedia_search_phrase:
+            image_data = fetch_free_use_image(wikimedia_search_phrase)
+            wiki_image_url = str((image_data or {}).get("image_url", "") or "").strip()
+            if wiki_image_url.lower().startswith(("https://", "http://")):
+                return wiki_image_url
+
+        ra_deg = _thumbnail_numeric(row.get("ra_deg"))
+        dec_deg = _thumbnail_numeric(row.get("dec_deg"))
+        if ra_deg is None or dec_deg is None:
+            return None
+
+        fov_width_deg, fov_height_deg = _thumbnail_cutout_fov_deg(row)
+        for layer in ("unwise-neo4", "sfd", "sdss2"):
+            legacy_cutout = build_legacy_survey_cutout_urls(
+                ra_deg=ra_deg,
+                dec_deg=dec_deg,
+                fov_width_deg=fov_width_deg,
+                fov_height_deg=fov_height_deg,
+                layer=layer,
+                max_pixels=256,
+            )
+            legacy_image_url = str((legacy_cutout or {}).get("image_url", "") or "").strip()
+            if legacy_image_url.lower().startswith(("https://", "http://")):
+                return legacy_image_url
+        return None
+
+    def _safe_positive_float(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric) or numeric <= 0.0:
+            return None
+        return float(numeric)
+
+    summary_df["thumbnail_url"] = summary_df.apply(_resolve_thumbnail_url, axis=1)
+    summary_df["apparent_size"] = summary_df.apply(
+        lambda row: format_apparent_size_display(
+            row.get("ang_size_maj_arcmin"),
+            row.get("ang_size_min_arcmin"),
+        ),
+        axis=1,
+    )
+
+    selected_telescope: dict[str, Any] | None = None
+    telescope_fov_area: float | None = None
+    try:
+        equipment_context = build_owned_equipment_context(prefs)
+        active_equipment = sync_active_equipment_settings(prefs, equipment_context)
+        active_telescope = active_equipment.get("active_telescope")
+        if not isinstance(active_telescope, dict):
+            telescope_lookup = dict(active_equipment.get("telescope_lookup", {}))
+            active_telescope_id = str(active_equipment.get("active_telescope_id", "")).strip()
+            active_telescope = telescope_lookup.get(active_telescope_id) if active_telescope_id else None
+        if isinstance(active_telescope, dict):
+            telescope_fov_maj = _safe_positive_float(active_telescope.get("fov_maj_deg"))
+            telescope_fov_min = _safe_positive_float(active_telescope.get("fov_min_deg"))
+            if telescope_fov_maj is not None and telescope_fov_min is not None:
+                selected_telescope = active_telescope
+                telescope_fov_area = float(telescope_fov_maj * telescope_fov_min)
+    except Exception:
+        selected_telescope = None
+        telescope_fov_area = None
+
+    summary_df["framing_percent"] = np.nan
+    show_framing_column = (
+        selected_telescope is not None
+        and telescope_fov_area is not None
+        and telescope_fov_area > 0.0
+    )
+    if show_framing_column:
+        target_maj_deg = pd.to_numeric(summary_df["ang_size_maj_arcmin"], errors="coerce") / 60.0
+        target_min_deg = pd.to_numeric(summary_df["ang_size_min_arcmin"], errors="coerce") / 60.0
+        target_maj_deg = target_maj_deg.where(target_maj_deg > 0.0)
+        target_min_deg = target_min_deg.where(target_min_deg > 0.0)
+        target_maj_deg = target_maj_deg.fillna(target_min_deg)
+        target_min_deg = target_min_deg.fillna(target_maj_deg)
+        target_area_deg2 = target_maj_deg * target_min_deg
+        summary_df["framing_percent"] = (target_area_deg2 / float(telescope_fov_area)) * 100.0
+
     summary_df["line_swatch"] = "■"
     if allow_list_membership_toggle:
         summary_df["list_action"] = summary_df["is_in_list"].map(lambda value: "Remove" if bool(value) else "Add")
@@ -77,6 +190,7 @@ def render_sky_position_summary_table(
                 continue
     display_columns = [
         "line_swatch",
+        "thumbnail_url",
         "target",
         "object_type_group",
         "first_visible",
@@ -84,15 +198,22 @@ def render_sky_position_summary_table(
         "last_visible",
         "visible_total",
     ]
+    if show_framing_column:
+        display_columns.append("framing_percent")
+    else:
+        display_columns.append("apparent_size")
     if show_remaining:
         display_columns.append("visible_remaining_display")
     display_columns.extend(["culmination_alt", "culmination_dir", "list_action"])
 
     display = summary_df[display_columns].rename(
         columns={
+            "thumbnail_url": "Thumbnail",
             "line_swatch": "Line",
             "target": "Target",
             "object_type_group": "Type",
+            "apparent_size": "Apparent size",
+            "framing_percent": "Framing",
             "first_visible": "First Visible",
             "culmination": "Peak",
             "last_visible": "Last Visible",
@@ -142,6 +263,11 @@ def render_sky_position_summary_table(
 
     column_config: dict[str, Any] = {
         "Line": st.column_config.TextColumn(width="small"),
+        "Thumbnail": (
+            st.column_config.ImageColumn(label="", width=100)
+            if hasattr(st.column_config, "ImageColumn")
+            else st.column_config.TextColumn(label="", width=100)
+        ),
         "Target": st.column_config.TextColumn(width="large"),
         "Type": st.column_config.TextColumn(width="small"),
         "First Visible": st.column_config.DatetimeColumn(
@@ -161,13 +287,27 @@ def render_sky_position_summary_table(
         "Direction": st.column_config.TextColumn(width="small"),
         "List": st.column_config.TextColumn(width="small"),
     }
+    if "Apparent size" in display.columns:
+        column_config["Apparent size"] = st.column_config.TextColumn(width="small")
+    if "Framing" in display.columns:
+        column_config["Framing"] = st.column_config.NumberColumn(width="small", format="%.0f%%")
     if show_remaining:
         column_config["Remaining"] = st.column_config.TextColumn(width="small")
+
+    styled = styled.set_properties(
+        subset=["Thumbnail"],
+        **{
+            "text-align": "left !important",
+            "justify-content": "flex-start !important",
+            "padding-left": "0px !important",
+        },
+    )
 
     table_event = st.dataframe(
         styled,
         hide_index=True,
         use_container_width=True,
+        row_height=70,
         on_select="rerun",
         selection_mode="single-cell",
         key="sky_summary_table",
@@ -303,4 +443,3 @@ def render_sky_position_summary_table(
         st.caption(
             f"Recommended targets choose the detail target. '{preview_list_name}' is auto-managed from recent selections."
         )
-

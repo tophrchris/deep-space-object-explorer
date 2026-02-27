@@ -235,8 +235,24 @@ def _render_explorer_page_impl(
         return
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
+    forecast_night_count_state_key = "astronomy_forecast_night_count"
+    raw_forecast_night_count = st.session_state.get(
+        forecast_night_count_state_key,
+        ASTRONOMY_FORECAST_NIGHTS,
+    )
+    try:
+        parsed_forecast_night_count = int(raw_forecast_night_count)
+    except (TypeError, ValueError):
+        parsed_forecast_night_count = int(ASTRONOMY_FORECAST_NIGHTS)
+    selected_forecast_nights = (
+        5 if parsed_forecast_night_count <= 5 else int(ASTRONOMY_FORECAST_NIGHTS)
+    )
+    if selected_forecast_nights not in {5, int(ASTRONOMY_FORECAST_NIGHTS)}:
+        selected_forecast_nights = int(ASTRONOMY_FORECAST_NIGHTS)
+    st.session_state[forecast_night_count_state_key] = selected_forecast_nights
+
     weather_forecast_day_offset = resolve_weather_forecast_day_offset(
-        max_offset=ASTRONOMY_FORECAST_NIGHTS - 1
+        max_offset=selected_forecast_nights - 1
     )
     weather_window_start, weather_window_end, weather_tzinfo = weather_forecast_window(
         location_lat,
@@ -262,7 +278,7 @@ def _render_explorer_page_impl(
         temperature_unit=temperature_unit,
         browser_locale=browser_locale,
         browser_month_day_pattern=browser_month_day_pattern,
-        nights=ASTRONOMY_FORECAST_NIGHTS,
+        nights=selected_forecast_nights,
     )
     hourly_weather_rows = fetch_hourly_weather(
         lat=location_lat,
@@ -309,7 +325,7 @@ def _render_explorer_page_impl(
         for _, summary_row in astronomy_summary.iterrows():
             row_day_offset = normalize_weather_forecast_day_offset(
                 summary_row.get("day_offset", 0),
-                max_offset=ASTRONOMY_FORECAST_NIGHTS - 1,
+                max_offset=selected_forecast_nights - 1,
             )
             if row_day_offset == weather_forecast_day_offset:
                 selected_summary_row = dict(summary_row)
@@ -330,11 +346,22 @@ def _render_explorer_page_impl(
                 conditions_container = st.container()
 
         with five_day_container:
-            st.markdown("5-night astronomy forecast.")
+            forecast_title_col, forecast_range_col = st.columns([3, 2], gap="small")
+            with forecast_title_col:
+                st.markdown("#### Astronomy Forecast")
+            with forecast_range_col:
+                st.segmented_control(
+                    "Forecast Nights",
+                    options=[5, int(ASTRONOMY_FORECAST_NIGHTS)],
+                    format_func=lambda value: f"{int(value)} nights",
+                    key=forecast_night_count_state_key,
+                    label_visibility="collapsed",
+                )
             render_astronomy_forecast_summary(
                 astronomy_summary,
                 temperature_unit=temperature_unit,
                 selected_day_offset=weather_forecast_day_offset,
+                forecast_nights=selected_forecast_nights,
             )
             st.caption("Click any row to set the active weather night across the page.")
             st.markdown(site_conditions_legends_table_html(), unsafe_allow_html=True)
@@ -342,7 +369,7 @@ def _render_explorer_page_impl(
 
         with hourly_container:
             st.markdown(
-                f"Hourly weather for {hourly_title_period}."
+                f"#### Hourly weather for {hourly_title_period}"
             )
             weather_display = weather_matrix.reset_index().rename(columns={"index": "Element"})
             weather_tooltip_display = weather_tooltips.reset_index().rename(columns={"index": "Element"})
