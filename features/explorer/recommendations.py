@@ -7,6 +7,7 @@ from runtime.brightness_policy import (
     STATUS_BROADBAND_BORDERLINE,
     STATUS_IN_RANGE,
     STATUS_NARROWBAND_BOOSTED,
+    STATUS_OUT_OF_RANGE,
     STATUS_UNKNOWN,
     classify_target_magnitude,
     resolve_magnitude_thresholds,
@@ -179,6 +180,19 @@ def render_target_recommendations(
     def _format_threshold_text(value: float) -> str:
         return f"{float(value):.1f}".rstrip("0").rstrip(".")
 
+    def _coerce_size_filter_pct(value: Any, *, default: int = 0) -> int:
+        parsed = _safe_finite_float(value)
+        if parsed is None:
+            return int(default)
+        return int(min(400, max(0, round(parsed))))
+
+    def _coerce_magnitude_value(value: Any, *, upper_bound: float, default: float = 0.0) -> float:
+        parsed = _safe_finite_float(value)
+        if parsed is None:
+            parsed = float(default)
+        parsed = min(float(upper_bound), max(0.0, float(parsed)))
+        return round(float(parsed), 1)
+
     def _target_emission_band_set(value: Any) -> set[str]:
         if isinstance(value, set):
             return {str(token).strip() for token in value if str(token).strip()}
@@ -313,9 +327,14 @@ def render_target_recommendations(
     keyword_key = "recommended_targets_keyword"
     include_telescope_key = "recommended_targets_include_telescope_details"
     include_mount_key = "recommended_targets_include_mount_adaptation"
-    min_size_enabled_key = "recommended_targets_min_size_enabled"
-    min_size_value_key = "recommended_targets_min_size_pct"
-    max_magnitude_enabled_key = "recommended_targets_max_magnitude_enabled"
+    size_filter_mode_key = "recommended_targets_size_filter_mode"
+    size_filter_min_value_key = "recommended_targets_size_filter_min_pct"
+    size_filter_range_value_key = "recommended_targets_size_filter_range_pct"
+    legacy_min_size_enabled_key = "recommended_targets_min_size_enabled"
+    legacy_min_size_value_key = "recommended_targets_min_size_pct"
+    magnitude_filter_mode_key = "recommended_targets_magnitude_filter_mode"
+    magnitude_filter_range_value_key = "recommended_targets_magnitude_filter_range_mag"
+    legacy_max_magnitude_enabled_key = "recommended_targets_max_magnitude_enabled"
     max_magnitude_value_key = "recommended_targets_max_magnitude_value"
     max_magnitude_default_telescope_key = "recommended_targets_max_magnitude_default_telescope_id"
     max_magnitude_last_recommended_key = "recommended_targets_max_magnitude_last_recommended"
@@ -363,12 +382,41 @@ def render_target_recommendations(
         st.session_state[include_telescope_key] = active_telescope is not None
     if include_mount_key not in st.session_state:
         st.session_state[include_mount_key] = True
-    if min_size_enabled_key not in st.session_state:
-        st.session_state[min_size_enabled_key] = False
-    if min_size_value_key not in st.session_state:
-        st.session_state[min_size_value_key] = 0
-    if max_magnitude_enabled_key not in st.session_state:
-        st.session_state[max_magnitude_enabled_key] = False
+    if size_filter_mode_key not in st.session_state:
+        legacy_min_size_enabled = bool(st.session_state.get(legacy_min_size_enabled_key, False))
+        st.session_state[size_filter_mode_key] = "Minimum" if legacy_min_size_enabled else "None"
+    normalized_size_filter_mode = str(st.session_state.get(size_filter_mode_key, "None")).strip().title()
+    if normalized_size_filter_mode not in {"None", "Minimum", "Range"}:
+        normalized_size_filter_mode = "None"
+    st.session_state[size_filter_mode_key] = normalized_size_filter_mode
+    if size_filter_min_value_key not in st.session_state:
+        legacy_min_size_value = st.session_state.get(legacy_min_size_value_key, 0)
+        st.session_state[size_filter_min_value_key] = _coerce_size_filter_pct(legacy_min_size_value, default=0)
+    else:
+        st.session_state[size_filter_min_value_key] = _coerce_size_filter_pct(
+            st.session_state.get(size_filter_min_value_key),
+            default=0,
+        )
+    if size_filter_range_value_key not in st.session_state:
+        range_min_seed = _coerce_size_filter_pct(st.session_state.get(size_filter_min_value_key), default=0)
+        st.session_state[size_filter_range_value_key] = (int(range_min_seed), 400)
+    raw_size_filter_range = st.session_state.get(size_filter_range_value_key, (0, 400))
+    if isinstance(raw_size_filter_range, (list, tuple)) and len(raw_size_filter_range) == 2:
+        range_low_raw, range_high_raw = raw_size_filter_range[0], raw_size_filter_range[1]
+    else:
+        range_low_raw, range_high_raw = 0, 400
+    normalized_range_low = _coerce_size_filter_pct(range_low_raw, default=0)
+    normalized_range_high = _coerce_size_filter_pct(range_high_raw, default=400)
+    if normalized_range_low > normalized_range_high:
+        normalized_range_low, normalized_range_high = normalized_range_high, normalized_range_low
+    st.session_state[size_filter_range_value_key] = (int(normalized_range_low), int(normalized_range_high))
+    if magnitude_filter_mode_key not in st.session_state:
+        legacy_max_magnitude_enabled = bool(st.session_state.get(legacy_max_magnitude_enabled_key, False))
+        st.session_state[magnitude_filter_mode_key] = "Maximum" if legacy_max_magnitude_enabled else "None"
+    normalized_magnitude_filter_mode = str(st.session_state.get(magnitude_filter_mode_key, "None")).strip().title()
+    if normalized_magnitude_filter_mode not in {"None", "Maximum", "Range"}:
+        normalized_magnitude_filter_mode = "None"
+    st.session_state[magnitude_filter_mode_key] = normalized_magnitude_filter_mode
     if page_size_key not in st.session_state:
         st.session_state[page_size_key] = 100
     elif int(st.session_state.get(page_size_key, 100)) not in {10, 100, 200}:
@@ -442,6 +490,35 @@ def render_target_recommendations(
         float(max_magnitude_slider_max),
     )
     current_max_magnitude_value = round(float(current_max_magnitude_value), 1)
+    if magnitude_filter_range_value_key not in st.session_state:
+        st.session_state[magnitude_filter_range_value_key] = (0.0, float(current_max_magnitude_value))
+    raw_magnitude_range = st.session_state.get(
+        magnitude_filter_range_value_key,
+        (0.0, float(current_max_magnitude_value)),
+    )
+    if isinstance(raw_magnitude_range, (list, tuple)) and len(raw_magnitude_range) == 2:
+        raw_magnitude_range_low, raw_magnitude_range_high = raw_magnitude_range[0], raw_magnitude_range[1]
+    else:
+        raw_magnitude_range_low, raw_magnitude_range_high = 0.0, float(current_max_magnitude_value)
+    normalized_magnitude_range_low = _coerce_magnitude_value(
+        raw_magnitude_range_low,
+        upper_bound=float(max_magnitude_slider_max),
+        default=0.0,
+    )
+    normalized_magnitude_range_high = _coerce_magnitude_value(
+        raw_magnitude_range_high,
+        upper_bound=float(max_magnitude_slider_max),
+        default=float(current_max_magnitude_value),
+    )
+    if normalized_magnitude_range_low > normalized_magnitude_range_high:
+        normalized_magnitude_range_low, normalized_magnitude_range_high = (
+            normalized_magnitude_range_high,
+            normalized_magnitude_range_low,
+        )
+    st.session_state[magnitude_filter_range_value_key] = (
+        float(normalized_magnitude_range_low),
+        float(normalized_magnitude_range_high),
+    )
     st.session_state[max_magnitude_default_telescope_key] = active_telescope_default_marker
     st.session_state[max_magnitude_last_recommended_key] = float(recommended_max_magnitude_default)
     recommended_max_magnitude_default = round(float(recommended_max_magnitude_default), 1)
@@ -454,7 +531,7 @@ def render_target_recommendations(
     if not estimated_magnitude_telescope_name:
         estimated_magnitude_telescope_name = "selected telescope"
 
-    criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 3, 3], gap="small")
+    criteria_col_1, criteria_col_2, criteria_col_3 = st.columns([3, 2, 5], gap="small")
     search_notes_placeholder: Any | None = None
     sort_controls_placeholder: Any | None = None
     with criteria_col_1:
@@ -503,10 +580,13 @@ def render_target_recommendations(
     selected_telescope: dict[str, Any] | None = None
     include_telescope_details = False
     include_mount_adaptation = False
-    use_minimum_size = False
-    minimum_size_pct: float | None = None
+    size_filter_mode = "None"
+    size_filter_min_pct: float | None = None
+    size_filter_max_pct: float | None = None
     maximum_magnitude_mag = float(current_max_magnitude_value)
-    use_maximum_magnitude = False
+    magnitude_filter_mode = "None"
+    magnitude_filter_min_mag: float | None = None
+    magnitude_filter_max_mag: float | None = None
     magnitude_filter_available = False
     magnitude_filter_active = False
     telescope_fov_maj: float | None = None
@@ -551,91 +631,141 @@ def render_target_recommendations(
         )
 
         if selected_telescope is not None and telescope_fov_area is not None and telescope_fov_area > 0.0:
-            use_minimum_size = st.checkbox("Enable Minimum Size", key=min_size_enabled_key)
-            slider_disabled = not use_minimum_size
-            min_size_slider_col, _ = st.columns([1, 1], gap="small")
-            with min_size_slider_col:
-                min_size_value = st.slider(
-                    "Minimum Size (% of FOV)",
-                    min_value=0,
-                    max_value=250,
-                    value=int(st.session_state.get(min_size_value_key, 0)),
-                    step=1,
-                    key=min_size_value_key,
-                    disabled=slider_disabled,
-                )
-                st.markdown(
-                    """
-                    <div style="display:flex; justify-content:space-between; margin-top:0.2rem; color:#6b7280; font-size:0.72rem;">
-                      <span style="text-align:center;">|<br/>0.5x</span>
-                      <span style="text-align:center;">|<br/>1x</span>
-                      <span style="text-align:center;">|<br/>1.5x</span>
-                      <span style="text-align:center;">|<br/>&gt;2x</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            if use_minimum_size:
-                minimum_size_pct = float(min_size_value)
+            size_filter_col, magnitude_filter_col = st.columns([1, 1], gap="small")
 
-        if magnitude_filter_available:
-            use_maximum_magnitude = st.checkbox("Enable Maximum Magnitude", key=max_magnitude_enabled_key)
-            magnitude_filter_active = bool(use_maximum_magnitude)
-            max_magnitude_slider_col, _ = st.columns([1, 1], gap="small")
-            with max_magnitude_slider_col:
-                max_magnitude_slider_value = st.slider(
-                    "Maximum Magnitude",
-                    min_value=0.0,
-                    max_value=float(max_magnitude_slider_max),
-                    value=float(current_max_magnitude_value),
-                    step=0.1,
-                    key=max_magnitude_value_key,
-                    disabled=not use_maximum_magnitude,
-                    help=(
-                        f"The estimated max magnitude for {estimated_magnitude_telescope_name} is "
-                        f"{recommended_max_magnitude_text}. "
-                        "Targets are filtered by catalog magnitude (lower number = brighter). "
-                        "Targets with unknown magnitude are excluded."
-                    ),
-                )
-            if use_maximum_magnitude:
-                maximum_magnitude_mag = round(float(max_magnitude_slider_value), 1)
-            slider_thresholds = resolve_magnitude_thresholds(maximum_magnitude_mag)
-            if use_maximum_magnitude and narrowband_filter_active:
-                st.markdown(
-                    (
-                        "<div style=\"margin:0.1rem 0 0 0; color:#6b7280; font-size:0.875rem; line-height:1.35;\">"
-                        "<div>Narrowband filter adjustment:</div>"
-                        "<div>broadband effective &lt;= "
-                        f"<span style=\"color:#991b1b; font-weight:700;\">{slider_thresholds.broadband_effective_max:.1f}</span>"
-                        "</div>"
-                        "<div>narrowband effective &lt;= "
-                        f"<span style=\"color:#1d4ed8; font-weight:700;\">{slider_thresholds.narrowband_effective_max:.1f}</span>."
-                        "</div>"
-                        "</div>"
-                    ),
-                    unsafe_allow_html=True,
-                )
-            elif use_maximum_magnitude:
-                st.caption(f"Maximum magnitude applied: <= {slider_thresholds.selected_max:.1f}.")
+            with size_filter_col:
+                size_filter_mode = str(
+                    st.segmented_control(
+                        "Target Size Filtering",
+                        options=["None", "Minimum", "Range"],
+                        key=size_filter_mode_key,
+                    )
+                    or st.session_state.get(size_filter_mode_key, "None")
+                ).strip().title()
+                if size_filter_mode not in {"None", "Minimum", "Range"}:
+                    size_filter_mode = "None"
+
+                if size_filter_mode == "Minimum":
+                    min_size_value = st.slider(
+                        "Minimum Size (% of FOV)",
+                        min_value=0,
+                        max_value=400,
+                        value=_coerce_size_filter_pct(st.session_state.get(size_filter_min_value_key), default=0),
+                        step=1,
+                        key=size_filter_min_value_key,
+                    )
+                    st.markdown(
+                        """
+                        <div style="display:flex; justify-content:space-between; margin-top:0.2rem; color:#6b7280; font-size:0.72rem;">
+                          <span style="text-align:center;">|<br/>0x</span>
+                          <span style="text-align:center;">|<br/>1x</span>
+                          <span style="text-align:center;">|<br/>2x</span>
+                          <span style="text-align:center;">|<br/>3x</span>
+                          <span style="text-align:center;">|<br/>4x</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    size_filter_min_pct = float(min_size_value)
+                elif size_filter_mode == "Range":
+                    range_size_value = st.slider(
+                        "Target Size Range (% of FOV)",
+                        min_value=0,
+                        max_value=400,
+                        value=tuple(st.session_state.get(size_filter_range_value_key, (0, 400))),
+                        step=1,
+                        key=size_filter_range_value_key,
+                    )
+                    st.markdown(
+                        """
+                        <div style="display:flex; justify-content:space-between; margin-top:0.2rem; color:#6b7280; font-size:0.72rem;">
+                          <span style="text-align:center;">|<br/>0x</span>
+                          <span style="text-align:center;">|<br/>1x</span>
+                          <span style="text-align:center;">|<br/>2x</span>
+                          <span style="text-align:center;">|<br/>3x</span>
+                          <span style="text-align:center;">|<br/>4x</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    size_filter_min_pct = float(range_size_value[0])
+                    size_filter_max_pct = float(range_size_value[1])
+
+            with magnitude_filter_col:
+                if magnitude_filter_available:
+                    magnitude_filter_mode = str(
+                        st.segmented_control(
+                            "Target Magnitude Filtering",
+                            options=["None", "Maximum", "Range"],
+                            key=magnitude_filter_mode_key,
+                        )
+                        or st.session_state.get(magnitude_filter_mode_key, "None")
+                    ).strip().title()
+                    if magnitude_filter_mode not in {"None", "Maximum", "Range"}:
+                        magnitude_filter_mode = "None"
+                    magnitude_filter_active = magnitude_filter_mode in {"Maximum", "Range"}
+
+                    if magnitude_filter_mode == "Maximum":
+                        max_magnitude_slider_value = st.slider(
+                            "Maximum Magnitude",
+                            min_value=0.0,
+                            max_value=float(max_magnitude_slider_max),
+                            value=float(current_max_magnitude_value),
+                            step=0.1,
+                            key=max_magnitude_value_key,
+                            help=(
+                                f"The estimated max magnitude for {estimated_magnitude_telescope_name} is "
+                                f"{recommended_max_magnitude_text}. "
+                                "Targets are filtered by catalog magnitude (lower number = brighter). "
+                                "Targets with unknown magnitude are excluded."
+                            ),
+                        )
+                        magnitude_filter_max_mag = round(float(max_magnitude_slider_value), 1)
+                        maximum_magnitude_mag = float(magnitude_filter_max_mag)
+                        st.caption(f"Maximum magnitude applied: <= {maximum_magnitude_mag:.1f}.")
+                    elif magnitude_filter_mode == "Range":
+                        magnitude_range_value = st.slider(
+                            "Magnitude Range",
+                            min_value=0.0,
+                            max_value=float(max_magnitude_slider_max),
+                            value=tuple(st.session_state.get(magnitude_filter_range_value_key, (0.0, float(current_max_magnitude_value)))),
+                            step=0.1,
+                            key=magnitude_filter_range_value_key,
+                            help=(
+                                f"The estimated max magnitude for {estimated_magnitude_telescope_name} is "
+                                f"{recommended_max_magnitude_text}. "
+                                "Targets are filtered by catalog magnitude range (lower number = brighter). "
+                                "Targets with unknown magnitude are excluded."
+                            ),
+                        )
+                        magnitude_filter_min_mag = round(float(magnitude_range_value[0]), 1)
+                        magnitude_filter_max_mag = round(float(magnitude_range_value[1]), 1)
+                        if magnitude_filter_min_mag > magnitude_filter_max_mag:
+                            magnitude_filter_min_mag, magnitude_filter_max_mag = magnitude_filter_max_mag, magnitude_filter_min_mag
+                        maximum_magnitude_mag = float(magnitude_filter_max_mag)
+                        st.caption(
+                            f"Magnitude range applied: {magnitude_filter_min_mag:.1f} to {magnitude_filter_max_mag:.1f}."
+                        )
+
+                    if magnitude_filter_active and narrowband_filter_active:
+                        slider_thresholds = resolve_magnitude_thresholds(maximum_magnitude_mag)
+                        st.markdown(
+                            (
+                                "<p style=\"margin:0.1rem 0 0 0; color:#6b7280; font-size:0.875rem;\">"
+                                "Effective limits: "
+                                "<span style=\"color:#1d4ed8; font-weight:700;\">"
+                                f"broadband &lt;= {slider_thresholds.broadband_effective_max:.1f}"
+                                "</span> "
+                                "<span style=\"color:#991b1b; font-weight:700;\">"
+                                f"narrowband &lt;= {slider_thresholds.narrowband_effective_max:.1f}"
+                                "</span>"
+                                "</p>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
 
     mount_mode = active_mount_choice if include_mount_adaptation else "none"
     magnitude_thresholds = resolve_magnitude_thresholds(maximum_magnitude_mag)
-
-    if search_notes_placeholder is not None:
-        with search_notes_placeholder.container():
-            if magnitude_filter_active:
-                st.caption(
-                    "Maximum Magnitude applied: "
-                    f"selected <= {magnitude_thresholds.selected_max:.1f} "
-                    "(targets with unknown magnitude are excluded)."
-                )
-                if narrowband_filter_active:
-                    st.caption(
-                        "Narrowband adjustment active: "
-                        f"broadband effective <= {magnitude_thresholds.broadband_effective_max:.1f}, "
-                        f"narrowband effective <= {magnitude_thresholds.narrowband_effective_max:.1f}."
-                    )
 
     has_selected_hour_window = bool(selected_visible_hours)
     altitude_sort_label = "Max Alt in Window" if has_selected_hour_window else "Altitude at Peak"
@@ -660,12 +790,17 @@ def render_target_recommendations(
 
     if sort_controls_placeholder is not None:
         with sort_controls_placeholder.container():
-            sort_field_col, sort_direction_col, _sort_control_spacer_col = st.columns([2, 2, 1], gap="small")
+            sort_field_col, sort_direction_col = st.columns([2, 3], gap="small")
             sort_field = sort_field_col.selectbox(
                 "Sort results by",
                 options=sort_option_values,
                 key=sort_field_key,
                 format_func=lambda option_value: sort_option_labels.get(option_value, option_value),
+                help=(
+                    "Recommended sort puts the best overall candidates first. "
+                    "It prioritizes stronger keyword matches, longer usable visibility, "
+                    "better altitude, and practical target size/framing."
+                ),
             )
             sort_direction = sort_direction_col.segmented_control(
                 "Order",
@@ -719,10 +854,16 @@ def render_target_recommendations(
             "narrowband_filter_active": bool(narrowband_filter_active),
             "mount_mode": mount_mode,
             "telescope_id": str(selected_telescope.get("id", "")) if isinstance(selected_telescope, dict) else "",
-            "min_size_enabled": bool(use_minimum_size),
-            "min_size_pct": minimum_size_pct if minimum_size_pct is not None else "",
-            "max_magnitude_enabled": bool(magnitude_filter_active),
-            "max_magnitude_selected": float(maximum_magnitude_mag) if magnitude_filter_active else None,
+            "size_filter_mode": size_filter_mode,
+            "size_filter_min_pct": size_filter_min_pct if size_filter_min_pct is not None else "",
+            "size_filter_max_pct": size_filter_max_pct if size_filter_max_pct is not None else "",
+            "magnitude_filter_mode": magnitude_filter_mode if magnitude_filter_available else "None",
+            "magnitude_filter_min_mag": (
+                float(magnitude_filter_min_mag)
+                if magnitude_filter_active and magnitude_filter_mode == "Range" and magnitude_filter_min_mag is not None
+                else None
+            ),
+            "magnitude_filter_max_mag": float(maximum_magnitude_mag) if magnitude_filter_active else None,
             "max_magnitude_broadband_effective": (
                 float(magnitude_thresholds.broadband_effective_max) if magnitude_filter_active else None
             ),
@@ -934,6 +1075,11 @@ def render_target_recommendations(
                     narrowband_filter_active=narrowband_filter_active,
                     target_is_narrowband=target_is_narrowband,
                 )
+                if include_target and magnitude_filter_mode == "Range" and magnitude_filter_min_mag is not None:
+                    magnitude_numeric = _safe_finite_float(magnitude_value)
+                    if magnitude_numeric is None or float(magnitude_numeric) < float(magnitude_filter_min_mag):
+                        include_target = False
+                        status = STATUS_OUT_OF_RANGE
             else:
                 include_target = True
                 status = STATUS_IN_RANGE if _safe_finite_float(magnitude_value) is not None else STATUS_UNKNOWN
@@ -948,7 +1094,10 @@ def render_target_recommendations(
 
         if working_catalog.empty:
             if magnitude_filter_active:
-                empty_query_message = "No targets match the current Maximum Magnitude threshold."
+                if magnitude_filter_mode == "Range":
+                    empty_query_message = "No targets match the current Magnitude Range."
+                else:
+                    empty_query_message = "No targets match the current Maximum Magnitude threshold."
             else:
                 empty_query_message = "No targets match the current criteria."
         else:
@@ -1222,10 +1371,28 @@ def render_target_recommendations(
                             target_area_deg2 = target_maj_deg * target_min_deg
                             framing_percent = (target_area_deg2 / float(telescope_fov_area)) * 100.0
                             recommended["framing_percent"] = framing_percent
-                            effective_min_framing_pct = max(
-                                float(recommendation_min_framing_pct),
-                                float(minimum_size_pct) if minimum_size_pct is not None else float(recommendation_min_framing_pct),
-                            )
+                            effective_min_framing_pct = float(recommendation_min_framing_pct)
+                            effective_max_framing_pct = float(recommendation_max_framing_pct)
+                            if size_filter_mode == "Minimum" and size_filter_min_pct is not None:
+                                effective_min_framing_pct = max(
+                                    float(recommendation_min_framing_pct),
+                                    float(size_filter_min_pct),
+                                )
+                            elif (
+                                size_filter_mode == "Range"
+                                and size_filter_min_pct is not None
+                                and size_filter_max_pct is not None
+                            ):
+                                effective_min_framing_pct = max(
+                                    float(recommendation_min_framing_pct),
+                                    float(size_filter_min_pct),
+                                )
+                                effective_max_framing_pct = min(
+                                    float(recommendation_max_framing_pct),
+                                    float(size_filter_max_pct),
+                                )
+                                if effective_min_framing_pct > effective_max_framing_pct:
+                                    effective_min_framing_pct = effective_max_framing_pct
 
                             def _framing_constraint_status(value: Any) -> str:
                                 if value is None or pd.isna(value):
@@ -1238,7 +1405,7 @@ def render_target_recommendations(
                                     return "Unknown"
                                 if numeric < effective_min_framing_pct:
                                     return "Too small"
-                                if numeric > float(recommendation_max_framing_pct):
+                                if numeric > effective_max_framing_pct:
                                     return "Too large"
                                 return "OK"
 
@@ -1252,22 +1419,10 @@ def render_target_recommendations(
                                     value is not None
                                     and not pd.isna(value)
                                     and np.isfinite(float(value))
-                                    and float(recommendation_min_framing_pct) <= float(value) <= float(recommendation_max_framing_pct)
+                                    and effective_min_framing_pct <= float(value) <= effective_max_framing_pct
                                 )
                             )
                             size_filtered_recommended = recommended[practical_framing_mask].copy()
-
-                            if minimum_size_pct is not None:
-                                size_filtered_recommended = size_filtered_recommended[
-                                    size_filtered_recommended["framing_percent"].apply(
-                                        lambda value: (
-                                            value is not None
-                                            and not pd.isna(value)
-                                            and np.isfinite(float(value))
-                                            and float(value) >= float(minimum_size_pct)
-                                        )
-                                    )
-                                ].copy()
 
                             if (
                                 size_filtered_recommended.empty
@@ -1376,9 +1531,7 @@ def render_target_recommendations(
         current_page = 1
         st.session_state[page_number_key] = current_page
     page_number = current_page
-    results_meta_col, query_meta_col = st.columns([4, 2], gap="small")
-    results_meta_col.caption(f"{total_results} targets | page {page_number}/{total_pages}")
-    query_meta_col.caption(f"Query time: {query_elapsed_label}")
+    st.caption(f"{total_results} targets | page {page_number}/{total_pages} | Query time: {query_elapsed_label}")
     if size_framing_fallback_active:
         st.info(
             size_framing_fallback_message
@@ -1436,6 +1589,10 @@ def render_target_recommendations(
                 narrowband_filter_active=narrowband_filter_active,
                 target_is_narrowband=target_is_narrowband,
             )
+            if magnitude_filter_mode == "Range" and magnitude_filter_min_mag is not None:
+                parsed_row_magnitude = _safe_finite_float(raw_magnitude)
+                if parsed_row_magnitude is None or float(parsed_row_magnitude) < float(magnitude_filter_min_mag):
+                    magnitude_status = STATUS_OUT_OF_RANGE
         else:
             magnitude_status = STATUS_IN_RANGE if _safe_finite_float(raw_magnitude) is not None else STATUS_UNKNOWN
         magnitude_policy_statuses.append(str(magnitude_status))
@@ -1565,11 +1722,11 @@ def render_target_recommendations(
                 status = str(page_frame.at[int(row_idx), "magnitude_policy_status"]).strip().lower()
                 if status == STATUS_BROADBAND_BORDERLINE:
                     styles.append(
-                        "color: #991b1b; font-weight: 700;"
+                        "color: #1d4ed8; font-weight: 700;"
                     )
                 elif status == STATUS_NARROWBAND_BOOSTED:
                     styles.append(
-                        "color: #1d4ed8; font-weight: 700;"
+                        "color: #991b1b; font-weight: 700;"
                     )
                 elif status == STATUS_IN_RANGE:
                     styles.append("")
