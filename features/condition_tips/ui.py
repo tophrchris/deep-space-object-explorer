@@ -113,7 +113,7 @@ def render_condition_tips_panel(
     if muted_lines:
         muted_html = "".join(
             (
-                "<div style=\"margin:0.02rem 0; line-height:1.12;\">"
+                "<div style=\"margin:0.14rem 0; line-height:1.24;\">"
                 f"{_tip_text_html(muted_line)}"
                 "</div>"
             )

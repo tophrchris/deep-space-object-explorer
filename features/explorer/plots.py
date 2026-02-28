@@ -801,7 +801,7 @@ def build_unobstructed_altitude_area_plot(
             if is_selected
             else max(1.6, min(base_line_width, path_line_width_overlay_default))
         )
-        schedule_line_width = max(target_line_width * 2.0, target_line_width)
+        schedule_line_width = target_line_width
         target_line_color = target_color if is_selected else _muted_rgba_from_hex(target_color, alpha=0.68)
         target_emissions = str(target_track.get("emission_lines_display") or "").strip()
         target_fill_color = _muted_rgba_from_hex(target_color, alpha=(0.30 if is_selected else 0.10))
@@ -1346,7 +1346,7 @@ def build_path_plot(
                     y=schedule_path_y,
                     mode="lines",
                     showlegend=False,
-                    line={"width": max(selected_line_width * 2.0, selected_line_width), "color": selected_color},
+                    line={"width": selected_line_width, "color": selected_color},
                     hovertext=selected_schedule_hover,
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
@@ -1471,7 +1471,7 @@ def build_path_plot(
                             mode="lines",
                             showlegend=False,
                             line={
-                                "width": max(target_line_width * 2.0, target_line_width),
+                                "width": target_line_width,
                                 "color": target_color,
                             },
                             hovertext=overlay_schedule_hover,
@@ -1883,7 +1883,7 @@ def build_path_plot_radial(
                             r=schedule_r,
                             mode="lines",
                             showlegend=False,
-                            line={"width": max(selected_line_width * 2.0, selected_line_width), "color": selected_color},
+                            line={"width": selected_line_width, "color": selected_color},
                             hovertext=selected_schedule_hover,
                             hovertemplate="%{hovertext}<extra></extra>",
                         )
@@ -2061,7 +2061,7 @@ def build_path_plot_radial(
                                     mode="lines",
                                     showlegend=False,
                                     line={
-                                        "width": max(target_line_width * 2.0, target_line_width),
+                                        "width": target_line_width,
                                         "color": target_color,
                                     },
                                     hovertext=overlay_schedule_hover,
