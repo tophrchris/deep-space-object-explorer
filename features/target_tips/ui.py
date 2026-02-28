@@ -15,6 +15,7 @@ from .engine import TargetTip, TargetTipsContext, collect_target_tips
 
 TARGET_TIPS_SCHEDULES_STATE_KEY = "target_tips_schedule_by_target_id"
 TARGET_TIPS_SCHEDULE_ACTIVE_LIST_STATE_KEY = "target_tips_schedule_active_list_id"
+TARGET_TIPS_OPEN_DETAILS_REQUEST_KEY = "target_tips_open_details_request_target_id"
 
 
 def _tip_text_html(text: str) -> str:
@@ -335,6 +336,17 @@ def render_target_tips_panel(
                     next_schedules.pop(selected_primary_id, None)
                     _persist_scoped_schedules(active_list_id, next_schedules)
                     st.rerun()
+
+    def _render_view_target_details_button() -> None:
+        if not selected_primary_id:
+            return
+        if st.button(
+            "View Target Details",
+            key=f"target_tips_view_details_{selected_primary_id}",
+            use_container_width=True,
+        ):
+            st.session_state[TARGET_TIPS_OPEN_DETAILS_REQUEST_KEY] = selected_primary_id
+            st.rerun()
     if not selected_primary_id:
         st.caption(selected_display_label or "No target selected")
         st.caption("No target tips available.")
@@ -343,6 +355,7 @@ def render_target_tips_panel(
     if not summary_rows:
         st.caption("No target tips available.")
         _render_schedule_popover(None)
+        _render_view_target_details_button()
         return
 
     selected_row = next(
@@ -369,6 +382,7 @@ def render_target_tips_panel(
     if not tips:
         st.caption("No target tips available.")
         _render_schedule_popover(selected_row)
+        _render_view_target_details_button()
         return
     opportunity_lines, warning_lines, bullet_lines, muted_lines = split_target_tip_lines(tips)
     for opportunity_line in opportunity_lines:
@@ -396,3 +410,4 @@ def render_target_tips_panel(
     for muted_line in muted_lines:
         st.caption(muted_line)
     _render_schedule_popover(selected_row)
+    _render_view_target_details_button()

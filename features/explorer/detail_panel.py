@@ -31,6 +31,20 @@ def render_detail_panel(
     _refresh_legacy_globals()
     target_tips_schedules_state_key = "target_tips_schedule_by_target_id"
     target_tips_schedules_active_list_state_key = "target_tips_schedule_active_list_id"
+    target_tips_open_details_request_state_key = "target_tips_open_details_request_target_id"
+
+    # Handle explicit "View Target Details" requests before rendering any
+    # selection-driven UI to avoid competing selection updates in the same run.
+    open_details_target_id = str(
+        st.session_state.pop(target_tips_open_details_request_state_key, "")
+    ).strip()
+    if open_details_target_id:
+        st.session_state["selected_id"] = open_details_target_id
+        st.session_state["sky_summary_highlight_primary_id"] = open_details_target_id
+        requested_selected = get_object_by_id(catalog, open_details_target_id)
+        if requested_selected is not None:
+            selected = requested_selected
+            st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
 
     def _normalize_target_schedule_map(raw_schedule_map: Any) -> dict[str, dict[str, str]]:
         normalized: dict[str, dict[str, str]] = {}
@@ -105,6 +119,54 @@ def render_detail_panel(
         if numeric is None or numeric <= 0.0:
             return None
         return float(numeric)
+
+    def _target_has_emissions_data(value: Any) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        return text.lower() not in {"-", "none", "nan"}
+
+    def _target_emission_band_set(value: Any) -> set[str]:
+        if isinstance(value, set):
+            return {str(token).strip() for token in value if str(token).strip()}
+        if isinstance(value, (list, tuple)):
+            return {str(token).strip() for token in value if str(token).strip()}
+        parser = globals().get("parse_emission_band_set")
+        if callable(parser):
+            try:
+                parsed = parser(value)
+                if isinstance(parsed, set):
+                    return {str(token).strip() for token in parsed if str(token).strip()}
+                if isinstance(parsed, (list, tuple)):
+                    return {str(token).strip() for token in parsed if str(token).strip()}
+            except Exception:
+                return set()
+        return set()
+
+    def _is_hii_object_type(value: Any) -> bool:
+        compact = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return compact in {"hii", "hiiregion"}
+
+    def _is_bright_nebula_group(value: Any) -> bool:
+        compact = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return compact == "brightnebula"
+
+    def _target_is_narrowband_target(
+        *,
+        object_type_group_value: Any,
+        object_type_value: Any,
+        emission_tokens_value: Any,
+        emission_lines_value: Any,
+    ) -> bool:
+        if _is_bright_nebula_group(object_type_group_value):
+            return True
+        if _is_hii_object_type(object_type_value):
+            return True
+        if _target_emission_band_set(emission_tokens_value):
+            return True
+        return _target_has_emissions_data(emission_lines_value)
 
     def _coerce_schedule_clock(value: Any) -> tuple[int, int] | None:
         if isinstance(value, datetime):
@@ -688,6 +750,10 @@ def render_detail_panel(
                     {
                         "primary_id": preview_target_id,
                         "common_name": preview_common_name,
+                        "object_type": clean_text(preview_target.get("object_type")),
+                        "magnitude": parse_numeric(preview_target.get("magnitude")),
+                        "emission_lines": clean_text(preview_target.get("emission_lines")),
+                        "emission_band_tokens": preview_target.get("emission_band_tokens"),
                         "image_url": clean_text(preview_target.get("image_url")),
                         "hero_image_url": clean_text(preview_target.get("hero_image_url")),
                         "ra_deg": parse_numeric(preview_target.get("ra_deg")),
@@ -1306,6 +1372,25 @@ def render_detail_panel(
 
                 selected_object_type_group = normalize_object_type_group(selected.get("object_type_group"))
                 selected_object_type_value = clean_text(selected.get("object_type"))
+                selected_object_type_display = selected_object_type_value or "Unknown"
+                selected_target_type = (
+                    "narrowband"
+                    if _target_is_narrowband_target(
+                        object_type_group_value=selected.get("object_type_group"),
+                        object_type_value=selected.get("object_type"),
+                        emission_tokens_value=selected.get("emission_band_tokens"),
+                        emission_lines_value=selected.get("emission_lines"),
+                    )
+                    else "broadband"
+                )
+                selected_object_type_group_display = clean_text(selected.get("object_type_group"))
+                if not selected_object_type_group_display and selected_object_type_group:
+                    selected_object_type_group_display = str(selected_object_type_group)
+                selected_object_type_group_display = (
+                    selected_object_type_group_display.replace("_", " ").strip().title()
+                    if selected_object_type_group_display
+                    else "Unknown"
+                )
                 aliases_value = clean_text(selected.get("aliases"))
                 frame_occupancy_value = "-"
                 if telescope_fov_maj_deg is not None and telescope_fov_min_deg is not None:
@@ -1348,6 +1433,9 @@ def render_detail_panel(
                         "Value": dec_sexagesimal,
                         "ValueHtml": _format_coordinate_value_html(dec_sexagesimal, dec_decimal),
                     },
+                    {"Property": "Target Type", "Value": selected_target_type},
+                    {"Property": "Catalog Type", "Value": selected_object_type_display},
+                    {"Property": "Target Type Group", "Value": selected_object_type_group_display},
                     {"Property": "Constellation", "Value": clean_text(selected.get("constellation")) or "-"},
                     {"Property": "Aliases", "Value": aliases_value or "-"},
                     {"Property": "Size in Frame", "Value": frame_occupancy_value},
@@ -1357,11 +1445,6 @@ def render_detail_panel(
                     {"Property": "Morphology", "Value": morphology or "-"},
                     {"Property": "Emissions Details", "Value": emission_details_display or "-"},
                 ]
-                if selected_object_type_group == "other" and selected_object_type_value:
-                    property_items.insert(
-                        3,
-                        {"Property": "Object Type", "Value": selected_object_type_value},
-                    )
                 property_rows = pd.DataFrame(
                     [
                         row
@@ -1469,6 +1552,10 @@ def render_detail_panel(
             {
                 "primary_id": preview_target_id,
                 "common_name": preview_common_name,
+                "object_type": clean_text(preview_target.get("object_type")),
+                "magnitude": parse_numeric(preview_target.get("magnitude")),
+                "emission_lines": clean_text(preview_target.get("emission_lines")),
+                "emission_band_tokens": preview_target.get("emission_band_tokens"),
                 "image_url": clean_text(preview_target.get("image_url")),
                 "hero_image_url": clean_text(preview_target.get("hero_image_url")),
                 "ra_deg": parse_numeric(preview_target.get("ra_deg")),
@@ -1635,6 +1722,10 @@ def render_detail_panel(
             list_member_ids=active_preview_list_members,
             selected_metadata={
                 "common_name": clean_text(selected.get("common_name")),
+                "object_type": clean_text(selected.get("object_type")),
+                "magnitude": parse_numeric(selected.get("magnitude")),
+                "emission_lines": clean_text(selected.get("emission_lines")),
+                "emission_band_tokens": selected.get("emission_band_tokens"),
                 "image_url": clean_text(selected.get("image_url")),
                 "hero_image_url": clean_text(selected.get("hero_image_url")),
                 "ra_deg": parse_numeric(selected.get("ra_deg")),

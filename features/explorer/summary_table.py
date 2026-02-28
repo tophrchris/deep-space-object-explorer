@@ -4,6 +4,16 @@ from datetime import datetime, time as dt_time
 import html
 import re
 
+from runtime.brightness_policy import (
+    STATUS_BROADBAND_BORDERLINE,
+    STATUS_IN_RANGE,
+    STATUS_NARROWBAND_BOOSTED,
+    STATUS_OUT_OF_RANGE,
+    STATUS_UNKNOWN,
+    classify_target_magnitude,
+    resolve_telescope_max_magnitude,
+)
+
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
 from ui import streamlit_app as _legacy_ui
@@ -195,6 +205,99 @@ def render_sky_position_summary_table(
             return None
         return float(numeric)
 
+    def _safe_finite_float(value: Any) -> float | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(numeric):
+            return None
+        return float(numeric)
+
+    def _parse_emission_band_set_local(value: Any) -> set[str]:
+        parser = globals().get("parse_emission_band_set")
+        if not callable(parser):
+            return set()
+        try:
+            parsed = parser(value)
+        except Exception:
+            return set()
+        if isinstance(parsed, set):
+            return {str(token).strip() for token in parsed if str(token).strip()}
+        if isinstance(parsed, (list, tuple)):
+            return {str(token).strip() for token in parsed if str(token).strip()}
+        return set()
+
+    def _target_emission_band_set(value: Any) -> set[str]:
+        if isinstance(value, set):
+            return {str(token).strip() for token in value if str(token).strip()}
+        if isinstance(value, (list, tuple)):
+            return {str(token).strip() for token in value if str(token).strip()}
+        return _parse_emission_band_set_local(value)
+
+    def _target_has_emissions_data(value: Any) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        return text.lower() not in {"-", "none", "nan"}
+
+    def _is_hii_object_type(value: Any) -> bool:
+        compact = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return compact in {"hii", "hiiregion"}
+
+    def _is_bright_nebula_group(value: Any) -> bool:
+        compact = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return compact == "brightnebula"
+
+    def _target_is_narrowband_target(
+        *,
+        object_type_group_value: Any,
+        object_type_value: Any,
+        emission_tokens_value: Any,
+        emission_lines_value: Any,
+    ) -> bool:
+        if _is_bright_nebula_group(object_type_group_value):
+            return True
+        if _is_hii_object_type(object_type_value):
+            return True
+        if _target_emission_band_set(emission_tokens_value):
+            return True
+        return _target_has_emissions_data(emission_lines_value)
+
+    def _coerce_bool_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value or "").strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n", ""}:
+            return False
+        return bool(value)
+
+    def _active_filter_emission_band_set(filter_item: Any) -> set[str]:
+        if not isinstance(filter_item, dict):
+            return set()
+
+        explicit_band_set = _parse_emission_band_set_local(filter_item.get("emission_bands", []))
+        if explicit_band_set:
+            return explicit_band_set
+
+        for emission_field in ("emission_lines", "Emission_lines"):
+            parsed = _parse_emission_band_set_local(filter_item.get(emission_field))
+            if parsed:
+                return parsed
+
+        inferred_bands: set[str] = set()
+        if _coerce_bool_flag(filter_item.get("has_HA")):
+            inferred_bands.add("HA")
+        if _coerce_bool_flag(filter_item.get("has_OIII")):
+            inferred_bands.add("OIII")
+        if _coerce_bool_flag(filter_item.get("has_SII")):
+            inferred_bands.add("SII")
+        return inferred_bands
+
     summary_df["thumbnail_url"] = summary_df.apply(
         lambda row: _resolve_summary_thumbnail_url_cached(
             primary_id=str(row.get("primary_id") or "").strip(),
@@ -216,6 +319,7 @@ def render_sky_position_summary_table(
         axis=1,
     )
 
+    active_equipment: dict[str, Any] = {}
     selected_telescope: dict[str, Any] | None = None
     telescope_fov_area: float | None = None
     try:
@@ -233,8 +337,82 @@ def render_sky_position_summary_table(
                 selected_telescope = active_telescope
                 telescope_fov_area = float(telescope_fov_maj * telescope_fov_min)
     except Exception:
+        active_equipment = {}
         selected_telescope = None
         telescope_fov_area = None
+
+    include_telescope_details = bool(st.session_state.get("recommended_targets_include_telescope_details", False))
+    magnitude_filter_mode = str(
+        st.session_state.get("recommended_targets_magnitude_filter_mode", "None")
+    ).strip().title()
+    if magnitude_filter_mode not in {"None", "Maximum", "Range"}:
+        magnitude_filter_mode = "None"
+    magnitude_filter_active = bool(
+        include_telescope_details
+        and selected_telescope is not None
+        and magnitude_filter_mode in {"Maximum", "Range"}
+    )
+    magnitude_selected_max = _safe_finite_float(
+        st.session_state.get("recommended_targets_max_magnitude_value")
+    )
+    if magnitude_selected_max is None:
+        magnitude_selected_max = float(resolve_telescope_max_magnitude(selected_telescope, fallback=10.5))
+    magnitude_filter_min_mag: float | None = None
+    if magnitude_filter_mode == "Range":
+        raw_range = st.session_state.get("recommended_targets_magnitude_filter_range_mag")
+        if isinstance(raw_range, (list, tuple)) and len(raw_range) == 2:
+            low_value = _safe_finite_float(raw_range[0])
+            high_value = _safe_finite_float(raw_range[1])
+            if low_value is not None and high_value is not None:
+                magnitude_filter_min_mag = float(min(low_value, high_value))
+
+    active_filter = active_equipment.get("active_filter")
+    if not isinstance(active_filter, dict):
+        filter_lookup = dict(active_equipment.get("filter_lookup", {}))
+        active_filter_id = str(active_equipment.get("active_filter_id", "__none__")).strip() or "__none__"
+        active_filter = filter_lookup.get(active_filter_id) if active_filter_id != "__none__" else None
+    narrowband_filter_active = bool(_active_filter_emission_band_set(active_filter))
+
+    magnitude_source_column = (
+        "magnitude_numeric"
+        if "magnitude_numeric" in summary_df.columns
+        else ("magnitude" if "magnitude" in summary_df.columns else "")
+    )
+    if magnitude_source_column:
+        summary_df["magnitude_display"] = summary_df[magnitude_source_column].apply(
+            lambda value: (
+                f"{float(_safe_finite_float(value)):.1f}"
+                if _safe_finite_float(value) is not None
+                else "--"
+            )
+        )
+    else:
+        summary_df["magnitude_display"] = "--"
+
+    magnitude_policy_statuses: list[str] = []
+    for row_idx in range(len(summary_df)):
+        raw_magnitude = summary_df.iloc[row_idx].get(magnitude_source_column) if magnitude_source_column else None
+        target_is_narrowband = _target_is_narrowband_target(
+            object_type_group_value=summary_df.iloc[row_idx].get("object_type_group"),
+            object_type_value=summary_df.iloc[row_idx].get("object_type"),
+            emission_tokens_value=summary_df.iloc[row_idx].get("emission_band_tokens"),
+            emission_lines_value=summary_df.iloc[row_idx].get("emission_lines"),
+        )
+        if magnitude_filter_active:
+            _, magnitude_status, _ = classify_target_magnitude(
+                raw_magnitude,
+                selected_max=float(magnitude_selected_max),
+                narrowband_filter_active=bool(narrowband_filter_active),
+                target_is_narrowband=bool(target_is_narrowband),
+            )
+            if magnitude_filter_mode == "Range" and magnitude_filter_min_mag is not None:
+                parsed_row_magnitude = _safe_finite_float(raw_magnitude)
+                if parsed_row_magnitude is None or float(parsed_row_magnitude) < float(magnitude_filter_min_mag):
+                    magnitude_status = STATUS_OUT_OF_RANGE
+        else:
+            magnitude_status = STATUS_IN_RANGE if _safe_finite_float(raw_magnitude) is not None else STATUS_UNKNOWN
+        magnitude_policy_statuses.append(str(magnitude_status))
+    summary_df["magnitude_policy_status"] = magnitude_policy_statuses
 
     summary_df["framing_percent"] = np.nan
     show_framing_column = (
@@ -387,12 +565,41 @@ def render_sky_position_summary_table(
             ascending=[True, True, True, True],
             kind="mergesort",
         ).reset_index(drop=True)
+    else:
+        first_visible_sort = pd.to_datetime(summary_df.get("first_visible"), errors="coerce")
+        peak_sort = pd.to_datetime(summary_df.get("culmination"), errors="coerce")
+        if not isinstance(first_visible_sort, pd.Series):
+            first_visible_sort = pd.Series(
+                [pd.NaT] * len(summary_df),
+                index=summary_df.index,
+                dtype="datetime64[ns]",
+            )
+        if not isinstance(peak_sort, pd.Series):
+            peak_sort = pd.Series(
+                [pd.NaT] * len(summary_df),
+                index=summary_df.index,
+                dtype="datetime64[ns]",
+            )
+        summary_df["__sort_first_visible"] = first_visible_sort
+        summary_df["__sort_peak"] = peak_sort
+        summary_df["__sort_original_order"] = np.arange(len(summary_df), dtype=int)
+        summary_df = summary_df.sort_values(
+            by=[
+                "__sort_first_visible",
+                "__sort_peak",
+                "__sort_original_order",
+            ],
+            ascending=[True, True, True],
+            kind="mergesort",
+            na_position="last",
+        ).reset_index(drop=True)
     display_columns = [
         "line_swatch",
         "thumbnail_url",
         "target",
-        "object_type_group",
     ]
+    if not schedule_mode_active:
+        display_columns.append("object_type_group")
     if schedule_mode_active:
         display_columns.extend(
             [
@@ -408,6 +615,7 @@ def render_sky_position_summary_table(
                 "visible_total",
             ]
         )
+    display_columns.append("magnitude_display")
     if show_framing_column:
         display_columns.append("framing_percent")
     else:
@@ -422,6 +630,7 @@ def render_sky_position_summary_table(
             "line_swatch": "Line",
             "target": "Target",
             "object_type_group": "Type",
+            "magnitude_display": "Magnitude",
             "apparent_size": "Apparent size",
             "framing_percent": "Framing",
             "first_visible": "First Visible",
@@ -467,6 +676,16 @@ def render_sky_position_summary_table(
             if base_style and not base_style.endswith(";"):
                 base_style = f"{base_style};"
             styles[line_idx] = f"{base_style} color: {color}; font-weight: 700;"
+        if magnitude_filter_active and "Magnitude" in row.index:
+            magnitude_idx = row.index.get_loc("Magnitude")
+            magnitude_base_style = styles[magnitude_idx]
+            if magnitude_base_style and not magnitude_base_style.endswith(";"):
+                magnitude_base_style = f"{magnitude_base_style};"
+            magnitude_status = str(summary_df.loc[row.name, "magnitude_policy_status"]).strip().lower()
+            if magnitude_status == STATUS_BROADBAND_BORDERLINE:
+                styles[magnitude_idx] = f"{magnitude_base_style} color: #1d4ed8; font-weight: 700;"
+            elif magnitude_status == STATUS_NARROWBAND_BOOSTED:
+                styles[magnitude_idx] = f"{magnitude_base_style} color: #991b1b; font-weight: 700;"
         return styles
 
     styled = apply_dataframe_styler_theme(display.style.apply(_style_summary_row, axis=1))
@@ -480,6 +699,7 @@ def render_sky_position_summary_table(
         ),
         "Target": st.column_config.TextColumn(width="large"),
         "Type": st.column_config.TextColumn(width="small"),
+        "Magnitude": st.column_config.TextColumn(width="small"),
         "First Visible": st.column_config.DatetimeColumn(
             width="small",
             format=("h:mm a" if use_12_hour else "HH:mm"),
@@ -519,6 +739,64 @@ def render_sky_position_summary_table(
     selected_cells: list[Any] = []
     mui_table = globals().get("st_mui_table")
     if callable(mui_table):
+        frozen_line_col_width_px = 44
+        frozen_thumbnail_col_width_px = 108
+        frozen_target_col_width_px = 320
+        frozen_thumbnail_left_px = frozen_line_col_width_px
+        frozen_target_left_px = frozen_line_col_width_px + frozen_thumbnail_col_width_px
+        frozen_header_bg = dark_td_bg if is_dark_theme else "#FFFFFF"
+        summary_table_custom_css = f"""
+.MuiTableCell-root {{ padding: 0 !important; }}
+.MuiTablePagination-root {{ display: none !important; }}
+
+/* Freeze leading columns: Line, Thumbnail, Target */
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(1),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(1) {{
+  position: sticky;
+  left: 0px;
+}}
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(2),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(2) {{
+  position: sticky;
+  left: {frozen_thumbnail_left_px}px;
+}}
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(3),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(3) {{
+  position: sticky;
+  left: {frozen_target_left_px}px;
+}}
+
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(1),
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(2),
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(3) {{
+  z-index: 12 !important;
+  background-color: {frozen_header_bg} !important;
+}}
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(1),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(2),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(3) {{
+  z-index: 10 !important;
+  background-color: inherit !important;
+}}
+
+/* Keep frozen column widths stable so sticky offsets remain aligned. */
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(1),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(1) {{
+  min-width: {frozen_line_col_width_px}px !important;
+  width: {frozen_line_col_width_px}px !important;
+  max-width: {frozen_line_col_width_px}px !important;
+}}
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(2),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(2) {{
+  min-width: {frozen_thumbnail_col_width_px}px !important;
+  width: {frozen_thumbnail_col_width_px}px !important;
+  max-width: {frozen_thumbnail_col_width_px}px !important;
+}}
+.MuiTableHead-root .MuiTableCell-root:nth-of-type(3),
+.MuiTableBody-root .MuiTableCell-root:nth-of-type(3) {{
+  min-width: {frozen_target_col_width_px}px !important;
+}}
+"""
         selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
         highlighted_summary_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
 
@@ -592,6 +870,18 @@ def render_sky_position_summary_table(
                         cell_text = f"{float(raw_value):.0f}%"
                     except (TypeError, ValueError):
                         cell_text = "--"
+                elif column_name == "Magnitude":
+                    cell_text = "" if raw_value is None or pd.isna(raw_value) else str(raw_value).strip()
+                    if not cell_text:
+                        cell_text = "--"
+                    if magnitude_filter_active:
+                        magnitude_status = str(summary_df.at[int(row_idx), "magnitude_policy_status"]).strip().lower()
+                        if magnitude_status == STATUS_BROADBAND_BORDERLINE:
+                            style_parts.append("color: #1d4ed8;")
+                            style_parts.append("font-weight: 700;")
+                        elif magnitude_status == STATUS_NARROWBAND_BOOSTED:
+                            style_parts.append("color: #991b1b;")
+                            style_parts.append("font-weight: 700;")
                 else:
                     cell_text = "" if raw_value is None or pd.isna(raw_value) else str(raw_value).strip()
                     if not cell_text:
@@ -615,10 +905,7 @@ def render_sky_position_summary_table(
             mui_frame,
             enablePagination=True,
             paginationSizes=[24],
-            customCss="""
-.MuiTableCell-root { padding: 0 !important; }
-.MuiTablePagination-root { display: none !important; }
-""",
+            customCss=summary_table_custom_css,
             showHeaders=True,
             key="sky_summary_mui_table",
             stickyHeader=False,
