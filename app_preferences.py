@@ -119,6 +119,49 @@ def _normalize_equipment(raw_equipment: Any) -> dict[str, list[str]]:
     return normalized
 
 
+def _normalize_schedule_time_text(raw_value: Any) -> str:
+    raw_text = str(raw_value or "").strip()
+    if not raw_text:
+        return ""
+    for pattern in ("%H:%M", "%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(raw_text, pattern)
+            return parsed.strftime("%H:%M")
+        except ValueError:
+            continue
+    return ""
+
+
+def _normalize_list_target_schedules(
+    raw_schedules: Any,
+    *,
+    valid_list_ids: set[str],
+) -> dict[str, dict[str, dict[str, str]]]:
+    normalized: dict[str, dict[str, dict[str, str]]] = {}
+    if not isinstance(raw_schedules, dict):
+        return normalized
+    for raw_list_id, raw_target_map in raw_schedules.items():
+        list_id = str(raw_list_id).strip()
+        if not list_id or list_id not in valid_list_ids or not isinstance(raw_target_map, dict):
+            continue
+        normalized_target_map: dict[str, dict[str, str]] = {}
+        for raw_target_id, raw_schedule_payload in raw_target_map.items():
+            target_id = str(raw_target_id).strip()
+            if not target_id or not isinstance(raw_schedule_payload, dict):
+                continue
+            start_time = _normalize_schedule_time_text(raw_schedule_payload.get("start_time"))
+            end_time = _normalize_schedule_time_text(raw_schedule_payload.get("end_time"))
+            if not start_time or not end_time:
+                continue
+            normalized_target_map[target_id] = {
+                "start_time": start_time,
+                "end_time": end_time,
+            }
+        if normalized_target_map:
+            normalized[list_id] = normalized_target_map
+    return normalized
+
+
 def default_preferences() -> dict[str, Any]:
     sites = default_sites_payload()
     active_site_id = default_site_order()[0]
@@ -128,6 +171,7 @@ def default_preferences() -> dict[str, Any]:
         "list_order": default_list_order(),
         "list_meta": default_list_meta(),
         "active_preview_list_id": AUTO_RECENT_LIST_ID,
+        "list_target_schedules": {},
         "sites": sites,
         "site_order": default_site_order(),
         "active_site_id": active_site_id,
@@ -154,6 +198,25 @@ def ensure_preferences_shape(raw: dict[str, Any]) -> dict[str, Any]:
     prefs = default_preferences()
     if isinstance(raw, dict):
         prefs.update(normalize_list_preferences(raw))
+        valid_list_ids = {
+            str(list_id).strip()
+            for list_id in prefs.get("lists", {}).keys()
+            if str(list_id).strip()
+        }
+        raw_list_target_schedules = raw.get("list_target_schedules", {})
+        if not raw_list_target_schedules and isinstance(raw.get("target_tips_schedule_by_target_id"), dict):
+            # One-time migration path from early schedule prototypes that stored
+            # schedules without list scope.
+            fallback_list_id = str(raw.get("active_preview_list_id", AUTO_RECENT_LIST_ID)).strip()
+            if fallback_list_id not in valid_list_ids:
+                fallback_list_id = AUTO_RECENT_LIST_ID
+            raw_list_target_schedules = {
+                fallback_list_id: dict(raw.get("target_tips_schedule_by_target_id", {})),
+            }
+        prefs["list_target_schedules"] = _normalize_list_target_schedules(
+            raw_list_target_schedules,
+            valid_list_ids=valid_list_ids,
+        )
 
         temp_unit = str(raw.get("temperature_unit", "auto")).strip().lower()
         prefs["temperature_unit"] = temp_unit if temp_unit in {"auto", "f", "c"} else "auto"

@@ -14,6 +14,7 @@ streamlit-js-eval>=1.0.0
 streamlit-vertical-slider>=2.5.5
 streamlit-extras>=0.4.0
 streamlit-modal>=0.1.2
+st-time-entry>=0.4.0
 st_mui_table>=0.0.6
 folium>=0.17
 streamlit-folium>=0.23
