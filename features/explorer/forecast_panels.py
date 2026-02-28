@@ -1717,9 +1717,6 @@ def build_astronomy_forecast_summary(
         lunar_phase_key = str((lunar_phase_payload or {}).get("phase_key", "")).strip().lower() or None
         lunar_phase_age_days = (lunar_phase_payload or {}).get("phase_age_days")
 
-        if rating_emoji:
-            label = f"{label} {rating_emoji}"
-
         temp_unit = str(temperature_unit).strip().lower()
         temp_unit_suffix = "F" if temp_unit == "f" else "C"
         low_temp = (
@@ -1833,7 +1830,8 @@ def build_astronomy_forecast_summary(
         summary_rows.append(
             {
                 "day_offset": day_offset,
-                "Night": label,
+                "Date": label,
+                "Rating": rating_emoji,
                 "Lunar": lunar_display,
                 "Dark Time": dark_duration,
                 "lunar_phase_key": lunar_phase_key or "",
@@ -1915,7 +1913,8 @@ def render_astronomy_forecast_summary(
         return
 
     ordered_columns = [
-        "Night",
+        "Date",
+        "Rating",
         "Clear",
         "Lunar",
         "Calm",
@@ -1963,8 +1962,12 @@ def render_astronomy_forecast_summary(
                 style_parts = ["white-space: nowrap;"]
                 if row_is_selected:
                     style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
-                if column_name == "Night" and row_is_selected:
+                if column_name == "Date" and row_is_selected:
                     style_parts.append("font-weight: 700;")
+                if column_name == "Date":
+                    style_parts.append("text-align: right;")
+                elif column_name == "Rating":
+                    style_parts.append("text-align: left;")
                 if column_name in center_columns:
                     style_parts.append("text-align: center;")
                 if column_name == "Clear":
@@ -2003,32 +2006,47 @@ def render_astronomy_forecast_summary(
                 mui_frame.at[int(row_idx), column_name] = _mui_cell_html(
                     cell_text,
                     style_parts,
-                    full_bleed=(column_name in {"Clear", "Lunar"}),
+                    full_bleed=(row_is_selected or column_name in {"Clear", "Lunar"}),
                 )
-        if "Night" in mui_frame.columns:
-            mui_frame = mui_frame.rename(columns={"Night": ""})
+        if "Date" in mui_frame.columns:
+            mui_frame = mui_frame.rename(columns={"Date": ""})
+        if "Rating" in mui_frame.columns:
+            # Keep header visually blank while preserving a unique column key.
+            mui_frame = mui_frame.rename(columns={"Rating": "\u00A0"})
 
         mui_custom_css = """
 .MuiTableCell-root {
   padding: 6px 8px !important;
+}
+/* Reduce visual gap between Date and Rating columns. */
+.MuiTableHead-root .MuiTableCell-root:nth-child(1),
+.MuiTableBody-root .MuiTableCell-root:nth-child(1) {
+  padding-right: 2px !important;
+}
+.MuiTableHead-root .MuiTableCell-root:nth-child(2),
+.MuiTableBody-root .MuiTableCell-root:nth-child(2) {
+  padding-left: 2px !important;
+}
+.MuiTableCell-root:nth-child(1) {
+  border-right: none !important;
 }
 .MuiTableHead-root .MuiTableCell-root {
   vertical-align: bottom !important;
   padding-top: 10px !important;
   padding-bottom: 4px !important;
 }
-.MuiTableCell-root:nth-child(2),
 .MuiTableCell-root:nth-child(3),
 .MuiTableCell-root:nth-child(4),
 .MuiTableCell-root:nth-child(5),
-.MuiTableCell-root:nth-child(6) {
+.MuiTableCell-root:nth-child(6),
+.MuiTableCell-root:nth-child(7) {
   text-align: center !important;
 }
-.MuiTableHead-root .MuiTableCell-root:nth-child(2),
 .MuiTableHead-root .MuiTableCell-root:nth-child(3),
 .MuiTableHead-root .MuiTableCell-root:nth-child(4),
 .MuiTableHead-root .MuiTableCell-root:nth-child(5),
-.MuiTableHead-root .MuiTableCell-root:nth-child(6) {
+.MuiTableHead-root .MuiTableCell-root:nth-child(6),
+.MuiTableHead-root .MuiTableCell-root:nth-child(7) {
   text-align: center !important;
 }
 .MuiTableHead-root .MuiTableCell-root:first-child {
@@ -2037,11 +2055,14 @@ def render_astronomy_forecast_summary(
   z-index: 4 !important;
   background: #f3f4f6 !important;
 }
+.MuiTableHead-root .MuiTableCell-root:nth-child(2) {
+  background: #f3f4f6 !important;
+}
 .MuiTableBody-root .MuiTableRow-root .MuiTableCell-root:first-child {
   position: sticky !important;
   left: 0 !important;
   z-index: 3 !important;
-  background: #ffffff !important;
+  background: inherit !important;
 }
 .MuiTablePagination-root {
   display: none !important;
@@ -2109,8 +2130,16 @@ def render_astronomy_forecast_summary(
             style_parts = ["white-space: nowrap;"]
             if row_is_selected:
                 style_parts.append("background-color: rgba(37, 99, 235, 0.14);")
-            if column == "Night" and row_is_selected:
+            if column == "Date" and row_is_selected:
                 style_parts.append("font-weight: 700;")
+            if column == "Date":
+                style_parts.append("text-align: right !important;")
+                style_parts.append("justify-content: flex-end !important;")
+                style_parts.append("border-right: none !important;")
+            elif column == "Rating":
+                style_parts.append("text-align: left !important;")
+                style_parts.append("justify-content: flex-start !important;")
+                style_parts.append("border-left: none !important;")
             if column in {"Lunar", "Dark Time", "Clear", "Calm", "Crisp"}:
                 style_parts.append("text-align: center !important;")
                 style_parts.append("justify-content: center !important;")
@@ -2154,6 +2183,24 @@ def render_astronomy_forecast_summary(
             "justify-content": "center !important",
         },
     )
+    if "Date" in display_frame.columns:
+        base_styler = base_styler.set_properties(
+            subset=["Date"],
+            **{
+                "text-align": "right !important",
+                "justify-content": "flex-end !important",
+                "border-right": "none !important",
+            },
+        )
+    if "Rating" in display_frame.columns:
+        base_styler = base_styler.set_properties(
+            subset=["Rating"],
+            **{
+                "text-align": "left !important",
+                "justify-content": "flex-start !important",
+                "border-left": "none !important",
+            },
+        )
     styled = apply_dataframe_styler_theme(base_styler)
 
     table_event = st.dataframe(
@@ -2164,7 +2211,8 @@ def render_astronomy_forecast_summary(
         selection_mode="single-cell",
         key="astronomy_forecast_table",
         column_config={
-            "Night": st.column_config.TextColumn("", width="small"),
+            "Date": st.column_config.TextColumn("", width="small"),
+            "Rating": st.column_config.TextColumn("", width="small"),
             "Clear": st.column_config.TextColumn(width="small"),
             "Calm": st.column_config.TextColumn(width="small"),
             "Crisp": st.column_config.TextColumn(width="small"),

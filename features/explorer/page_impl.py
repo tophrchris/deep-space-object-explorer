@@ -430,7 +430,6 @@ def _render_explorer_page_impl(
                 indicator_frame=weather_indicator_display,
                 hour_column_states=(hourly_header_column_states or None),
             )
-            st.caption("Click an hour column header to search Recommended Targets for that hour.")
             clicked_hour_key = (
                 hourly_header_to_hour_key.get(str(clicked_hour_column_label).strip(), "")
                 if clicked_hour_column_label is not None

@@ -447,7 +447,7 @@ def render_target_recommendations(
     st.session_state[magnitude_filter_mode_key] = normalized_magnitude_filter_mode
     if page_size_key not in st.session_state:
         st.session_state[page_size_key] = 100
-    elif int(st.session_state.get(page_size_key, 100)) not in {10, 100, 200}:
+    elif int(st.session_state.get(page_size_key, 100)) not in {50, 100, 200}:
         st.session_state[page_size_key] = 100
     if not isinstance(st.session_state.get(page_number_key), int):
         st.session_state[page_number_key] = 1
@@ -1543,7 +1543,7 @@ def render_target_recommendations(
         ).reset_index(drop=True)
 
     page_size = int(st.session_state.get(page_size_key, 100))
-    if page_size not in {10, 100, 200}:
+    if page_size not in {50, 100, 200}:
         page_size = 100
         st.session_state[page_size_key] = page_size
     total_results = int(len(recommended))
@@ -1846,7 +1846,7 @@ def render_target_recommendations(
     per_page_col, page_col = st.columns([1, 1], gap="small")
     per_page_col.selectbox(
         "Results per page",
-        options=[10, 100, 200],
+        options=[50, 100, 200],
         key=page_size_key,
     )
     page_col.number_input(

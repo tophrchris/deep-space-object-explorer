@@ -1681,15 +1681,6 @@ def render_detail_panel(
 
     with st.container(border=True):
         st.markdown("### Night Sky Preview")
-        st.caption(
-            f"Tonight ({tzinfo.key}): "
-            f"{format_display_time(window_start, use_12_hour=use_12_hour)} -> "
-            f"{format_display_time(window_end, use_12_hour=use_12_hour)} | "
-            f"Rise {format_time(events['rise'], use_12_hour=use_12_hour)} | "
-            f"First-visible {format_time(events['first_visible'], use_12_hour=use_12_hour)} | "
-            f"Culmination {format_time(events['culmination'], use_12_hour=use_12_hour)} | "
-            f"Last-visible {format_time(events['last_visible'], use_12_hour=use_12_hour)}"
-        )
         st.caption(f"Overlaying list: {active_preview_list_name} ({len(preview_tracks)} companion targets)")
         plots_container = st.container()
         summary_container = st.container()

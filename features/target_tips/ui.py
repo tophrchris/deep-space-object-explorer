@@ -107,6 +107,9 @@ def render_target_tips_panel(
     selected_primary_id = str(selected_id or "").strip()
     selected_display_label = str(selected_label or "").strip()
     st.markdown("##### Target Tips")
+    raw_mount_choice = str(prefs.get("active_mount_choice", "altaz")).strip().lower()
+    if raw_mount_choice not in {"eq", "altaz"}:
+        raw_mount_choice = "altaz"
 
     def _render_schedule_popover(row_payload: dict[str, Any] | None = None) -> None:
         if not selected_primary_id or not hasattr(st, "popover"):
@@ -375,6 +378,7 @@ def render_target_tips_panel(
         local_now=local_now,
         window_start=window_start,
         window_end=window_end,
+        active_mount_choice=raw_mount_choice,
     )
     tips = collect_target_tips(context)
 

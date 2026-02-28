@@ -42,6 +42,7 @@ class TargetTipsContext:
     local_now: datetime
     window_start: datetime
     window_end: datetime
+    active_mount_choice: str
 
 
 TargetTipRule = Callable[[TargetTipsContext], TargetTip | None]
@@ -357,6 +358,8 @@ def _track_unobstructed_mask(track: pd.DataFrame, altitude: pd.Series) -> pd.Ser
 
 
 def _target_tip_low_altitude_exposure(context: TargetTipsContext) -> TargetTip | None:
+    if str(context.active_mount_choice or "").strip().lower() != "eq":
+        return None
     track = context.selected_track
     if not isinstance(track, pd.DataFrame) or track.empty:
         return None
@@ -385,6 +388,8 @@ def _target_tip_low_altitude_exposure(context: TargetTipsContext) -> TargetTip |
 
 
 def _target_tip_high_altitude_altaz_exposure(context: TargetTipsContext) -> TargetTip | None:
+    if str(context.active_mount_choice or "").strip().lower() != "altaz":
+        return None
     track = context.selected_track
     if not isinstance(track, pd.DataFrame) or track.empty:
         return None
