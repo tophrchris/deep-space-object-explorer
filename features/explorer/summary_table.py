@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, time as dt_time
+import html
+import re
+
 # Transitional bridge during Explorer split: this module still relies on shared
 # helpers/constants from `ui.streamlit_app` until they are extracted.
 from ui import streamlit_app as _legacy_ui
@@ -12,6 +16,144 @@ def _refresh_legacy_globals() -> None:
 
 
 _refresh_legacy_globals()
+
+SKY_SUMMARY_TABLE_MODE_STATE_KEY = "sky_summary_table_mode"
+TARGET_TIPS_SCHEDULES_STATE_KEY = "target_tips_schedule_by_target_id"
+TARGET_TIPS_SCHEDULE_ACTIVE_LIST_STATE_KEY = "target_tips_schedule_active_list_id"
+
+
+def _parse_schedule_clock(value: Any) -> dt_time | None:
+    if isinstance(value, datetime):
+        return value.time().replace(second=0, microsecond=0)
+    if isinstance(value, dt_time):
+        return value.replace(second=0, microsecond=0)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for pattern in ("%H:%M", "%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text, pattern).time()
+            return parsed.replace(second=0, microsecond=0)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_schedule_duration_hhmm(total_minutes: int) -> str:
+    bounded_minutes = max(0, int(total_minutes))
+    hours, minutes = divmod(bounded_minutes, 60)
+    if hours > 0 and minutes > 0:
+        return f"{hours} {'hour' if hours == 1 else 'hours'}, {minutes} {'min' if minutes == 1 else 'mins'}"
+    if hours > 0:
+        return f"{hours} {'hour' if hours == 1 else 'hours'}"
+    return f"{minutes} {'min' if minutes == 1 else 'mins'}"
+
+
+def _parse_duration_minutes(value: Any) -> float | None:
+    text = str(value or "").strip().lower()
+    if not text or text == "--":
+        return None
+    if ":" in text:
+        parts = [part.strip() for part in text.split(":", maxsplit=1)]
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return float((int(parts[0]) * 60) + int(parts[1]))
+
+    match = re.match(r"^\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*$", text)
+    if match is None:
+        verbose_match = re.match(
+            r"^\s*(?:(\d+)\s*hours?)?\s*(?:,\s*)?(?:(\d+)\s*mins?)?\s*$",
+            text,
+        )
+        if verbose_match is None:
+            return None
+        hours = int(verbose_match.group(1) or 0)
+        minutes = int(verbose_match.group(2) or 0)
+        if hours == 0 and minutes == 0 and text not in {"0 min", "0 mins", "0 hour", "0 hours"}:
+            return None
+        return float((hours * 60) + minutes)
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    if hours == 0 and minutes == 0 and text not in {"0m", "0h", "0h 0m", "0h0m"}:
+        # Reject non-duration strings that regex-collapsed to zero.
+        return None
+    return float((hours * 60) + minutes)
+
+
+def _remaining_minutes_for_sort(row: pd.Series) -> float | None:
+    remaining_minutes = _parse_duration_minutes(row.get("visible_remaining"))
+    if remaining_minutes is not None:
+        return remaining_minutes
+    return _parse_duration_minutes(row.get("visible_total"))
+
+
+def _thumbnail_numeric(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed):
+        return None
+    return float(parsed)
+
+
+def _thumbnail_cutout_fov_deg(major_arcmin: Any, minor_arcmin: Any) -> tuple[float, float]:
+    major_value = _thumbnail_numeric(major_arcmin)
+    minor_value = _thumbnail_numeric(minor_arcmin)
+    span_deg_candidates = [
+        float(value) / 60.0
+        for value in (major_value, minor_value)
+        if value is not None and value > 0.0
+    ]
+    if span_deg_candidates:
+        estimated_span = max(span_deg_candidates) * 3.0
+        framed_span = float(max(0.5, min(8.0, estimated_span)))
+        return framed_span, framed_span
+    return 1.5, 1.5
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+def _resolve_summary_thumbnail_url_cached(
+    primary_id: str,
+    common_name: str,
+    image_url: str,
+    hero_image_url: str,
+    ra_deg: float | None,
+    dec_deg: float | None,
+    ang_size_maj_arcmin: float | None,
+    ang_size_min_arcmin: float | None,
+) -> str | None:
+    _refresh_legacy_globals()
+    for raw_value in (str(image_url or "").strip(), str(hero_image_url or "").strip()):
+        if raw_value.lower().startswith(("https://", "http://")):
+            return raw_value
+
+    wikimedia_search_phrase = str(common_name or "").strip() or str(primary_id or "").strip()
+    if wikimedia_search_phrase:
+        image_data = fetch_free_use_image(wikimedia_search_phrase)
+        wiki_image_url = str((image_data or {}).get("image_url", "") or "").strip()
+        if wiki_image_url.lower().startswith(("https://", "http://")):
+            return wiki_image_url
+
+    ra_value = _thumbnail_numeric(ra_deg)
+    dec_value = _thumbnail_numeric(dec_deg)
+    if ra_value is None or dec_value is None:
+        return None
+
+    fov_width_deg, fov_height_deg = _thumbnail_cutout_fov_deg(ang_size_maj_arcmin, ang_size_min_arcmin)
+    for layer in ("unwise-neo4", "sfd", "sdss2"):
+        legacy_cutout = build_legacy_survey_cutout_urls(
+            ra_deg=ra_value,
+            dec_deg=dec_value,
+            fov_width_deg=fov_width_deg,
+            fov_height_deg=fov_height_deg,
+            layer=layer,
+            max_pixels=256,
+        )
+        legacy_image_url = str((legacy_cutout or {}).get("image_url", "") or "").strip()
+        if legacy_image_url.lower().startswith(("https://", "http://")):
+            return legacy_image_url
+    return None
+
 
 def render_sky_position_summary_table(
     rows: list[dict[str, Any]],
@@ -29,70 +171,20 @@ def render_sky_position_summary_table(
         st.session_state["sky_summary_highlight_primary_id"] = ""
         return
 
-    st.markdown("#### Targets")
+    title_col, mode_col = st.columns([3, 1], gap="small")
+    title_col.markdown("#### Targets")
+    selected_mode = mode_col.segmented_control(
+        "Targets Mode",
+        options=["Info", "Schedule"],
+        default="Info",
+        key=SKY_SUMMARY_TABLE_MODE_STATE_KEY,
+        label_visibility="collapsed",
+    )
+    schedule_mode_active = str(selected_mode or "Info").strip().lower() == "schedule"
     summary_df = pd.DataFrame(rows)
     if summary_df.empty:
         st.session_state["sky_summary_highlight_primary_id"] = ""
         return
-
-    def _thumbnail_numeric(value: Any) -> float | None:
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            return None
-        if not np.isfinite(parsed):
-            return None
-        return float(parsed)
-
-    def _thumbnail_cutout_fov_deg(row: pd.Series) -> tuple[float, float]:
-        major_arcmin = _thumbnail_numeric(row.get("ang_size_maj_arcmin"))
-        minor_arcmin = _thumbnail_numeric(row.get("ang_size_min_arcmin"))
-        span_deg_candidates = [
-            float(value) / 60.0
-            for value in (major_arcmin, minor_arcmin)
-            if value is not None and value > 0.0
-        ]
-        if span_deg_candidates:
-            estimated_span = max(span_deg_candidates) * 3.0
-            framed_span = float(max(0.5, min(8.0, estimated_span)))
-            return framed_span, framed_span
-        return 1.5, 1.5
-
-    def _resolve_thumbnail_url(row: pd.Series) -> str | None:
-        for key in ("image_url", "hero_image_url"):
-            raw_value = str(row.get(key, "") or "").strip()
-            if raw_value.lower().startswith(("https://", "http://")):
-                return raw_value
-
-        wikimedia_search_phrase = (
-            str(row.get("common_name") or "").strip()
-            or str(row.get("primary_id") or "").strip()
-        )
-        if wikimedia_search_phrase:
-            image_data = fetch_free_use_image(wikimedia_search_phrase)
-            wiki_image_url = str((image_data or {}).get("image_url", "") or "").strip()
-            if wiki_image_url.lower().startswith(("https://", "http://")):
-                return wiki_image_url
-
-        ra_deg = _thumbnail_numeric(row.get("ra_deg"))
-        dec_deg = _thumbnail_numeric(row.get("dec_deg"))
-        if ra_deg is None or dec_deg is None:
-            return None
-
-        fov_width_deg, fov_height_deg = _thumbnail_cutout_fov_deg(row)
-        for layer in ("unwise-neo4", "sfd", "sdss2"):
-            legacy_cutout = build_legacy_survey_cutout_urls(
-                ra_deg=ra_deg,
-                dec_deg=dec_deg,
-                fov_width_deg=fov_width_deg,
-                fov_height_deg=fov_height_deg,
-                layer=layer,
-                max_pixels=256,
-            )
-            legacy_image_url = str((legacy_cutout or {}).get("image_url", "") or "").strip()
-            if legacy_image_url.lower().startswith(("https://", "http://")):
-                return legacy_image_url
-        return None
 
     def _safe_positive_float(value: Any) -> float | None:
         try:
@@ -103,7 +195,19 @@ def render_sky_position_summary_table(
             return None
         return float(numeric)
 
-    summary_df["thumbnail_url"] = summary_df.apply(_resolve_thumbnail_url, axis=1)
+    summary_df["thumbnail_url"] = summary_df.apply(
+        lambda row: _resolve_summary_thumbnail_url_cached(
+            primary_id=str(row.get("primary_id") or "").strip(),
+            common_name=str(row.get("common_name") or "").strip(),
+            image_url=str(row.get("image_url") or "").strip(),
+            hero_image_url=str(row.get("hero_image_url") or "").strip(),
+            ra_deg=_thumbnail_numeric(row.get("ra_deg")),
+            dec_deg=_thumbnail_numeric(row.get("dec_deg")),
+            ang_size_maj_arcmin=_thumbnail_numeric(row.get("ang_size_maj_arcmin")),
+            ang_size_min_arcmin=_thumbnail_numeric(row.get("ang_size_min_arcmin")),
+        ),
+        axis=1,
+    )
     summary_df["apparent_size"] = summary_df.apply(
         lambda row: format_apparent_size_display(
             row.get("ang_size_maj_arcmin"),
@@ -149,10 +253,6 @@ def render_sky_position_summary_table(
         summary_df["framing_percent"] = (target_area_deg2 / float(telescope_fov_area)) * 100.0
 
     summary_df["line_swatch"] = "■"
-    if allow_list_membership_toggle:
-        summary_df["list_action"] = summary_df["is_in_list"].map(lambda value: "Remove" if bool(value) else "Add")
-    else:
-        summary_df["list_action"] = "Auto"
     summary_df["visible_remaining_display"] = "--"
     if show_remaining:
         for row_index, row in summary_df.iterrows():
@@ -188,23 +288,133 @@ def render_sky_position_summary_table(
                     summary_df.at[row_index, "visible_remaining_display"] = total_duration
             except Exception:
                 continue
+    normalized_preview_list_id = str(preview_list_id or "").strip()
+    schedules_state = st.session_state.get(TARGET_TIPS_SCHEDULES_STATE_KEY)
+    session_schedule_scope_id = str(st.session_state.get(TARGET_TIPS_SCHEDULE_ACTIVE_LIST_STATE_KEY, "")).strip()
+    if not isinstance(schedules_state, dict) or session_schedule_scope_id != normalized_preview_list_id:
+        schedules_state = {}
+        raw_all_schedules = prefs.get("list_target_schedules")
+        raw_scoped_schedules = (
+            raw_all_schedules.get(normalized_preview_list_id, {})
+            if isinstance(raw_all_schedules, dict)
+            else {}
+        )
+        if isinstance(raw_scoped_schedules, dict):
+            for raw_target_id, raw_schedule_payload in raw_scoped_schedules.items():
+                target_id = str(raw_target_id).strip()
+                if not target_id or not isinstance(raw_schedule_payload, dict):
+                    continue
+                start_clock = _parse_schedule_clock(raw_schedule_payload.get("start_time"))
+                end_clock = _parse_schedule_clock(raw_schedule_payload.get("end_time"))
+                if start_clock is None or end_clock is None:
+                    continue
+                schedules_state[target_id] = {
+                    "start_time": f"{int(start_clock.hour):02d}:{int(start_clock.minute):02d}",
+                    "end_time": f"{int(end_clock.hour):02d}:{int(end_clock.minute):02d}",
+                }
+        st.session_state[TARGET_TIPS_SCHEDULES_STATE_KEY] = schedules_state
+        st.session_state[TARGET_TIPS_SCHEDULE_ACTIVE_LIST_STATE_KEY] = normalized_preview_list_id
+    summary_df["scheduled_start_display"] = "--"
+    summary_df["scheduled_end_display"] = "--"
+    summary_df["scheduled_duration_display"] = "--"
+    summary_df["scheduled_display"] = "--"
+    summary_df["scheduled_start_raw_minutes"] = np.nan
+    for row_index, row in summary_df.iterrows():
+        primary_id = str(row.get("primary_id", "")).strip()
+        if not primary_id:
+            continue
+        schedule_payload = schedules_state.get(primary_id)
+        if not isinstance(schedule_payload, dict):
+            continue
+        start_clock = _parse_schedule_clock(schedule_payload.get("start_time"))
+        end_clock = _parse_schedule_clock(schedule_payload.get("end_time"))
+        if start_clock is None or end_clock is None:
+            continue
+        start_display = format_display_time(
+            pd.Timestamp.combine(pd.Timestamp.today(), start_clock),
+            use_12_hour=use_12_hour,
+        )
+        end_display = format_display_time(
+            pd.Timestamp.combine(pd.Timestamp.today(), end_clock),
+            use_12_hour=use_12_hour,
+        )
+        start_minutes = int(start_clock.hour * 60 + start_clock.minute)
+        end_minutes = int(end_clock.hour * 60 + end_clock.minute)
+        if end_minutes <= start_minutes:
+            end_minutes += 24 * 60
+            end_display = f"{end_display} (+1d)"
+        duration_display = _format_schedule_duration_hhmm(end_minutes - start_minutes)
+        summary_df.at[row_index, "scheduled_start_display"] = start_display
+        summary_df.at[row_index, "scheduled_end_display"] = end_display
+        summary_df.at[row_index, "scheduled_duration_display"] = duration_display
+        summary_df.at[row_index, "scheduled_display"] = f"{start_display}-{end_display} ({duration_display})"
+        summary_df.at[row_index, "scheduled_start_raw_minutes"] = float(start_minutes)
+
+    summary_df["remaining_sort_minutes"] = summary_df.apply(_remaining_minutes_for_sort, axis=1)
+
+    if schedule_mode_active:
+        # Sort in "night order" (evening -> overnight), not raw clock order.
+        # Example: 11:59 PM should come before 12:01 AM.
+        night_pivot_minutes = 12 * 60
+        first_visible_times = pd.to_datetime(summary_df.get("first_visible"), errors="coerce")
+        if isinstance(first_visible_times, pd.Series):
+            valid_first_visible = first_visible_times.dropna()
+            if not valid_first_visible.empty:
+                earliest_first_visible = pd.Timestamp(valid_first_visible.min())
+                night_pivot_minutes = int(earliest_first_visible.hour * 60 + earliest_first_visible.minute)
+
+        def _night_order_minutes(raw_minutes: Any) -> float:
+            try:
+                value = float(raw_minutes)
+            except (TypeError, ValueError):
+                return float("nan")
+            if not np.isfinite(value):
+                return float("nan")
+            return value + 1440.0 if value < float(night_pivot_minutes) else value
+
+        summary_df["scheduled_start_sort_minutes"] = summary_df["scheduled_start_raw_minutes"].apply(_night_order_minutes)
+        summary_df["__sort_has_schedule"] = np.where(summary_df["scheduled_start_sort_minutes"].notna(), 0, 1)
+        summary_df["__sort_start_minutes"] = summary_df["scheduled_start_sort_minutes"].fillna(np.inf)
+        summary_df["__sort_remaining_minutes"] = summary_df["remaining_sort_minutes"].fillna(np.inf)
+        summary_df["__sort_original_order"] = np.arange(len(summary_df), dtype=int)
+        summary_df = summary_df.sort_values(
+            by=[
+                "__sort_has_schedule",
+                "__sort_start_minutes",
+                "__sort_remaining_minutes",
+                "__sort_original_order",
+            ],
+            ascending=[True, True, True, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
     display_columns = [
         "line_swatch",
         "thumbnail_url",
         "target",
         "object_type_group",
-        "first_visible",
-        "culmination",
-        "last_visible",
-        "visible_total",
     ]
+    if schedule_mode_active:
+        display_columns.extend(
+            [
+                "scheduled_display",
+            ]
+        )
+    else:
+        display_columns.extend(
+            [
+                "first_visible",
+                "culmination",
+                "last_visible",
+                "visible_total",
+            ]
+        )
     if show_framing_column:
         display_columns.append("framing_percent")
     else:
         display_columns.append("apparent_size")
-    if show_remaining:
+    if show_remaining and not schedule_mode_active:
         display_columns.append("visible_remaining_display")
-    display_columns.extend(["culmination_alt", "culmination_dir", "list_action"])
+    display_columns.extend(["culmination_alt", "culmination_dir"])
 
     display = summary_df[display_columns].rename(
         columns={
@@ -218,10 +428,10 @@ def render_sky_position_summary_table(
             "culmination": "Peak",
             "last_visible": "Last Visible",
             "visible_total": "Duration",
+            "scheduled_display": "Scheduled",
             "visible_remaining_display": "Remaining",
             "culmination_alt": "Max Alt",
             "culmination_dir": "Direction",
-            "list_action": "List",
         }
     )
     is_dark_theme = is_dark_ui_theme()
@@ -285,13 +495,14 @@ def render_sky_position_summary_table(
         ),
         "Duration": st.column_config.TextColumn(width="small"),
         "Direction": st.column_config.TextColumn(width="small"),
-        "List": st.column_config.TextColumn(width="small"),
     }
     if "Apparent size" in display.columns:
         column_config["Apparent size"] = st.column_config.TextColumn(width="small")
     if "Framing" in display.columns:
         column_config["Framing"] = st.column_config.NumberColumn(width="small", format="%.0f%%")
-    if show_remaining:
+    if "Scheduled" in display.columns:
+        column_config["Scheduled"] = st.column_config.TextColumn(width="medium")
+    if show_remaining and not schedule_mode_active:
         column_config["Remaining"] = st.column_config.TextColumn(width="small")
 
     styled = styled.set_properties(
@@ -303,31 +514,175 @@ def render_sky_position_summary_table(
         },
     )
 
-    table_event = st.dataframe(
-        styled,
-        hide_index=True,
-        use_container_width=True,
-        row_height=70,
-        on_select="rerun",
-        selection_mode="single-cell",
-        key="sky_summary_table",
-        column_config=column_config,
-    )
-
     selected_rows: list[int] = []
     selected_columns: list[Any] = []
     selected_cells: list[Any] = []
-    if table_event is not None:
-        try:
-            selected_rows = list(table_event.selection.rows)
-            selected_columns = list(table_event.selection.columns)
-            selected_cells = list(table_event.selection.cells)
-        except Exception:
-            if isinstance(table_event, dict):
-                selection_payload = table_event.get("selection", {})
-                selected_rows = list(selection_payload.get("rows", []))
-                selected_columns = list(selection_payload.get("columns", []))
-                selected_cells = list(selection_payload.get("cells", []))
+    mui_table = globals().get("st_mui_table")
+    if callable(mui_table):
+        selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
+        highlighted_summary_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+
+        def _format_table_time(raw_value: Any) -> str:
+            if raw_value is None or pd.isna(raw_value):
+                return "--"
+            try:
+                timestamp = pd.Timestamp(raw_value)
+            except Exception:
+                return str(raw_value).strip() or "--"
+            return format_display_time(timestamp, use_12_hour=use_12_hour)
+
+        def _mui_cell_html(text: str, style_parts: list[str], *, raw_html: str = "") -> str:
+            content_html = raw_html if raw_html else (html.escape(text) if text else "&nbsp;")
+            style = " ".join([part for part in style_parts if str(part).strip()])
+            return f"<div style='{style}'>{content_html}</div>"
+
+        mui_frame = display.copy()
+        for row_idx, row in display.iterrows():
+            row_color = str(summary_df.loc[row_idx, "line_color"]).strip()
+            row_primary_id = str(summary_df.loc[row_idx, "primary_id"]).strip()
+            row_is_selected = (
+                row_primary_id
+                and (
+                    (selected_detail_id and row_primary_id == selected_detail_id)
+                    or (highlighted_summary_id and row_primary_id == highlighted_summary_id)
+                )
+            )
+            row_bg = _muted_rgba_from_hex(row_color, alpha=0.16) if row_is_selected else (dark_td_bg if is_dark_theme else "")
+            row_fg = dark_td_text if is_dark_theme else ""
+            for column_name in display.columns:
+                raw_value = row.get(column_name)
+                style_parts = [
+                    "display: flex;",
+                    "align-items: center;",
+                    "justify-content: center;",
+                    "width: 100%;",
+                    "height: 56px;",
+                    "box-sizing: border-box;",
+                    "padding: 6px 8px;",
+                    "margin: 0;",
+                    "border-radius: 0;",
+                    "white-space: nowrap;",
+                    "text-align: center;",
+                ]
+                if row_bg:
+                    style_parts.append(f"background-color: {row_bg};")
+                if row_fg:
+                    style_parts.append(f"color: {row_fg};")
+
+                cell_text = ""
+                cell_html = ""
+                if column_name == "Line":
+                    cell_text = "■"
+                    style_parts.append("font-weight: 700;")
+                    if row_color:
+                        style_parts.append(f"color: {row_color};")
+                elif column_name == "Thumbnail":
+                    thumbnail_url = str(raw_value or "").strip()
+                    style_parts.extend(["text-align: left;", "justify-content: flex-start;", "padding-left: 0px;"])
+                    if thumbnail_url.lower().startswith(("https://", "http://")):
+                        escaped_url = html.escape(thumbnail_url, quote=True)
+                        cell_html = (
+                            f"<img src=\"{escaped_url}\" "
+                            "style=\"width:84px; height:56px; object-fit:cover; border-radius:6px; display:block;\" />"
+                        )
+                elif column_name in {"First Visible", "Peak", "Last Visible"}:
+                    cell_text = _format_table_time(raw_value)
+                elif column_name == "Framing":
+                    try:
+                        cell_text = f"{float(raw_value):.0f}%"
+                    except (TypeError, ValueError):
+                        cell_text = "--"
+                else:
+                    cell_text = "" if raw_value is None or pd.isna(raw_value) else str(raw_value).strip()
+                    if not cell_text:
+                        cell_text = "--"
+                    if column_name in {
+                        "Target",
+                        "Type",
+                        "Duration",
+                        "Scheduled",
+                        "Apparent size",
+                        "Remaining",
+                        "Direction",
+                        "Max Alt",
+                    }:
+                        style_parts.append("text-align: left;")
+                        style_parts.append("justify-content: flex-start;")
+
+                mui_frame.at[row_idx, column_name] = _mui_cell_html(cell_text, style_parts, raw_html=cell_html)
+
+        clicked_cell = mui_table(
+            mui_frame,
+            enablePagination=True,
+            paginationSizes=[24],
+            customCss="""
+.MuiTableCell-root { padding: 0 !important; }
+.MuiTablePagination-root { display: none !important; }
+""",
+            showHeaders=True,
+            key="sky_summary_mui_table",
+            stickyHeader=False,
+            showIndex=False,
+            enable_sorting=False,
+            return_clicked_cell=True,
+            paperStyle={
+                "width": "100%",
+                "overflow": "visible",
+                "paddingBottom": "0px",
+                "border": "1px solid rgba(148, 163, 184, 0.35)",
+            },
+        )
+        if isinstance(clicked_cell, dict):
+            raw_row = clicked_cell.get("row")
+            try:
+                parsed_row_index = int(raw_row)
+            except (TypeError, ValueError):
+                parsed_row_index = -1
+            if 0 <= parsed_row_index < len(summary_df):
+                selected_rows = [parsed_row_index]
+
+            raw_column = (
+                clicked_cell.get("column")
+                if "column" in clicked_cell
+                else clicked_cell.get("col", clicked_cell.get("field"))
+            )
+            parsed_column_index: int | None = None
+            if isinstance(raw_column, str) and raw_column in mui_frame.columns:
+                parsed_column_index = int(mui_frame.columns.get_loc(raw_column))
+            else:
+                try:
+                    parsed_column_value = int(raw_column)
+                except (TypeError, ValueError):
+                    parsed_column_value = -1
+                if 0 <= parsed_column_value < len(mui_frame.columns):
+                    parsed_column_index = parsed_column_value
+            if parsed_column_index is not None:
+                selected_columns = [parsed_column_index]
+            if selected_rows and parsed_column_index is not None:
+                selected_cells = [(selected_rows[0], parsed_column_index)]
+    else:
+        table_event = st.dataframe(
+            styled,
+            hide_index=True,
+            use_container_width=True,
+            row_height=70,
+            on_select="rerun",
+            selection_mode="single-cell",
+            key="sky_summary_table",
+            column_config=column_config,
+        )
+
+        if table_event is not None:
+            try:
+                selected_rows = list(table_event.selection.rows)
+                selected_columns = list(table_event.selection.columns)
+                selected_cells = list(table_event.selection.cells)
+            except Exception:
+                if isinstance(table_event, dict):
+                    selection_payload = table_event.get("selection", {})
+                    selected_rows = list(selection_payload.get("rows", []))
+                    selected_columns = list(selection_payload.get("columns", []))
+                    selected_cells = list(selection_payload.get("cells", []))
 
     selected_index: int | None = None
     selected_column_index: int | None = None
@@ -379,11 +734,9 @@ def render_sky_position_summary_table(
     if selected_index is not None:
         selected_primary_id = str(summary_df.iloc[selected_index].get("primary_id", ""))
 
-    selection_token = (
-        f"{selected_index}:{selected_column_index}"
-        if selected_index is not None and selected_column_index is not None
-        else ""
-    )
+    selection_token = ""
+    if selected_index is not None:
+        selection_token = f"{selected_index}:{selected_column_index if selected_column_index is not None else '*'}"
     last_selection_token = str(st.session_state.get("sky_summary_last_selection_token", ""))
     selection_changed = bool(selection_token) and selection_token != last_selection_token
     # Keep the last non-empty selection token so unrelated reruns (for example,
@@ -392,54 +745,9 @@ def render_sky_position_summary_table(
         st.session_state["sky_summary_last_selection_token"] = selection_token
 
     current_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", ""))
-    if selection_changed and selected_primary_id and selected_primary_id != current_highlight_id:
+    # Apply row focus whenever a row is selected; this keeps Tips/plots aligned even
+    # when Streamlit emits selection payloads with unstable token shapes.
+    if selected_primary_id and selected_primary_id != current_highlight_id:
         st.session_state["sky_summary_highlight_primary_id"] = selected_primary_id
 
-    list_col_index = int(display.columns.get_loc("List"))
-
-    if (
-        selection_changed
-        and selected_primary_id
-        and selected_column_index is not None
-        and selected_column_index != list_col_index
-    ):
-        current_selected_id = str(st.session_state.get("selected_id") or "").strip()
-        if selected_primary_id != current_selected_id:
-            st.session_state["selected_id"] = selected_primary_id
-            st.session_state[TARGET_DETAIL_MODAL_OPEN_REQUEST_KEY] = True
-            st.rerun()
-
-    if (
-        selection_changed
-        and selected_index is not None
-        and selected_column_index == list_col_index
-        and allow_list_membership_toggle
-    ):
-        action_token = f"{selected_index}:{selected_column_index}"
-        last_action_token = str(st.session_state.get("sky_summary_list_action_token", ""))
-        if action_token != last_action_token:
-            selected_row = summary_df.iloc[selected_index]
-            primary_id = str(selected_row.get("primary_id", ""))
-            was_in_list = bool(selected_row.get("is_in_list", False))
-            if primary_id:
-                if toggle_target_in_list(prefs, preview_list_id, primary_id):
-                    selected_detail_id = str(st.session_state.get("selected_id") or "").strip()
-                    if was_in_list and selected_detail_id and selected_detail_id == primary_id:
-                        st.session_state["selected_id"] = ""
-                        highlighted_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
-                        if highlighted_id == primary_id:
-                            st.session_state["sky_summary_highlight_primary_id"] = ""
-                    st.session_state["sky_summary_list_action_token"] = action_token
-                    persist_and_rerun(prefs)
-                st.session_state["sky_summary_list_action_token"] = action_token
-    else:
-        st.session_state["sky_summary_list_action_token"] = ""
-
-    if allow_list_membership_toggle:
-        st.caption(
-            f"Recommended targets choose the detail target. Use this table to highlight rows and update '{preview_list_name}'."
-        )
-    else:
-        st.caption(
-            f"Recommended targets choose the detail target. '{preview_list_name}' is auto-managed from recent selections."
-        )
+    st.caption("Recommended targets choose the detail target. Use this table to highlight rows.")

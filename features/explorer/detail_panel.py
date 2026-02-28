@@ -29,6 +29,47 @@ def render_detail_panel(
     weather_forecast_day_offset: int = 0,
 ) -> None:
     _refresh_legacy_globals()
+    target_tips_schedules_state_key = "target_tips_schedule_by_target_id"
+    target_tips_schedules_active_list_state_key = "target_tips_schedule_active_list_id"
+
+    def _normalize_target_schedule_map(raw_schedule_map: Any) -> dict[str, dict[str, str]]:
+        normalized: dict[str, dict[str, str]] = {}
+        if not isinstance(raw_schedule_map, dict):
+            return normalized
+        for raw_target_id, raw_schedule_payload in raw_schedule_map.items():
+            target_id = str(raw_target_id).strip()
+            if not target_id or not isinstance(raw_schedule_payload, dict):
+                continue
+            start_clock = _coerce_schedule_clock(raw_schedule_payload.get("start_time"))
+            end_clock = _coerce_schedule_clock(raw_schedule_payload.get("end_time"))
+            if start_clock is None or end_clock is None:
+                continue
+            normalized[target_id] = {
+                "start_time": f"{int(start_clock[0]):02d}:{int(start_clock[1]):02d}",
+                "end_time": f"{int(end_clock[0]):02d}:{int(end_clock[1]):02d}",
+            }
+        return normalized
+
+    def _sync_target_tip_schedules_for_active_list(active_list_id: Any) -> None:
+        normalized_list_id = str(active_list_id or "").strip() or AUTO_RECENT_LIST_ID
+        raw_all_schedules = prefs.get("list_target_schedules")
+        raw_scoped_schedules = (
+            raw_all_schedules.get(normalized_list_id, {})
+            if isinstance(raw_all_schedules, dict)
+            else {}
+        )
+        normalized_scoped_schedules = _normalize_target_schedule_map(raw_scoped_schedules)
+        current_scope = str(st.session_state.get(target_tips_schedules_active_list_state_key, "")).strip()
+        current_scoped_schedules = st.session_state.get(target_tips_schedules_state_key)
+        if (
+            current_scope == normalized_list_id
+            and isinstance(current_scoped_schedules, dict)
+            and current_scoped_schedules == normalized_scoped_schedules
+        ):
+            return
+        st.session_state[target_tips_schedules_state_key] = normalized_scoped_schedules
+        st.session_state[target_tips_schedules_active_list_state_key] = normalized_list_id
+
     def clean_text(value: Any) -> str:
         if value is None:
             return ""
@@ -64,6 +105,68 @@ def render_detail_panel(
         if numeric is None or numeric <= 0.0:
             return None
         return float(numeric)
+
+    def _coerce_schedule_clock(value: Any) -> tuple[int, int] | None:
+        if isinstance(value, datetime):
+            return int(value.hour), int(value.minute)
+        if hasattr(value, "hour") and hasattr(value, "minute"):
+            try:
+                return int(value.hour), int(value.minute)
+            except Exception:
+                return None
+        text = str(value or "").strip()
+        if not text:
+            return None
+        for pattern in ("%H:%M", "%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                return int(parsed.hour), int(parsed.minute)
+            except ValueError:
+                continue
+        return None
+
+    def _resolve_target_schedule_window(
+        target_primary_id: str,
+        *,
+        window_start_local: datetime,
+        window_end_local: datetime,
+    ) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+        schedule_state = st.session_state.get(target_tips_schedules_state_key)
+        if not isinstance(schedule_state, dict):
+            return None
+        schedule_payload = schedule_state.get(str(target_primary_id).strip())
+        if not isinstance(schedule_payload, dict):
+            return None
+
+        start_clock = _coerce_schedule_clock(schedule_payload.get("start_time"))
+        end_clock = _coerce_schedule_clock(schedule_payload.get("end_time"))
+        if start_clock is None or end_clock is None:
+            return None
+
+        window_start_ts = pd.Timestamp(window_start_local)
+        window_end_ts = pd.Timestamp(window_end_local)
+        if window_end_ts <= window_start_ts:
+            return None
+
+        window_day_start = window_start_ts.normalize()
+        schedule_start = window_day_start + pd.Timedelta(hours=int(start_clock[0]), minutes=int(start_clock[1]))
+        schedule_end = window_day_start + pd.Timedelta(hours=int(end_clock[0]), minutes=int(end_clock[1]))
+        if schedule_end <= schedule_start:
+            schedule_end += pd.Timedelta(days=1)
+        # If the night window spans midnight, AM clock times should map to the
+        # overnight segment (next calendar day), not the same-day morning.
+        if (
+            window_end_ts.normalize() > window_start_ts.normalize()
+            and schedule_start < window_start_ts
+        ):
+            schedule_start += pd.Timedelta(days=1)
+            schedule_end += pd.Timedelta(days=1)
+
+        clipped_start = max(schedule_start, window_start_ts)
+        clipped_end = min(schedule_end, window_end_ts)
+        if clipped_end <= clipped_start:
+            return None
+        return pd.Timestamp(clipped_start), pd.Timestamp(clipped_end)
 
     def _compute_moon_track_for_window(
         *,
@@ -117,7 +220,7 @@ def render_detail_panel(
                 start_local_iso=pd.Timestamp(start_local).isoformat(),
                 end_local_iso=pd.Timestamp(end_local).isoformat(),
                 sample_minutes=1,
-                obstructions=(prefs.get("obstructions") if isinstance(prefs.get("obstructions"), dict) else None),
+                obstructions=obstructions or None,
             )
             if isinstance(payload, dict):
                 return payload
@@ -137,6 +240,323 @@ def render_detail_panel(
         active_telescope = telescope_lookup.get(active_telescope_id) if active_telescope_id else None
         return active_telescope if isinstance(active_telescope, dict) else None
 
+    def _normalized_obstructions_signature(raw_obstructions: Any) -> tuple[tuple[str, float], ...]:
+        if not isinstance(raw_obstructions, dict):
+            return tuple()
+        normalized_items: list[tuple[str, float]] = []
+        for az_bucket, min_alt in raw_obstructions.items():
+            try:
+                min_alt_value = float(min_alt)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(min_alt_value):
+                continue
+            normalized_items.append((str(az_bucket), round(float(min_alt_value), 3)))
+        normalized_items.sort(key=lambda item: item[0])
+        return tuple(normalized_items)
+
+    def _get_track_and_events_cached(
+        *,
+        ra_deg: float,
+        dec_deg: float,
+        lat: float,
+        lon: float,
+        start_local: datetime,
+        end_local: datetime,
+        obstructions: dict[str, Any],
+    ) -> tuple[pd.DataFrame, dict[str, pd.Series | None]]:
+        cache_key = "detail_panel_track_payload_cache_v1"
+        obstructions_signature = _normalized_obstructions_signature(obstructions)
+        signature = (
+            round(float(ra_deg), 7),
+            round(float(dec_deg), 7),
+            round(float(lat), 7),
+            round(float(lon), 7),
+            pd.Timestamp(start_local).isoformat(),
+            pd.Timestamp(end_local).isoformat(),
+            obstructions_signature,
+        )
+        cache_state = st.session_state.get(cache_key)
+        if not isinstance(cache_state, dict):
+            cache_state = {}
+        cached_payload = cache_state.get(signature)
+        if isinstance(cached_payload, dict):
+            cached_track = cached_payload.get("track")
+            cached_events = cached_payload.get("events")
+            if isinstance(cached_track, pd.DataFrame) and isinstance(cached_events, dict):
+                return cached_track, cached_events
+
+        track_payload = compute_track(
+            ra_deg=ra_deg,
+            dec_deg=dec_deg,
+            lat=lat,
+            lon=lon,
+            start_local=start_local,
+            end_local=end_local,
+            obstructions=obstructions,
+        )
+        events_payload = extract_events(track_payload)
+        cache_state[signature] = {
+            "track": track_payload,
+            "events": events_payload,
+        }
+        while len(cache_state) > 512:
+            oldest_signature = next(iter(cache_state))
+            cache_state.pop(oldest_signature, None)
+        st.session_state[cache_key] = cache_state
+        return track_payload, events_payload
+
+    def _get_night_context_cached(
+        *,
+        lat: float,
+        lon: float,
+        tz_name: str,
+        window_start_local: datetime,
+        window_end_local: datetime,
+        obstructions: dict[str, Any],
+        temperature_unit_value: str,
+    ) -> dict[str, Any]:
+        cache_key = "detail_panel_night_context_cache_v1"
+        signature = (
+            round(float(lat), 7),
+            round(float(lon), 7),
+            str(tz_name),
+            pd.Timestamp(window_start_local).isoformat(),
+            pd.Timestamp(window_end_local).isoformat(),
+            str(temperature_unit_value),
+            _normalized_obstructions_signature(obstructions),
+        )
+        cache_state = st.session_state.get(cache_key)
+        if not isinstance(cache_state, dict):
+            cache_state = {}
+        cached_payload = cache_state.get(signature)
+        if isinstance(cached_payload, dict):
+            return cached_payload
+
+        hourly_weather_rows = fetch_hourly_weather(
+            lat=lat,
+            lon=lon,
+            tz_name=tz_name,
+            start_local_iso=window_start_local.isoformat(),
+            end_local_iso=window_end_local.isoformat(),
+            hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+        )
+        nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit_value)
+        temperatures, cloud_cover_by_hour, weather_by_hour = build_hourly_weather_maps(hourly_weather_rows)
+        payload = {
+            "hourly_weather_rows": hourly_weather_rows,
+            "nightly_weather_alert_emojis": nightly_weather_alert_emojis,
+            "temperatures": temperatures,
+            "cloud_cover_by_hour": cloud_cover_by_hour,
+            "weather_by_hour": weather_by_hour,
+            "moon_track": _compute_moon_track_for_window(
+                start_local=window_start_local,
+                end_local=window_end_local,
+                tz_name=tz_name,
+            ),
+            "moon_phase_key": _compute_moon_phase_key_for_window(
+                start_local=window_start_local,
+                end_local=window_end_local,
+                tz_name=tz_name,
+            ),
+            "lunar_eclipse_visibility": _compute_lunar_eclipse_visibility_for_window(
+                start_local=window_start_local,
+                end_local=window_end_local,
+                tz_name=tz_name,
+            ),
+        }
+        cache_state[signature] = payload
+        while len(cache_state) > 64:
+            oldest_signature = next(iter(cache_state))
+            cache_state.pop(oldest_signature, None)
+        st.session_state[cache_key] = cache_state
+        return payload
+
+    def _summary_schedule_mode_active() -> bool:
+        mode_value = str(st.session_state.get("sky_summary_table_mode", "Info")).strip().lower()
+        return mode_value == "schedule"
+
+    def _clip_track_to_schedule_window(
+        track_frame: pd.DataFrame | None,
+        schedule_window: tuple[pd.Timestamp, pd.Timestamp] | None,
+    ) -> pd.DataFrame | None:
+        if not isinstance(track_frame, pd.DataFrame) or track_frame.empty or schedule_window is None:
+            return track_frame
+        try:
+            start_ts = pd.Timestamp(schedule_window[0])
+            end_ts = pd.Timestamp(schedule_window[1])
+        except Exception:
+            return track_frame
+        if end_ts <= start_ts:
+            return track_frame
+        local_times = pd.to_datetime(track_frame.get("time_local"), errors="coerce")
+        if not isinstance(local_times, pd.Series):
+            return pd.DataFrame(columns=track_frame.columns)
+
+        working = track_frame.copy()
+        working["_time_local"] = local_times
+        working = working.loc[working["_time_local"].notna()].copy()
+        if working.empty:
+            return pd.DataFrame(columns=track_frame.columns)
+        working = working.sort_values("_time_local").reset_index(drop=True)
+
+        first_time = pd.Timestamp(working["_time_local"].iloc[0])
+        last_time = pd.Timestamp(working["_time_local"].iloc[-1])
+        if end_ts < first_time or start_ts > last_time:
+            return pd.DataFrame(columns=track_frame.columns)
+
+        clipped = working.loc[
+            (working["_time_local"] >= start_ts) & (working["_time_local"] <= end_ts)
+        ].copy()
+
+        def _as_float(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(parsed):
+                return None
+            return float(parsed)
+
+        def _interp_azimuth(left_az: float, right_az: float, fraction: float) -> float:
+            left = float(left_az) % 360.0
+            right = float(right_az) % 360.0
+            delta = ((right - left + 540.0) % 360.0) - 180.0
+            return (left + (delta * float(fraction))) % 360.0
+
+        def _interpolated_row(target_time: pd.Timestamp) -> pd.Series | None:
+            time_values = pd.to_datetime(working["_time_local"], errors="coerce")
+            if not isinstance(time_values, pd.Series):
+                return None
+            time_ns = time_values.astype("int64").to_numpy(dtype=np.int64)
+            if time_ns.size == 0:
+                return None
+
+            target_ns = int(pd.Timestamp(target_time).value)
+            if target_ns < int(time_ns[0]) or target_ns > int(time_ns[-1]):
+                return None
+
+            right_idx = int(np.searchsorted(time_ns, target_ns, side="left"))
+            if right_idx < len(time_ns) and int(time_ns[right_idx]) == target_ns:
+                exact_row = working.iloc[right_idx].copy()
+                exact_row["_time_local"] = pd.Timestamp(target_time)
+                exact_row["time_local"] = pd.Timestamp(target_time)
+                return exact_row
+            if right_idx <= 0 or right_idx >= len(time_ns):
+                return None
+
+            left_idx = right_idx - 1
+            left_ns = int(time_ns[left_idx])
+            right_ns = int(time_ns[right_idx])
+            if right_ns <= left_ns:
+                return None
+            fraction = float((target_ns - left_ns) / float(right_ns - left_ns))
+            fraction = max(0.0, min(1.0, fraction))
+
+            left_row = working.iloc[left_idx]
+            right_row = working.iloc[right_idx]
+            row = left_row.copy()
+            row["_time_local"] = pd.Timestamp(target_time)
+            row["time_local"] = pd.Timestamp(target_time)
+
+            left_alt = _as_float(left_row.get("alt"))
+            right_alt = _as_float(right_row.get("alt"))
+            if left_alt is not None and right_alt is not None:
+                row["alt"] = left_alt + ((right_alt - left_alt) * fraction)
+            elif left_alt is not None:
+                row["alt"] = left_alt
+            elif right_alt is not None:
+                row["alt"] = right_alt
+
+            left_az = _as_float(left_row.get("az"))
+            right_az = _as_float(right_row.get("az"))
+            if left_az is not None and right_az is not None:
+                row["az"] = _interp_azimuth(left_az, right_az, fraction)
+            elif left_az is not None:
+                row["az"] = left_az % 360.0
+            elif right_az is not None:
+                row["az"] = right_az % 360.0
+
+            left_min_alt = _as_float(left_row.get("min_alt_required"))
+            right_min_alt = _as_float(right_row.get("min_alt_required"))
+            if left_min_alt is not None and right_min_alt is not None:
+                row["min_alt_required"] = left_min_alt + ((right_min_alt - left_min_alt) * fraction)
+            elif left_min_alt is not None:
+                row["min_alt_required"] = left_min_alt
+            elif right_min_alt is not None:
+                row["min_alt_required"] = right_min_alt
+
+            interp_az = _as_float(row.get("az"))
+            if interp_az is not None and "wind16" in row.index:
+                try:
+                    row["wind16"] = az_to_wind16(interp_az)
+                except Exception:
+                    pass
+
+            interp_alt = _as_float(row.get("alt"))
+            interp_min_alt = _as_float(row.get("min_alt_required"))
+            if "visible" in row.index and interp_alt is not None:
+                if interp_min_alt is None:
+                    row["visible"] = bool(interp_alt >= 0.0)
+                else:
+                    row["visible"] = bool((interp_alt >= 0.0) and (interp_alt >= interp_min_alt))
+            return row
+
+        clipped_times = pd.to_datetime(clipped.get("_time_local"), errors="coerce")
+        has_start = bool(
+            isinstance(clipped_times, pd.Series)
+            and clipped_times.notna().any()
+            and bool((clipped_times == start_ts).any())
+        )
+        has_end = bool(
+            isinstance(clipped_times, pd.Series)
+            and clipped_times.notna().any()
+            and bool((clipped_times == end_ts).any())
+        )
+
+        if (start_ts >= first_time) and (start_ts <= last_time) and (not has_start):
+            start_row = _interpolated_row(start_ts)
+            if start_row is not None:
+                clipped = pd.concat([clipped, pd.DataFrame([start_row])], ignore_index=True)
+        if (end_ts >= first_time) and (end_ts <= last_time) and (not has_end):
+            end_row = _interpolated_row(end_ts)
+            if end_row is not None:
+                clipped = pd.concat([clipped, pd.DataFrame([end_row])], ignore_index=True)
+
+        if clipped.empty:
+            return pd.DataFrame(columns=track_frame.columns)
+
+        clipped = clipped.sort_values("_time_local").drop_duplicates(subset=["_time_local"], keep="first")
+        clipped["time_local"] = pd.to_datetime(clipped["_time_local"], errors="coerce")
+        clipped = clipped.drop(columns=["_time_local"], errors="ignore")
+        return clipped.reindex(columns=track_frame.columns)
+
+    def _plot_payload_for_mode(
+        track_frame: pd.DataFrame | None,
+        events_payload: dict[str, pd.Series | None] | None,
+        schedule_window: tuple[pd.Timestamp, pd.Timestamp] | None,
+        *,
+        schedule_mode_active: bool,
+    ) -> tuple[pd.DataFrame | None, dict[str, pd.Series | None], tuple[pd.Timestamp, pd.Timestamp] | None]:
+        normalized_events = events_payload if isinstance(events_payload, dict) else {}
+        if not schedule_mode_active or schedule_window is None:
+            if not schedule_mode_active:
+                return track_frame, normalized_events, schedule_window
+            if isinstance(track_frame, pd.DataFrame):
+                return pd.DataFrame(columns=track_frame.columns), {}, None
+            return pd.DataFrame(), {}, None
+        clipped_track = _clip_track_to_schedule_window(track_frame, schedule_window)
+        if isinstance(clipped_track, pd.DataFrame) and not clipped_track.empty:
+            clipped_events = extract_events(clipped_track)
+            # In Schedule mode, the clipped path itself defines the visible window;
+            # suppress First/Last labels so the chart emphasizes the schedule segment.
+            clipped_events["first_visible"] = None
+            clipped_events["last_visible"] = None
+            return clipped_track, clipped_events, None
+        if isinstance(track_frame, pd.DataFrame):
+            return pd.DataFrame(columns=track_frame.columns), {}, None
+        return pd.DataFrame(), {}, None
+
     try:
         normalized_forecast_day_offset = int(weather_forecast_day_offset)
     except (TypeError, ValueError):
@@ -153,6 +573,7 @@ def render_detail_panel(
     location = prefs["location"]
     location_lat = float(location["lat"])
     location_lon = float(location["lon"])
+    obstructions = prefs.get("obstructions") if isinstance(prefs.get("obstructions"), dict) else {}
     recommendation_window_start, recommendation_window_end, recommendation_tzinfo = weather_forecast_window(
         location_lat,
         location_lon,
@@ -197,31 +618,29 @@ def render_detail_panel(
             active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
             active_preview_list_members = set(active_preview_list_ids)
             preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+        _sync_target_tip_schedules_for_active_list(active_preview_list_id)
 
-        hourly_weather_rows = fetch_hourly_weather(
+        night_context = _get_night_context_cached(
             lat=location_lat,
             lon=location_lon,
             tz_name=tzinfo.key,
-            start_local_iso=window_start.isoformat(),
-            end_local_iso=window_end.isoformat(),
-            hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+            window_start_local=window_start,
+            window_end_local=window_end,
+            obstructions=obstructions,
+            temperature_unit_value=temperature_unit,
         )
-        nightly_weather_alert_emojis = collect_night_weather_alert_emojis(hourly_weather_rows, temperature_unit)
-        temperatures, _, weather_by_hour = build_hourly_weather_maps(hourly_weather_rows)
-        moon_track = _compute_moon_track_for_window(
-            start_local=window_start,
-            end_local=window_end,
-            tz_name=tzinfo.key,
-        )
-        moon_phase_key = _compute_moon_phase_key_for_window(
-            start_local=window_start,
-            end_local=window_end,
-            tz_name=tzinfo.key,
-        )
-        lunar_eclipse_visibility = _compute_lunar_eclipse_visibility_for_window(
-            start_local=window_start,
-            end_local=window_end,
-            tz_name=tzinfo.key,
+        hourly_weather_rows = list(night_context.get("hourly_weather_rows", []))
+        nightly_weather_alert_emojis = list(night_context.get("nightly_weather_alert_emojis", []))
+        temperatures = dict(night_context.get("temperatures", {}))
+        weather_by_hour = dict(night_context.get("weather_by_hour", {}))
+        moon_track = night_context.get("moon_track")
+        if not isinstance(moon_track, pd.DataFrame):
+            moon_track = pd.DataFrame()
+        moon_phase_key = night_context.get("moon_phase_key")
+        lunar_eclipse_visibility = (
+            dict(night_context.get("lunar_eclipse_visibility", {}))
+            if isinstance(night_context.get("lunar_eclipse_visibility", {}), dict)
+            else {}
         )
 
         with st.container(border=True):
@@ -247,14 +666,14 @@ def render_detail_panel(
                     continue
 
                 try:
-                    preview_track = compute_track(
+                    preview_track, preview_events = _get_track_and_events_cached(
                         ra_deg=preview_ra,
                         dec_deg=preview_dec,
                         lat=location_lat,
                         lon=location_lon,
                         start_local=window_start,
                         end_local=window_end,
-                        obstructions=prefs["obstructions"],
+                        obstructions=obstructions,
                     )
                 except Exception:
                     continue
@@ -283,8 +702,13 @@ def render_detail_panel(
                             if summary_highlight_id == preview_target_id
                             else PATH_LINE_WIDTH_OVERLAY_DEFAULT
                         ),
+                        "schedule_window": _resolve_target_schedule_window(
+                            preview_target_id,
+                            window_start_local=window_start,
+                            window_end_local=window_end,
+                        ),
                         "track": preview_track,
-                        "events": extract_events(preview_track),
+                        "events": preview_events,
                     }
                 )
 
@@ -329,6 +753,7 @@ def render_detail_panel(
 
             unobstructed_area_tracks: list[dict[str, Any]] = []
             focused_preview_track: dict[str, Any] | None = None
+            schedule_mode_active = False
             with summary_container:
                 summary_col, tips_col = st.columns([3, 1], gap="medium")
                 with summary_col:
@@ -342,6 +767,7 @@ def render_detail_panel(
                         show_remaining=show_remaining_column,
                         now_local=pd.Timestamp(local_now),
                     )
+                    schedule_mode_active = _summary_schedule_mode_active()
                     summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
                     unobstructed_area_tracks = [
                         {
@@ -363,14 +789,56 @@ def render_detail_panel(
                     )
                 with tips_col:
                     with st.container(border=True):
+                        summary_ids = {
+                            str(row.get("primary_id", "")).strip()
+                            for row in summary_rows
+                            if str(row.get("primary_id", "")).strip()
+                        }
+                        tips_focus_id = ""
+                        if summary_highlight_id and summary_highlight_id in summary_ids:
+                            tips_focus_id = summary_highlight_id
+                        elif focused_preview_track is not None:
+                            tips_focus_id = str(focused_preview_track.get("primary_id", "")).strip()
+                        elif summary_rows:
+                            tips_focus_id = str(summary_rows[0].get("primary_id", "")).strip()
+
+                        tips_track_by_id: dict[str, pd.DataFrame | None] = {}
+                        for preview_track_payload in preview_tracks:
+                            preview_track_id = str(preview_track_payload.get("primary_id", "")).strip()
+                            if not preview_track_id:
+                                continue
+                            preview_track_df = preview_track_payload.get("track")
+                            tips_track_by_id[preview_track_id] = (
+                                preview_track_df if isinstance(preview_track_df, pd.DataFrame) else None
+                            )
+
+                        tips_data_by_id: dict[str, pd.Series | dict[str, Any] | None] = {}
+                        for _, preview_target in preview_targets.iterrows():
+                            preview_target_id = str(preview_target.get("primary_id", "")).strip()
+                            if preview_target_id:
+                                tips_data_by_id[preview_target_id] = preview_target
+
+                        tips_label_by_id: dict[str, str] = {}
+                        for row in summary_rows:
+                            row_id = str(row.get("primary_id", "")).strip()
+                            if not row_id:
+                                continue
+                            row_label = str(row.get("target", "")).strip()
+                            if row_label:
+                                tips_label_by_id[row_id] = row_label
+
+                        tips_focus_label = tips_label_by_id.get(tips_focus_id, "No target selected")
+                        tips_focus_data = tips_data_by_id.get(tips_focus_id)
+                        tips_focus_track = tips_track_by_id.get(tips_focus_id)
                         render_target_tips_panel(
-                            "",
-                            "No target selected",
-                            None,
-                            None,
+                            tips_focus_id,
+                            tips_focus_label,
+                            tips_focus_data,
+                            tips_focus_track,
                             summary_rows,
                             nightly_weather_alert_emojis,
                             hourly_weather_rows,
+                            prefs,
                             temperature_unit=temperature_unit,
                             use_12_hour=use_12_hour,
                             local_now=local_now,
@@ -381,11 +849,38 @@ def render_detail_panel(
             with plots_container:
                 path_figure: go.Figure | None = None
                 if focused_preview_track is not None:
+                    focused_preview_id = str(focused_preview_track.get("primary_id", "")).strip()
+                    plot_tracks: list[dict[str, Any]] = []
+                    for payload in unobstructed_area_tracks:
+                        plot_track, plot_events, plot_schedule_window = _plot_payload_for_mode(
+                            payload.get("track"),
+                            payload.get("events", {}),
+                            payload.get("schedule_window"),
+                            schedule_mode_active=schedule_mode_active,
+                        )
+                        plot_tracks.append(
+                            {
+                                **payload,
+                                "track": plot_track,
+                                "events": plot_events,
+                                "schedule_window": plot_schedule_window,
+                            }
+                        )
+                    focused_preview_track_for_plot = next(
+                        (
+                            payload
+                            for payload in plot_tracks
+                            if str(payload.get("primary_id", "")).strip() == focused_preview_id
+                        ),
+                        (plot_tracks[0] if plot_tracks else None),
+                    )
+                    if focused_preview_track_for_plot is None:
+                        focused_preview_track_for_plot = focused_preview_track
                     overlay_tracks_for_path = [
                         payload
-                        for payload in unobstructed_area_tracks
+                        for payload in plot_tracks
                         if str(payload.get("primary_id", "")).strip()
-                        != str(focused_preview_track.get("primary_id", "")).strip()
+                        != str(focused_preview_track_for_plot.get("primary_id", "")).strip()
                     ]
                     path_style = st.segmented_control(
                         "Target Paths Style",
@@ -396,16 +891,17 @@ def render_detail_panel(
                     if path_style == "Radial":
                         dome_view = st.toggle("Dome View", value=True, key="dome_view_preference")
                         path_figure = build_path_plot_radial(
-                            track=focused_preview_track.get("track"),
-                            events=focused_preview_track.get("events", {}),
-                            obstructions=prefs["obstructions"],
+                            track=focused_preview_track_for_plot.get("track"),
+                            events=focused_preview_track_for_plot.get("events", {}),
+                            obstructions=obstructions,
                             dome_view=dome_view,
-                            selected_label=str(focused_preview_track.get("label", "Preview target")),
-                            selected_emissions=str(focused_preview_track.get("emission_lines_display") or ""),
-                            selected_color=str(focused_preview_track.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)),
+                            selected_label=str(focused_preview_track_for_plot.get("label", "Preview target")),
+                            selected_emissions=str(focused_preview_track_for_plot.get("emission_lines_display") or ""),
+                            selected_color=str(focused_preview_track_for_plot.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)),
                             selected_line_width=float(
-                                focused_preview_track.get("line_width", PATH_LINE_WIDTH_PRIMARY_DEFAULT)
+                                focused_preview_track_for_plot.get("line_width", PATH_LINE_WIDTH_PRIMARY_DEFAULT)
                             ),
+                            selected_schedule_window=focused_preview_track_for_plot.get("schedule_window"),
                             use_12_hour=use_12_hour,
                             overlay_tracks=overlay_tracks_for_path,
                             mount_choice=plot_mount_choice,
@@ -415,15 +911,16 @@ def render_detail_panel(
                         )
                     else:
                         path_figure = build_path_plot(
-                            track=focused_preview_track.get("track"),
-                            events=focused_preview_track.get("events", {}),
-                            obstructions=prefs["obstructions"],
-                            selected_label=str(focused_preview_track.get("label", "Preview target")),
-                            selected_emissions=str(focused_preview_track.get("emission_lines_display") or ""),
-                            selected_color=str(focused_preview_track.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)),
+                            track=focused_preview_track_for_plot.get("track"),
+                            events=focused_preview_track_for_plot.get("events", {}),
+                            obstructions=obstructions,
+                            selected_label=str(focused_preview_track_for_plot.get("label", "Preview target")),
+                            selected_emissions=str(focused_preview_track_for_plot.get("emission_lines_display") or ""),
+                            selected_color=str(focused_preview_track_for_plot.get("color", OBJECT_TYPE_GROUP_COLOR_DEFAULT)),
                             selected_line_width=float(
-                                focused_preview_track.get("line_width", PATH_LINE_WIDTH_PRIMARY_DEFAULT)
+                                focused_preview_track_for_plot.get("line_width", PATH_LINE_WIDTH_PRIMARY_DEFAULT)
                             ),
+                            selected_schedule_window=focused_preview_track_for_plot.get("schedule_window"),
                             use_12_hour=use_12_hour,
                             overlay_tracks=overlay_tracks_for_path,
                             mount_choice=plot_mount_choice,
@@ -445,7 +942,7 @@ def render_detail_panel(
                 with area_col:
                     st.plotly_chart(
                         build_unobstructed_altitude_area_plot(
-                            unobstructed_area_tracks,
+                            plot_tracks if focused_preview_track is not None else unobstructed_area_tracks,
                             use_12_hour=use_12_hour,
                             temperature_by_hour=temperatures,
                             weather_by_hour=weather_by_hour,
@@ -932,6 +1429,7 @@ def render_detail_panel(
         active_preview_list_ids = get_list_ids(prefs, active_preview_list_id)
         active_preview_list_members = set(active_preview_list_ids)
         preview_list_is_system = is_system_list(prefs, active_preview_list_id)
+    _sync_target_tip_schedules_for_active_list(active_preview_list_id)
 
     preview_tracks: list[dict[str, Any]] = []
     preview_targets = subset_by_id_list(catalog, active_preview_list_ids)
@@ -949,14 +1447,14 @@ def render_detail_panel(
             continue
 
         try:
-            preview_track = compute_track(
+            preview_track, preview_events = _get_track_and_events_cached(
                 ra_deg=preview_ra,
                 dec_deg=preview_dec,
                 lat=location_lat,
                 lon=location_lon,
                 start_local=window_start,
                 end_local=window_end,
-                obstructions=prefs["obstructions"],
+                obstructions=obstructions,
             )
         except Exception:
             continue
@@ -985,8 +1483,13 @@ def render_detail_panel(
                     if summary_highlight_id == preview_target_id
                     else PATH_LINE_WIDTH_OVERLAY_DEFAULT
                 ),
+                "schedule_window": _resolve_target_schedule_window(
+                    preview_target_id,
+                    window_start_local=window_start,
+                    window_end_local=window_end,
+                ),
                 "track": preview_track,
-                "events": extract_events(preview_track),
+                "events": preview_events,
             }
         )
 
@@ -1021,55 +1524,66 @@ def render_detail_panel(
         st.warning("Selected target has non-finite coordinates, so path/forecast plots are unavailable.")
         return
 
-    track = compute_track(
+    track, events = _get_track_and_events_cached(
         ra_deg=selected_ra,
         dec_deg=selected_dec,
         lat=location_lat,
         lon=location_lon,
         start_local=window_start,
         end_local=window_end,
-        obstructions=prefs["obstructions"],
+        obstructions=obstructions,
+    )
+    selected_schedule_window = _resolve_target_schedule_window(
+        target_id,
+        window_start_local=window_start,
+        window_end_local=window_end,
     )
     forecast_track = track
     if normalized_forecast_day_offset > 0:
         try:
-            forecast_track = compute_track(
+            forecast_track, _ = _get_track_and_events_cached(
                 ra_deg=selected_ra,
                 dec_deg=selected_dec,
                 lat=location_lat,
                 lon=location_lon,
                 start_local=forecast_window_start,
                 end_local=forecast_window_end,
-                obstructions=prefs["obstructions"],
+                obstructions=obstructions,
             )
         except Exception:
             forecast_track = track
-    events = extract_events(track)
-    hourly_weather_rows = fetch_hourly_weather(
+    forecast_night_context = _get_night_context_cached(
         lat=location_lat,
         lon=location_lon,
         tz_name=tzinfo.key,
-        start_local_iso=forecast_window_start.isoformat(),
-        end_local_iso=forecast_window_end.isoformat(),
-        hourly_fields=EXTENDED_FORECAST_HOURLY_FIELDS,
+        window_start_local=forecast_window_start,
+        window_end_local=forecast_window_end,
+        obstructions=obstructions,
+        temperature_unit_value=temperature_unit,
     )
-    forecast_hourly_weather_rows = hourly_weather_rows
-    nightly_weather_alert_emojis = collect_night_weather_alert_emojis(forecast_hourly_weather_rows, temperature_unit)
-    temperatures, cloud_cover_by_hour, weather_by_hour = build_hourly_weather_maps(forecast_hourly_weather_rows)
-    moon_track = _compute_moon_track_for_window(
-        start_local=window_start,
-        end_local=window_end,
+    forecast_hourly_weather_rows = list(forecast_night_context.get("hourly_weather_rows", []))
+    hourly_weather_rows = forecast_hourly_weather_rows
+    nightly_weather_alert_emojis = list(forecast_night_context.get("nightly_weather_alert_emojis", []))
+    temperatures = dict(forecast_night_context.get("temperatures", {}))
+    cloud_cover_by_hour = dict(forecast_night_context.get("cloud_cover_by_hour", {}))
+    weather_by_hour = dict(forecast_night_context.get("weather_by_hour", {}))
+    plot_night_context = _get_night_context_cached(
+        lat=location_lat,
+        lon=location_lon,
         tz_name=tzinfo.key,
+        window_start_local=window_start,
+        window_end_local=window_end,
+        obstructions=obstructions,
+        temperature_unit_value=temperature_unit,
     )
-    moon_phase_key = _compute_moon_phase_key_for_window(
-        start_local=window_start,
-        end_local=window_end,
-        tz_name=tzinfo.key,
-    )
-    lunar_eclipse_visibility = _compute_lunar_eclipse_visibility_for_window(
-        start_local=window_start,
-        end_local=window_end,
-        tz_name=tzinfo.key,
+    moon_track = plot_night_context.get("moon_track")
+    if not isinstance(moon_track, pd.DataFrame):
+        moon_track = pd.DataFrame()
+    moon_phase_key = plot_night_context.get("moon_phase_key")
+    lunar_eclipse_visibility = (
+        dict(plot_night_context.get("lunar_eclipse_visibility", {}))
+        if isinstance(plot_night_context.get("lunar_eclipse_visibility", {}), dict)
+        else {}
     )
     if normalized_forecast_day_offset <= 0:
         detail_hourly_period_label = "Tonight"
@@ -1090,47 +1604,8 @@ def render_detail_panel(
             f"Last-visible {format_time(events['last_visible'], use_12_hour=use_12_hour)}"
         )
         st.caption(f"Overlaying list: {active_preview_list_name} ({len(preview_tracks)} companion targets)")
-
-        path_style = st.segmented_control(
-            "Target Paths Style",
-            options=["Line", "Radial"],
-            default="Line",
-            key="path_style_preference",
-        )
-        if path_style == "Radial":
-            dome_view = st.toggle("Dome View", value=True, key="dome_view_preference")
-            path_figure = build_path_plot_radial(
-                track=track,
-                events=events,
-                obstructions=prefs["obstructions"],
-                dome_view=dome_view,
-                selected_label=selected_label,
-                selected_emissions=emission_details_display,
-                selected_color=selected_color,
-                selected_line_width=selected_line_width,
-                use_12_hour=use_12_hour,
-                overlay_tracks=preview_tracks,
-                mount_choice=plot_mount_choice,
-                moon_track=moon_track,
-                moon_phase_key=moon_phase_key,
-                eclipse_visibility=lunar_eclipse_visibility,
-            )
-        else:
-            path_figure = build_path_plot(
-                track=track,
-                events=events,
-                obstructions=prefs["obstructions"],
-                selected_label=selected_label,
-                selected_emissions=emission_details_display,
-                selected_color=selected_color,
-                selected_line_width=selected_line_width,
-                use_12_hour=use_12_hour,
-                overlay_tracks=preview_tracks,
-                mount_choice=plot_mount_choice,
-                moon_track=moon_track,
-                moon_phase_key=moon_phase_key,
-                eclipse_visibility=lunar_eclipse_visibility,
-            )
+        plots_container = st.container()
+        summary_container = st.container()
 
         should_animate_weather_alerts = normalized_forecast_day_offset == 0
         if let_it_rain is not None and should_animate_weather_alerts and nightly_weather_alert_emojis:
@@ -1174,6 +1649,117 @@ def render_detail_panel(
                 else [str(item) for item in active_preview_list_ids]
             ),
         )
+        local_now = datetime.now(tzinfo)
+        show_remaining_column = window_start <= local_now <= window_end
+        with summary_container:
+            summary_col, tips_col = st.columns([3, 1], gap="medium")
+            schedule_mode_active = False
+            with summary_col:
+                render_sky_position_summary_table(
+                    summary_rows,
+                    prefs,
+                    use_12_hour=use_12_hour,
+                    preview_list_id=active_preview_list_id,
+                    preview_list_name=active_preview_list_name,
+                    allow_list_membership_toggle=(not preview_list_is_system),
+                    show_remaining=show_remaining_column,
+                    now_local=pd.Timestamp(local_now),
+                )
+                schedule_mode_active = _summary_schedule_mode_active()
+            with tips_col:
+                summary_ids = {
+                    str(row.get("primary_id", "")).strip()
+                    for row in summary_rows
+                    if str(row.get("primary_id", "")).strip()
+                }
+                tips_focus_id = target_id
+                summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+                if summary_highlight_id and summary_highlight_id in summary_ids:
+                    tips_focus_id = summary_highlight_id
+
+                tips_track_by_id: dict[str, pd.DataFrame | None] = {target_id: track}
+                for preview_track_payload in preview_tracks:
+                    preview_track_id = str(preview_track_payload.get("primary_id", "")).strip()
+                    if not preview_track_id:
+                        continue
+                    preview_track_df = preview_track_payload.get("track")
+                    tips_track_by_id[preview_track_id] = (
+                        preview_track_df if isinstance(preview_track_df, pd.DataFrame) else None
+                    )
+
+                tips_data_by_id: dict[str, pd.Series | dict[str, Any] | None] = {target_id: selected}
+                for _, preview_target in preview_targets.iterrows():
+                    preview_target_id = str(preview_target.get("primary_id", "")).strip()
+                    if preview_target_id:
+                        tips_data_by_id[preview_target_id] = preview_target
+
+                tips_label_by_id: dict[str, str] = {}
+                for row in summary_rows:
+                    row_id = str(row.get("primary_id", "")).strip()
+                    if not row_id:
+                        continue
+                    row_label = str(row.get("target", "")).strip()
+                    if row_label:
+                        tips_label_by_id[row_id] = row_label
+                tips_label_by_id.setdefault(target_id, selected_label)
+
+                tips_focus_label = tips_label_by_id.get(tips_focus_id, target_id)
+                tips_focus_data = tips_data_by_id.get(tips_focus_id)
+                tips_focus_track = tips_track_by_id.get(tips_focus_id)
+
+                with st.container(border=True):
+                    render_target_tips_panel(
+                        tips_focus_id,
+                        tips_focus_label,
+                        tips_focus_data,
+                        tips_focus_track,
+                        summary_rows,
+                        nightly_weather_alert_emojis,
+                        hourly_weather_rows,
+                        prefs,
+                        temperature_unit=temperature_unit,
+                        use_12_hour=use_12_hour,
+                        local_now=local_now,
+                        window_start=window_start,
+                        window_end=window_end,
+                    )
+
+        summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
+        selected_line_width = (
+            (PATH_LINE_WIDTH_PRIMARY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
+            if summary_highlight_id == target_id
+            else PATH_LINE_WIDTH_PRIMARY_DEFAULT
+        )
+        for preview_track in preview_tracks:
+            preview_track_id = str(preview_track.get("primary_id", "")).strip()
+            preview_track["line_width"] = (
+                (PATH_LINE_WIDTH_OVERLAY_DEFAULT * PATH_LINE_WIDTH_SELECTION_MULTIPLIER)
+                if summary_highlight_id == preview_track_id
+                else PATH_LINE_WIDTH_OVERLAY_DEFAULT
+            )
+        plot_track, plot_events, plot_selected_schedule_window = _plot_payload_for_mode(
+            track,
+            events,
+            selected_schedule_window,
+            schedule_mode_active=schedule_mode_active,
+        )
+        plot_preview_tracks: list[dict[str, Any]] = []
+        for preview_track in preview_tracks:
+            clipped_track, clipped_events, clipped_schedule_window = _plot_payload_for_mode(
+                preview_track.get("track"),
+                preview_track.get("events", {}),
+                preview_track.get("schedule_window"),
+                schedule_mode_active=schedule_mode_active,
+            )
+            plot_preview_tracks.append(
+                {
+                    **preview_track,
+                    "track": clipped_track,
+                    "events": clipped_events,
+                    "schedule_window": clipped_schedule_window,
+                }
+            )
+
         highlight_for_area = summary_highlight_id if summary_highlight_id else target_id
         unobstructed_area_tracks = [
             {
@@ -1182,109 +1768,84 @@ def render_detail_panel(
                 "color": selected_color,
                 "line_width": selected_line_width,
                 "emission_lines_display": emission_details_display,
-                "track": track,
+                "schedule_window": plot_selected_schedule_window,
+                "track": plot_track,
             },
             *[
                 {
                     **preview_track,
                     "is_selected": str(preview_track.get("primary_id", "")).strip() == highlight_for_area,
                 }
-                for preview_track in preview_tracks
+                for preview_track in plot_preview_tracks
             ],
         ]
-        path_col, area_col = st.columns([1, 1], gap="small")
-        with path_col:
-            st.plotly_chart(
-                path_figure,
-                use_container_width=True,
-                key="detail_path_plot",
+
+        with plots_container:
+            path_style = st.segmented_control(
+                "Target Paths Style",
+                options=["Line", "Radial"],
+                default="Line",
+                key="path_style_preference",
             )
-        with area_col:
-            st.plotly_chart(
-                build_unobstructed_altitude_area_plot(
-                    unobstructed_area_tracks,
+            if path_style == "Radial":
+                dome_view = st.toggle("Dome View", value=True, key="dome_view_preference")
+                path_figure = build_path_plot_radial(
+                    track=plot_track,
+                    events=plot_events,
+                    obstructions=obstructions,
+                    dome_view=dome_view,
+                    selected_label=selected_label,
+                    selected_emissions=emission_details_display,
+                    selected_color=selected_color,
+                    selected_line_width=selected_line_width,
+                    selected_schedule_window=plot_selected_schedule_window,
                     use_12_hour=use_12_hour,
-                    temperature_by_hour=temperatures,
-                    weather_by_hour=weather_by_hour,
-                    temperature_unit=temperature_unit,
+                    overlay_tracks=plot_preview_tracks,
                     mount_choice=plot_mount_choice,
                     moon_track=moon_track,
                     moon_phase_key=moon_phase_key,
                     eclipse_visibility=lunar_eclipse_visibility,
-                ),
-                use_container_width=True,
-                key="detail_unobstructed_area_plot",
-            )
-
-        local_now = datetime.now(tzinfo)
-        show_remaining_column = window_start <= local_now <= window_end
-        summary_col, tips_col = st.columns([3, 1], gap="medium")
-        with summary_col:
-            render_sky_position_summary_table(
-                summary_rows,
-                prefs,
-                use_12_hour=use_12_hour,
-                preview_list_id=active_preview_list_id,
-                preview_list_name=active_preview_list_name,
-                allow_list_membership_toggle=(not preview_list_is_system),
-                show_remaining=show_remaining_column,
-                now_local=pd.Timestamp(local_now),
-            )
-        with tips_col:
-            summary_ids = {
-                str(row.get("primary_id", "")).strip()
-                for row in summary_rows
-                if str(row.get("primary_id", "")).strip()
-            }
-            tips_focus_id = target_id
-            summary_highlight_id = str(st.session_state.get("sky_summary_highlight_primary_id", "")).strip()
-            if summary_highlight_id and summary_highlight_id in summary_ids:
-                tips_focus_id = summary_highlight_id
-
-            tips_track_by_id: dict[str, pd.DataFrame | None] = {target_id: track}
-            for preview_track_payload in preview_tracks:
-                preview_track_id = str(preview_track_payload.get("primary_id", "")).strip()
-                if not preview_track_id:
-                    continue
-                preview_track_df = preview_track_payload.get("track")
-                tips_track_by_id[preview_track_id] = (
-                    preview_track_df if isinstance(preview_track_df, pd.DataFrame) else None
+                )
+            else:
+                path_figure = build_path_plot(
+                    track=plot_track,
+                    events=plot_events,
+                    obstructions=obstructions,
+                    selected_label=selected_label,
+                    selected_emissions=emission_details_display,
+                    selected_color=selected_color,
+                    selected_line_width=selected_line_width,
+                    selected_schedule_window=plot_selected_schedule_window,
+                    use_12_hour=use_12_hour,
+                    overlay_tracks=plot_preview_tracks,
+                    mount_choice=plot_mount_choice,
+                    moon_track=moon_track,
+                    moon_phase_key=moon_phase_key,
+                    eclipse_visibility=lunar_eclipse_visibility,
                 )
 
-            tips_data_by_id: dict[str, pd.Series | dict[str, Any] | None] = {target_id: selected}
-            for _, preview_target in preview_targets.iterrows():
-                preview_target_id = str(preview_target.get("primary_id", "")).strip()
-                if preview_target_id:
-                    tips_data_by_id[preview_target_id] = preview_target
-
-            tips_label_by_id: dict[str, str] = {}
-            for row in summary_rows:
-                row_id = str(row.get("primary_id", "")).strip()
-                if not row_id:
-                    continue
-                row_label = str(row.get("target", "")).strip()
-                if row_label:
-                    tips_label_by_id[row_id] = row_label
-            tips_label_by_id.setdefault(target_id, selected_label)
-
-            tips_focus_label = tips_label_by_id.get(tips_focus_id, target_id)
-            tips_focus_data = tips_data_by_id.get(tips_focus_id)
-            tips_focus_track = tips_track_by_id.get(tips_focus_id)
-
-            with st.container(border=True):
-                render_target_tips_panel(
-                    tips_focus_id,
-                    tips_focus_label,
-                    tips_focus_data,
-                    tips_focus_track,
-                    summary_rows,
-                    nightly_weather_alert_emojis,
-                    hourly_weather_rows,
-                    temperature_unit=temperature_unit,
-                    use_12_hour=use_12_hour,
-                    local_now=local_now,
-                    window_start=window_start,
-                    window_end=window_end,
+            path_col, area_col = st.columns([1, 1], gap="small")
+            with path_col:
+                st.plotly_chart(
+                    path_figure,
+                    use_container_width=True,
+                    key="detail_path_plot",
+                )
+            with area_col:
+                st.plotly_chart(
+                    build_unobstructed_altitude_area_plot(
+                        unobstructed_area_tracks,
+                        use_12_hour=use_12_hour,
+                        temperature_by_hour=temperatures,
+                        weather_by_hour=weather_by_hour,
+                        temperature_unit=temperature_unit,
+                        mount_choice=plot_mount_choice,
+                        moon_track=moon_track,
+                        moon_phase_key=moon_phase_key,
+                        eclipse_visibility=lunar_eclipse_visibility,
+                    ),
+                    use_container_width=True,
+                    key="detail_unobstructed_area_plot",
                 )
 
     if (

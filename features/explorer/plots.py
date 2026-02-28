@@ -556,6 +556,106 @@ def visible_track_segments(track: pd.DataFrame) -> list[pd.DataFrame]:
     return segments
 
 
+def _track_start_timestamp(track: pd.DataFrame | None) -> pd.Timestamp | None:
+    if not isinstance(track, pd.DataFrame) or track.empty:
+        return None
+    times = pd.to_datetime(track.get("time_local"), errors="coerce")
+    if not isinstance(times, pd.Series):
+        return None
+    valid_times = times.dropna()
+    if valid_times.empty:
+        return None
+    return pd.Timestamp(valid_times.iloc[0])
+
+
+def _build_sequence_numbers(start_entries: list[tuple[str, pd.Timestamp | None]]) -> dict[str, int]:
+    normalized_entries: list[tuple[str, pd.Timestamp, int]] = []
+    for index, (entry_key, entry_start) in enumerate(start_entries):
+        if entry_start is None:
+            continue
+        try:
+            normalized_entries.append((str(entry_key), pd.Timestamp(entry_start), index))
+        except Exception:
+            continue
+    normalized_entries.sort(key=lambda item: (item[1], item[2]))
+    return {entry_key: sequence_idx + 1 for sequence_idx, (entry_key, _entry_start, _entry_index) in enumerate(normalized_entries)}
+
+
+def _first_cartesian_track_point(track: pd.DataFrame | None) -> tuple[float, float] | None:
+    if not isinstance(track, pd.DataFrame) or track.empty:
+        return None
+    azimuth = pd.to_numeric(track.get("az"), errors="coerce")
+    altitude = pd.to_numeric(track.get("alt"), errors="coerce")
+    if not isinstance(azimuth, pd.Series) or not isinstance(altitude, pd.Series):
+        return None
+    valid_mask = azimuth.notna() & altitude.notna()
+    if not bool(valid_mask.any()):
+        return None
+    first_index = valid_mask[valid_mask].index[0]
+    return float(azimuth.loc[first_index]), float(altitude.loc[first_index])
+
+
+def _first_radial_track_point(track: pd.DataFrame | None, *, dome_view: bool) -> tuple[float, float] | None:
+    point = _first_cartesian_track_point(track)
+    if point is None:
+        return None
+    azimuth_value, altitude_value = point
+    clipped_altitude = max(0.0, min(90.0, altitude_value))
+    radial_value = (90.0 - clipped_altitude) if dome_view else clipped_altitude
+    return float(azimuth_value), float(radial_value)
+
+
+def _coerce_schedule_window(value: Any) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        start_ts = pd.Timestamp(value[0])
+        end_ts = pd.Timestamp(value[1])
+    except Exception:
+        return None
+    if pd.isna(start_ts) or pd.isna(end_ts) or end_ts <= start_ts:
+        return None
+    return pd.Timestamp(start_ts), pd.Timestamp(end_ts)
+
+
+def _clip_track_to_schedule_window(
+    track: pd.DataFrame,
+    schedule_window: tuple[pd.Timestamp, pd.Timestamp] | None,
+) -> pd.DataFrame:
+    if not isinstance(track, pd.DataFrame) or track.empty:
+        return pd.DataFrame()
+    normalized_window = _coerce_schedule_window(schedule_window)
+    if normalized_window is None or "time_local" not in track.columns:
+        return pd.DataFrame()
+
+    schedule_start, schedule_end = normalized_window
+    times = pd.to_datetime(track["time_local"], errors="coerce")
+    if times.empty:
+        return pd.DataFrame()
+
+    tz_info = times.dt.tz
+    if tz_info is not None:
+        if schedule_start.tzinfo is None:
+            schedule_start = schedule_start.tz_localize(tz_info)
+        else:
+            schedule_start = schedule_start.tz_convert(tz_info)
+        if schedule_end.tzinfo is None:
+            schedule_end = schedule_end.tz_localize(tz_info)
+        else:
+            schedule_end = schedule_end.tz_convert(tz_info)
+    else:
+        if schedule_start.tzinfo is not None:
+            schedule_start = schedule_start.tz_localize(None)
+        if schedule_end.tzinfo is not None:
+            schedule_end = schedule_end.tz_localize(None)
+
+    mask = times.notna() & (times >= schedule_start) & (times <= schedule_end)
+    if not bool(mask.any()):
+        return pd.DataFrame(columns=track.columns)
+    clipped = track.loc[mask].copy()
+    return clipped if not clipped.empty else pd.DataFrame(columns=track.columns)
+
+
 def distribute_non_overlapping_values(
     values: list[float],
     *,
@@ -680,8 +780,12 @@ def build_unobstructed_altitude_area_plot(
     non_selected_tracks = [target for target in target_tracks if not bool(target.get("is_selected", False))]
     selected_tracks = [target for target in target_tracks if bool(target.get("is_selected", False))]
     ordered_tracks = [*non_selected_tracks, *selected_tracks]
+    sequence_entries: list[tuple[str, pd.Timestamp | None]] = []
+    for target_index, target_track in enumerate(ordered_tracks):
+        sequence_entries.append((f"target:{target_index}", _track_start_timestamp(target_track.get("track"))))
+    sequence_numbers = _build_sequence_numbers(sequence_entries)
 
-    for target_track in ordered_tracks:
+    for target_index, target_track in enumerate(ordered_tracks):
         track = target_track.get("track")
         if not isinstance(track, pd.DataFrame) or track.empty:
             continue
@@ -697,9 +801,13 @@ def build_unobstructed_altitude_area_plot(
             if is_selected
             else max(1.6, min(base_line_width, path_line_width_overlay_default))
         )
+        schedule_line_width = max(target_line_width * 2.0, target_line_width)
         target_line_color = target_color if is_selected else _muted_rgba_from_hex(target_color, alpha=0.68)
         target_emissions = str(target_track.get("emission_lines_display") or "").strip()
         target_fill_color = _muted_rgba_from_hex(target_color, alpha=(0.30 if is_selected else 0.10))
+        target_schedule_window = _coerce_schedule_window(target_track.get("schedule_window"))
+        target_sequence_number = sequence_numbers.get(f"target:{target_index}")
+        target_sequence_drawn = False
 
         for segment in visible_track_segments(track):
             segment_times = pd.to_datetime(segment["time_local"], errors="coerce")
@@ -743,6 +851,64 @@ def build_unobstructed_altitude_area_plot(
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
+            if (target_sequence_number is not None) and (not target_sequence_drawn):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[pd.Timestamp(segment_times.iloc[0])],
+                        y=[float(altitude_values[0])],
+                        mode="markers+text",
+                        text=[str(target_sequence_number)],
+                        textposition="middle center",
+                        textfont={"size": 10, "color": "#FFFFFF"},
+                        marker={
+                            "size": 16,
+                            "color": target_line_color,
+                            "line": {"width": 1, "color": "#FFFFFF"},
+                        },
+                        showlegend=False,
+                        hoverinfo="skip",
+                    )
+                )
+                target_sequence_drawn = True
+            if target_schedule_window is not None:
+                scheduled_segment = _clip_track_to_schedule_window(segment, target_schedule_window)
+                if not scheduled_segment.empty:
+                    scheduled_times = pd.to_datetime(scheduled_segment["time_local"], errors="coerce")
+                    scheduled_altitudes = pd.to_numeric(scheduled_segment["alt"], errors="coerce")
+                    scheduled_mask = scheduled_times.notna() & scheduled_altitudes.notna()
+                    if bool(scheduled_mask.any()):
+                        scheduled_times = scheduled_times.loc[scheduled_mask]
+                        scheduled_altitudes = scheduled_altitudes.loc[scheduled_mask].astype(float)
+                        scheduled_alt_values = scheduled_altitudes.to_numpy(dtype=float)
+                        scheduled_alt_mask = np.isfinite(scheduled_alt_values)
+                        if bool(scheduled_alt_mask.any()):
+                            scheduled_times = scheduled_times.iloc[scheduled_alt_mask]
+                            scheduled_alt_values = scheduled_alt_values[scheduled_alt_mask]
+                            if not scheduled_times.empty and scheduled_alt_values.size > 0:
+                                scheduled_hover_times = np.asarray(
+                                    [
+                                        format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+                                        for value in scheduled_times.tolist()
+                                    ],
+                                    dtype=object,
+                                )
+                                scheduled_hover = build_path_hovertext(
+                                    target_label,
+                                    target_emissions,
+                                    scheduled_hover_times,
+                                    scheduled_alt_values,
+                                )
+                                fig.add_trace(
+                                    go.Scatter(
+                                        x=scheduled_times,
+                                        y=scheduled_alt_values,
+                                        mode="lines",
+                                        showlegend=False,
+                                        line={"width": schedule_line_width, "color": target_line_color},
+                                        hovertext=scheduled_hover,
+                                        hovertemplate="%{hovertext}<extra></extra>",
+                                    )
+                                )
             plotted_any = True
 
     moon_culmination_point = _moon_culmination_point(moon_track) if isinstance(moon_track, pd.DataFrame) else None
@@ -1005,6 +1171,7 @@ def build_path_plot(
     selected_color: str,
     selected_line_width: float,
     use_12_hour: bool,
+    selected_schedule_window: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     overlay_tracks: list[dict[str, Any]] | None = None,
     mount_choice: str = "none",
     moon_track: pd.DataFrame | None = None,
@@ -1016,6 +1183,12 @@ def build_path_plot(
     path_line_width_overlay_default = float(_ui_name("PATH_LINE_WIDTH_OVERLAY_DEFAULT"))
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
+    sequence_marker_entries: list[dict[str, Any]] = []
+    sequence_entries: list[tuple[str, pd.Timestamp | None]] = [("selected", _track_start_timestamp(track))]
+    if overlay_tracks:
+        for overlay_index, target_track in enumerate(overlay_tracks):
+            sequence_entries.append((f"overlay:{overlay_index}", _track_start_timestamp(target_track.get("track"))))
+    sequence_numbers = _build_sequence_numbers(sequence_entries)
 
     for azimuth in (90.0, 180.0, 270.0):
         fig.add_shape(
@@ -1142,6 +1315,42 @@ def build_path_plot(
             hovertemplate="%{hovertext}<extra></extra>",
         )
     )
+    selected_sequence_number = sequence_numbers.get("selected")
+    selected_sequence_point = _first_cartesian_track_point(track)
+    if selected_sequence_number is not None and selected_sequence_point is not None:
+        sequence_marker_entries.append(
+            {
+                "x": float(selected_sequence_point[0]),
+                "y": float(selected_sequence_point[1]),
+                "label": str(selected_sequence_number),
+                "color": selected_color,
+                "size": 24,
+            }
+        )
+    selected_schedule_segment = _clip_track_to_schedule_window(track, selected_schedule_window)
+    if not selected_schedule_segment.empty:
+        schedule_path_x, schedule_path_y, schedule_path_times = split_path_on_az_wrap(
+            selected_schedule_segment,
+            use_12_hour=use_12_hour,
+        )
+        if schedule_path_x.size > 0:
+            selected_schedule_hover = build_path_hovertext(
+                selected_label,
+                selected_emissions,
+                schedule_path_times,
+                schedule_path_y,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=schedule_path_x,
+                    y=schedule_path_y,
+                    mode="lines",
+                    showlegend=False,
+                    line={"width": max(selected_line_width * 2.0, selected_line_width), "color": selected_color},
+                    hovertext=selected_schedule_hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                )
+            )
     rise_segment, set_segment = endpoint_marker_segments_cartesian(track, events)
     if set_segment is None:
         set_segment = terminal_segment_from_path_arrays(path_x, path_y)
@@ -1204,7 +1413,7 @@ def build_path_plot(
         )
 
     if overlay_tracks:
-        for target_track in overlay_tracks:
+        for overlay_index, target_track in enumerate(overlay_tracks):
             overlay_track = target_track.get("track")
             if not isinstance(overlay_track, pd.DataFrame) or overlay_track.empty:
                 continue
@@ -1215,6 +1424,7 @@ def build_path_plot(
             target_label = str(target_track.get("label", "List target"))
             target_color = str(target_track.get("color", "#22c55e"))
             target_line_width = float(target_track.get("line_width", path_line_width_overlay_default))
+            target_schedule_window = _coerce_schedule_window(target_track.get("schedule_window"))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
             overlay_hover = build_path_hovertext(target_label, target_emissions, path_times, path_y)
             fig.add_trace(
@@ -1229,6 +1439,45 @@ def build_path_plot(
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
+            overlay_sequence_number = sequence_numbers.get(f"overlay:{overlay_index}")
+            overlay_sequence_point = _first_cartesian_track_point(overlay_track)
+            if overlay_sequence_number is not None and overlay_sequence_point is not None:
+                sequence_marker_entries.append(
+                    {
+                        "x": float(overlay_sequence_point[0]),
+                        "y": float(overlay_sequence_point[1]),
+                        "label": str(overlay_sequence_number),
+                        "color": target_color,
+                        "size": 20,
+                    }
+                )
+            overlay_schedule_segment = _clip_track_to_schedule_window(overlay_track, target_schedule_window)
+            if not overlay_schedule_segment.empty:
+                schedule_overlay_x, schedule_overlay_y, schedule_overlay_times = split_path_on_az_wrap(
+                    overlay_schedule_segment,
+                    use_12_hour=use_12_hour,
+                )
+                if schedule_overlay_x.size > 0:
+                    overlay_schedule_hover = build_path_hovertext(
+                        target_label,
+                        target_emissions,
+                        schedule_overlay_times,
+                        schedule_overlay_y,
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=schedule_overlay_x,
+                            y=schedule_overlay_y,
+                            mode="lines",
+                            showlegend=False,
+                            line={
+                                "width": max(target_line_width * 2.0, target_line_width),
+                                "color": target_color,
+                            },
+                            hovertext=overlay_schedule_hover,
+                            hovertemplate="%{hovertext}<extra></extra>",
+                        )
+                    )
             overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_cartesian(
                 overlay_track, target_track.get("events", {})
             )
@@ -1309,6 +1558,24 @@ def build_path_plot(
                 hovertemplate="%{hovertext}<extra></extra>",
             )
         )
+    for marker_entry in sequence_marker_entries:
+        fig.add_trace(
+            go.Scatter(
+                x=[float(marker_entry["x"])],
+                y=[float(marker_entry["y"])],
+                mode="markers+text",
+                text=[str(marker_entry["label"])],
+                textposition="middle center",
+                textfont={"size": 14, "color": "#FFFFFF"},
+                marker={
+                    "size": int(marker_entry.get("size", 20)),
+                    "color": str(marker_entry.get("color", "#111827")),
+                    "line": {"width": 2, "color": "#FFFFFF"},
+                },
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
 
     fig.update_layout(
         title="Target Paths",
@@ -1342,6 +1609,7 @@ def build_path_plot_radial(
     selected_color: str,
     selected_line_width: float,
     use_12_hour: bool,
+    selected_schedule_window: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     overlay_tracks: list[dict[str, Any]] | None = None,
     mount_choice: str = "none",
     moon_track: pd.DataFrame | None = None,
@@ -1353,6 +1621,11 @@ def build_path_plot_radial(
     path_line_width_overlay_default = float(_ui_name("PATH_LINE_WIDTH_OVERLAY_DEFAULT"))
     theme_colors = resolve_plot_theme_colors()
     fig = go.Figure()
+    sequence_entries: list[tuple[str, pd.Timestamp | None]] = [("selected", _track_start_timestamp(track))]
+    if overlay_tracks:
+        for overlay_index, target_track in enumerate(overlay_tracks):
+            sequence_entries.append((f"overlay:{overlay_index}", _track_start_timestamp(target_track.get("track"))))
+    sequence_numbers = _build_sequence_numbers(sequence_entries)
 
     obstruction_theta, obstruction_alt = obstruction_step_profile(obstructions)
 
@@ -1547,6 +1820,74 @@ def build_path_plot_radial(
             hovertemplate="%{hovertext}<extra></extra>",
         )
     )
+    selected_sequence_number = sequence_numbers.get("selected")
+    selected_sequence_point = _first_radial_track_point(track, dome_view=dome_view)
+    if selected_sequence_number is not None and selected_sequence_point is not None:
+        fig.add_trace(
+            go.Scatterpolar(
+                theta=[selected_sequence_point[0]],
+                r=[selected_sequence_point[1]],
+                mode="markers+text",
+                text=[str(selected_sequence_number)],
+                textposition="middle center",
+                textfont={"size": 10, "color": "#FFFFFF"},
+                marker={
+                    "size": 16,
+                    "color": selected_color,
+                    "line": {"width": 1, "color": "#FFFFFF"},
+                },
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+    selected_schedule_segment = _clip_track_to_schedule_window(track, selected_schedule_window)
+    if not selected_schedule_segment.empty:
+        schedule_altitudes = pd.to_numeric(selected_schedule_segment.get("alt"), errors="coerce")
+        schedule_azimuths = pd.to_numeric(selected_schedule_segment.get("az"), errors="coerce")
+        schedule_times = pd.to_datetime(selected_schedule_segment.get("time_local"), errors="coerce")
+        schedule_mask = schedule_altitudes.notna() & schedule_azimuths.notna() & schedule_times.notna()
+        if bool(schedule_mask.any()):
+            schedule_altitudes = schedule_altitudes.loc[schedule_mask].astype(float)
+            schedule_azimuths = schedule_azimuths.loc[schedule_mask].astype(float)
+            schedule_times = schedule_times.loc[schedule_mask]
+            schedule_alt_values = schedule_altitudes.to_numpy(dtype=float)
+            schedule_az_values = schedule_azimuths.to_numpy(dtype=float)
+            schedule_finite_mask = np.isfinite(schedule_alt_values) & np.isfinite(schedule_az_values)
+            if bool(schedule_finite_mask.any()):
+                schedule_alt_values = schedule_alt_values[schedule_finite_mask]
+                schedule_az_values = schedule_az_values[schedule_finite_mask]
+                schedule_times = schedule_times.iloc[schedule_finite_mask]
+                if schedule_alt_values.size > 0 and not schedule_times.empty:
+                    schedule_alt_series = pd.Series(schedule_alt_values)
+                    schedule_r = (
+                        (90.0 - schedule_alt_series.clip(lower=0.0, upper=90.0))
+                        if dome_view
+                        else schedule_alt_series.clip(lower=0.0, upper=90.0)
+                    )
+                    schedule_time_values = np.asarray(
+                        [
+                            format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+                            for value in schedule_times.tolist()
+                        ],
+                        dtype=object,
+                    )
+                    selected_schedule_hover = build_path_hovertext(
+                        selected_label,
+                        selected_emissions,
+                        schedule_time_values,
+                        schedule_alt_values,
+                    )
+                    fig.add_trace(
+                        go.Scatterpolar(
+                            theta=schedule_az_values,
+                            r=schedule_r,
+                            mode="lines",
+                            showlegend=False,
+                            line={"width": max(selected_line_width * 2.0, selected_line_width), "color": selected_color},
+                            hovertext=selected_schedule_hover,
+                            hovertemplate="%{hovertext}<extra></extra>",
+                        )
+                    )
     radial_values = np.asarray(track_r, dtype=float)
     rise_segment, set_segment = endpoint_marker_segments_radial(track, events, radial_values)
     if set_segment is None:
@@ -1613,7 +1954,7 @@ def build_path_plot_radial(
         )
 
     if overlay_tracks:
-        for target_track in overlay_tracks:
+        for overlay_index, target_track in enumerate(overlay_tracks):
             overlay_track = target_track.get("track")
             if not isinstance(overlay_track, pd.DataFrame) or overlay_track.empty:
                 continue
@@ -1621,6 +1962,7 @@ def build_path_plot_radial(
             target_label = str(target_track.get("label", "List target"))
             target_color = str(target_track.get("color", "#22c55e"))
             target_line_width = float(target_track.get("line_width", path_line_width_overlay_default))
+            target_schedule_window = _coerce_schedule_window(target_track.get("schedule_window"))
             target_emissions = str(target_track.get("emission_lines_display") or "").strip()
             overlay_alt = overlay_track["alt"].clip(lower=0.0, upper=90.0)
             overlay_r = (90.0 - overlay_alt) if dome_view else overlay_alt
@@ -1649,6 +1991,83 @@ def build_path_plot_radial(
                     hovertemplate="%{hovertext}<extra></extra>",
                 )
             )
+            overlay_sequence_number = sequence_numbers.get(f"overlay:{overlay_index}")
+            overlay_sequence_point = _first_radial_track_point(overlay_track, dome_view=dome_view)
+            if overlay_sequence_number is not None and overlay_sequence_point is not None:
+                fig.add_trace(
+                    go.Scatterpolar(
+                        theta=[overlay_sequence_point[0]],
+                        r=[overlay_sequence_point[1]],
+                        mode="markers+text",
+                        text=[str(overlay_sequence_number)],
+                        textposition="middle center",
+                        textfont={"size": 10, "color": "#FFFFFF"},
+                        marker={
+                            "size": 14,
+                            "color": target_color,
+                            "line": {"width": 1, "color": "#FFFFFF"},
+                        },
+                        showlegend=False,
+                        hoverinfo="skip",
+                    )
+                )
+            overlay_schedule_segment = _clip_track_to_schedule_window(overlay_track, target_schedule_window)
+            if not overlay_schedule_segment.empty:
+                schedule_overlay_altitudes = pd.to_numeric(overlay_schedule_segment.get("alt"), errors="coerce")
+                schedule_overlay_azimuths = pd.to_numeric(overlay_schedule_segment.get("az"), errors="coerce")
+                schedule_overlay_times = pd.to_datetime(overlay_schedule_segment.get("time_local"), errors="coerce")
+                schedule_overlay_mask = (
+                    schedule_overlay_altitudes.notna()
+                    & schedule_overlay_azimuths.notna()
+                    & schedule_overlay_times.notna()
+                )
+                if bool(schedule_overlay_mask.any()):
+                    schedule_overlay_altitudes = schedule_overlay_altitudes.loc[schedule_overlay_mask].astype(float)
+                    schedule_overlay_azimuths = schedule_overlay_azimuths.loc[schedule_overlay_mask].astype(float)
+                    schedule_overlay_times = schedule_overlay_times.loc[schedule_overlay_mask]
+                    schedule_overlay_alt_values = schedule_overlay_altitudes.to_numpy(dtype=float)
+                    schedule_overlay_az_values = schedule_overlay_azimuths.to_numpy(dtype=float)
+                    schedule_overlay_finite_mask = (
+                        np.isfinite(schedule_overlay_alt_values) & np.isfinite(schedule_overlay_az_values)
+                    )
+                    if bool(schedule_overlay_finite_mask.any()):
+                        schedule_overlay_alt_values = schedule_overlay_alt_values[schedule_overlay_finite_mask]
+                        schedule_overlay_az_values = schedule_overlay_az_values[schedule_overlay_finite_mask]
+                        schedule_overlay_times = schedule_overlay_times.iloc[schedule_overlay_finite_mask]
+                        if schedule_overlay_alt_values.size > 0 and not schedule_overlay_times.empty:
+                            schedule_overlay_alt_series = pd.Series(schedule_overlay_alt_values)
+                            schedule_overlay_r = (
+                                (90.0 - schedule_overlay_alt_series.clip(lower=0.0, upper=90.0))
+                                if dome_view
+                                else schedule_overlay_alt_series.clip(lower=0.0, upper=90.0)
+                            )
+                            schedule_overlay_time_values = np.asarray(
+                                [
+                                    format_display_time(pd.Timestamp(value), use_12_hour=use_12_hour)
+                                    for value in schedule_overlay_times.tolist()
+                                ],
+                                dtype=object,
+                            )
+                            overlay_schedule_hover = build_path_hovertext(
+                                target_label,
+                                target_emissions,
+                                schedule_overlay_time_values,
+                                schedule_overlay_alt_values,
+                            )
+                            fig.add_trace(
+                                go.Scatterpolar(
+                                    theta=schedule_overlay_az_values,
+                                    r=schedule_overlay_r,
+                                    mode="lines",
+                                    showlegend=False,
+                                    line={
+                                        "width": max(target_line_width * 2.0, target_line_width),
+                                        "color": target_color,
+                                    },
+                                    hovertext=overlay_schedule_hover,
+                                    hovertemplate="%{hovertext}<extra></extra>",
+                                )
+                            )
             overlay_radial_values = np.asarray(overlay_r, dtype=float)
             overlay_rise_segment, overlay_set_segment = endpoint_marker_segments_radial(
                 overlay_track, target_track.get("events", {}), overlay_radial_values

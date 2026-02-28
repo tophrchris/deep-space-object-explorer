@@ -346,6 +346,13 @@ def delete_list(prefs: dict[str, Any], list_id: str) -> bool:
     list_meta.pop(cleaned_list_id, None)
     list_order = [value for value in list_order if str(value).strip() != cleaned_list_id]
 
+    # Remove any persisted per-list target schedules for this list.
+    list_target_schedules = prefs.get("list_target_schedules")
+    if isinstance(list_target_schedules, Mapping) and cleaned_list_id in list_target_schedules:
+        next_schedules = dict(list_target_schedules)
+        next_schedules.pop(cleaned_list_id, None)
+        prefs["list_target_schedules"] = next_schedules
+
     updated = dict(normalized)
     updated["lists"] = lists_payload
     updated["list_meta"] = list_meta
